@@ -9,7 +9,7 @@ import {
   AlertCircle,
   Clipboard,
   Loader2,
-  Paperclip,
+  Link2,
   RefreshCw,
   Send,
   SquareStop,
@@ -975,7 +975,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           {attachmentUploading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            <Paperclip className="h-3.5 w-3.5" />
+            <Link2 className="h-3.5 w-3.5" />
           )}
         </Button>
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (

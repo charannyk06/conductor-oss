@@ -1,9 +1,9 @@
-# Paperclip-Inspired Adapter Improvements for Conductor OSS
+# Adapter Improvement Spec for Conductor OSS
 
 ## Context
-Paperclip (github.com/paperclipai/paperclip) has a mature OpenClaw gateway adapter that demonstrates patterns Conductor OSS should adopt. This spec covers implementing those patterns across all Conductor agent adapters, with emphasis on the OpenClaw gateway executor.
+This spec captures adapter patterns Conductor OSS should adopt across its agent integrations, with emphasis on the OpenClaw gateway executor.
 
-## Reference: Paperclip's OpenClaw Gateway Adapter
+## Reference Adapter Patterns
 - Location: `packages/adapters/openclaw-gateway/` (1434 lines, 46.7KB execute.ts)
 - Key patterns: structured wake text, atomic issue checkout, auto-pairing, cost extraction, log redaction, idempotency keys, session key strategies
 
@@ -99,7 +99,7 @@ Idempotency key: <session_id>:<attempt>
 Add atomic card checkout:
 - `POST /api/cards/{card_id}/checkout` with `expected_statuses: ["ready", "dispatching"]`
 - Returns 409 if status doesn't match (prevents double-dispatch)
-- `PATCH /api/cards/{card_id}` with status + comment (like Paperclip's PATCH /api/issues/{id})
+- `PATCH /api/cards/{card_id}` with status + comment, matching the atomic checkout flow described here
 
 ---
 
@@ -171,7 +171,7 @@ pub struct TaskMeta {
 ### 4.1 Session Routing
 **File:** `crates/conductor-executors/src/agents/openclaw.rs`
 
-Implement the same three strategies Paperclip uses:
+Implement the same three session-key strategies described here:
 - `issue` -> `conductor:card:{card_id}` (resume same session for same card)
 - `run` -> `conductor:run:{run_id}` (new session per dispatch)
 - `fixed` -> configured key
@@ -186,7 +186,7 @@ Already partially implemented in `resolve_session_key()`. Enhance:
 ## Phase 5: TS Dispatcher Adapter Alignment
 **File:** `packages/openclaw-dispatcher/src/adapter.ts`
 
-The TS adapter already has good patterns. Align with Paperclip:
+The TS adapter already has good patterns. Align with this shared adapter contract:
 - Add `ensureBinding()` auto-creation (already exists)
 - Add `streamFeed()` with SSE deltas (already exists)
 - Add `createTask()` / `updateTask()` / `handoffTask()` (already exists)

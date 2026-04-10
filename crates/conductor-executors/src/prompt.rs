@@ -150,7 +150,7 @@ pub fn build_prompt(config: &PromptBuildConfig) -> Result<Option<String>> {
     Ok(Some(sections.join("\n\n")))
 }
 
-/// Build structured dispatch context (Paperclip-style) for injection into agent prompts.
+/// Build structured dispatch context for injection into agent prompts.
 /// This gives the agent a clear checkout-execute-report workflow.
 pub fn build_dispatch_context(
     session_id: &str,

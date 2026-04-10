@@ -354,7 +354,7 @@ async fn dispatcher_preferences_route_persists_openclaw_runtime_settings() {
     let harness = TestHarness::new("dispatcher-openclaw-preferences-route-test", "ttyd").await;
     let app = build_app(harness.state.clone());
     let gateway_token = ["gateway", "-token-", "123"].concat();
-    let session_key = ["paperclip:", "issue", ":123"].concat();
+    let session_key = ["external:", "issue", ":123"].concat();
 
     let create_response = app
         .clone()
