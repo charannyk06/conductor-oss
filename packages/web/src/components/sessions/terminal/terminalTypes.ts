@@ -1,5 +1,8 @@
 /**
- * Interfaces and type aliases used by the ttyd session terminal.
+ * Interfaces and type aliases for the live session terminal.
+ *
+ * The supported dashboard implementation is the **ttyd iframe** (`SessionTerminal`),
+ * selected by `sessionTerminalRouting` (see `SESSION_TERMINAL_IMPLEMENTATION`).
  */
 
 import type { TerminalInsertRequest } from "../terminalInsert";

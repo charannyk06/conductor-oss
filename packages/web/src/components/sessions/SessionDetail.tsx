@@ -22,17 +22,18 @@ import { SessionOverview } from "./SessionOverview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 import type { TerminalInsertRequest } from "./terminalInsert";
 import { shouldAutoOpenPreviewTab } from "./sessionDetailBehavior";
+import {
+  loadSessionTerminalComponent,
+  SESSION_TERMINAL_IMPLEMENTATION,
+} from "./sessionTerminalRouting";
 
-const SessionTerminal = dynamic(
-  () => import("./SessionTerminal").then((mod) => mod.SessionTerminal),
-  {
-    loading: () => (
-      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
-        Loading terminal...
-      </div>
-    ),
-  },
-);
+const SessionTerminal = dynamic(loadSessionTerminalComponent, {
+  loading: () => (
+    <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+      Loading terminal...
+    </div>
+  ),
+});
 
 const SessionPreview = dynamic(
   () => import("./SessionPreview").then((mod) => mod.SessionPreview),
@@ -318,6 +319,7 @@ export function SessionDetail({
           ? "overflow-hidden bg-[#060404]"
           : "overflow-y-auto overscroll-contain lg:overflow-hidden"
       }`}
+      data-conductor-session-terminal={SESSION_TERMINAL_IMPLEMENTATION}
     >
       <Tabs
         key={sessionId}
