@@ -247,9 +247,14 @@ export function injectTtydResizeShim(html: string): string {
 
   var RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
   var pendingRaf = null;
+  var pendingBurstRaf = null;
   var burstTimers = [];
 
   function clearBurstTimers() {
+    if (pendingBurstRaf !== null) {
+      window.cancelAnimationFrame(pendingBurstRaf);
+      pendingBurstRaf = null;
+    }
     for (var i = 0; i < burstTimers.length; i++) {
       window.clearTimeout(burstTimers[i]);
     }
@@ -325,7 +330,10 @@ export function injectTtydResizeShim(html: string): string {
   function scheduleResizeBurst() {
     clearBurstTimers();
     if (typeof window.requestAnimationFrame === "function") {
-      window.requestAnimationFrame(dispatchResize);
+      pendingBurstRaf = window.requestAnimationFrame(function() {
+        pendingBurstRaf = null;
+        dispatchResize();
+      });
     } else {
       dispatchResize();
     }

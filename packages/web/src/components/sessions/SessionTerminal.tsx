@@ -521,20 +521,26 @@ function SessionTerminalView(props: SessionTerminalProps) {
     // When the terminal panel becomes visible again, silently refresh auth/cookie state
     // instead of showing a blocking reload path. This keeps reconnects feeling attached
     // to the same terminal surface.
+    let outerRaf = 0;
+    let innerRaf = 0;
     if (previous === false) {
       requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
       // Radix tabs keep inactive panels mounted (`forceMount`) with opacity/pointer-events
       // toggles; layout can settle after the first paint. Double-rAF matches the pattern
       // used by direct xterm hosts (e.g. Cabinet) so ttyd's FitAddon runs against the
       // final host box, not a transient zero/collapsed size.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
+      outerRaf = requestAnimationFrame(() => {
+        innerRaf = requestAnimationFrame(() => {
           lastPostedTerminalHostSizeRef.current = null;
           scheduleTerminalResizeBurst();
           maybePostTerminalResize();
         });
       });
     }
+    return () => {
+      cancelAnimationFrame(outerRaf);
+      cancelAnimationFrame(innerRaf);
+    };
   }, [
     maybePostTerminalResize,
     panelVisible,
