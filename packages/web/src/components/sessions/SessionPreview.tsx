@@ -866,8 +866,8 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   }, [status?.selectedElement?.selector]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
-      <div className="border-b border-[var(--vk-border)] px-3 py-3">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+      <div className="shrink-0 border-b border-[var(--vk-border)] px-3 py-3">
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-2">
@@ -1003,8 +1003,8 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)]">
-        <div className="flex min-h-0 flex-col border-b border-[var(--vk-border)] lg:border-b-0 lg:border-r">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)] lg:overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-[1.25] flex-col overflow-hidden border-b border-[var(--vk-border)] lg:flex-1 lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-2 text-[11px] text-[var(--vk-text-muted)]">
             <div className="min-w-0">
               <div className="truncate text-[var(--vk-text-normal)]">
@@ -1016,8 +1016,8 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             ) : null}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto bg-[#0f1012] p-3">
-            <div className="flex h-full min-h-[260px] items-center justify-center">
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#0f1012] p-3">
+            <div className="flex h-full min-h-[min(200px,45vh)] w-full items-center justify-center lg:min-h-[260px]">
               {loading ? (
                 <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -1087,7 +1087,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
         <Tabs
           value={previewInspectorTab}
           onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network")}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:min-h-0"
         >
           <div className="border-b border-[var(--vk-border)] px-2 py-2">
             <TabsList className="w-full justify-start border-0 bg-transparent p-0">

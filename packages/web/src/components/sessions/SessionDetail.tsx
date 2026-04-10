@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  GitCompare,
   Globe,
   LayoutDashboard,
   Puzzle,
@@ -46,6 +47,18 @@ const SessionPreview = dynamic(
   },
 );
 
+const SessionDiff = dynamic(
+  () => import("./SessionDiff").then((mod) => mod.SessionDiff),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading review…
+      </div>
+    ),
+    ssr: false,
+  },
+);
+
 const SessionSkills = dynamic(
   () => import("./SessionSkills").then((mod) => mod.SessionSkills),
   {
@@ -78,7 +91,7 @@ interface SessionDetailProps {
   onOpenSidebar?: () => void;
 }
 
-type SessionTab = "overview" | "dispatcher" | "terminal" | "preview" | "skills";
+type SessionTab = "overview" | "diff" | "dispatcher" | "terminal" | "preview" | "skills";
 
 const STANDARD_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0";
 // Keep terminal-like surfaces painted with opacity only. `visibility:hidden` was causing browser-level
@@ -90,7 +103,7 @@ function resolveSessionTab(
   session: Pick<DashboardSession, "metadata"> | null | undefined,
 ): SessionTab {
   const defaultTab = getDefaultSessionPrimaryTab(session);
-  if (value === "overview" || value === "preview" || value === "skills") {
+  if (value === "overview" || value === "preview" || value === "skills" || value === "diff") {
     return value;
   }
   if (value === "dispatcher") {
@@ -278,6 +291,7 @@ export function SessionDetail({
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
+  const reviewTabActive = active && activeTab === "diff";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
   const compactDisplaySessionId = useMemo(
     () => getDisplaySessionId(sessionId).slice(0, 7),
@@ -289,6 +303,10 @@ export function SessionDetail({
       <TabsTrigger value="overview" className={tabTriggerClass}>
         <LayoutDashboard className="h-3.5 w-3.5" />
         Overview
+      </TabsTrigger>
+      <TabsTrigger value="diff" className={tabTriggerClass}>
+        <GitCompare className="h-3.5 w-3.5" />
+        Review
       </TabsTrigger>
       {dispatcherSession ? (
         <TabsTrigger value="dispatcher" className={tabTriggerClass}>
@@ -372,6 +390,13 @@ export function SessionDetail({
             <SessionOverview session={session} sessionId={sessionId} active={active && activeTab === "overview"} />
           </TabsContent>
 
+          <TabsContent
+            value="diff"
+            className={`${STANDARD_TAB_PANEL_CLASS_NAME} flex min-h-0 flex-col`}
+          >
+            <SessionDiff sessionId={sessionId} active={reviewTabActive} />
+          </TabsContent>
+
           {dispatcherSession ? (
             <TabsContent
               value="dispatcher"
@@ -410,7 +435,7 @@ export function SessionDetail({
           <TabsContent
             value="preview"
             forceMount
-            className={PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}
+            className={`${PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME} flex min-h-0 flex-col`}
           >
             <SessionPreview
               key={sessionId}
