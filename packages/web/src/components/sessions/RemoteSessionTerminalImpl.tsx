@@ -27,7 +27,9 @@ import {
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const CMD_OUTPUT = "0".charCodeAt(0);
 const CMD_RESIZE = "1".charCodeAt(0);
+const CMD_SET_WINDOW_TITLE = "2".charCodeAt(0);
 const RECONNECT_MAX_DELAY_MS = 4_000;
+const MAX_RECONNECT_ATTEMPTS = 10;
 type TerminalSyncMode = "resize" | "handshake";
 
 const TERMINAL_THEME = {
@@ -380,11 +382,15 @@ export function RemoteSessionTerminal({
     if (!expectsRelayTerminal) {
       return;
     }
+    if (retryAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      setError("Max reconnect attempts reached. Click the reload button to retry manually.");
+      return;
+    }
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
     }
     const delay = Math.min(RECONNECT_MAX_DELAY_MS, 500 * 2 ** retryAttemptRef.current);
-    retryAttemptRef.current = Math.min(retryAttemptRef.current + 1, 3);
+    retryAttemptRef.current += 1;
     reconnectTimerRef.current = window.setTimeout(() => {
       setConnectionTick((value) => value + 1);
     }, delay);
@@ -781,6 +787,11 @@ export function RemoteSessionTerminal({
                   }
                   setHasOutput(true);
                 }
+                break;
+              }
+              case CMD_SET_WINDOW_TITLE: {
+                // Server-set window title — currently ignored but handled
+                // to avoid falling through to default on legitimate frames.
                 break;
               }
               default:
