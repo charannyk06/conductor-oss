@@ -23,12 +23,11 @@ import {
   Send,
   TerminalSquare,
   Waypoints,
-  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { ScrollArea } from "@/components/ui/ScrollArea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { cn } from "@/lib/cn";
 import { selectPreviewAutoConnectCandidate } from "@/lib/previewAutoConnect";
 import type {
@@ -206,6 +205,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
   const [sendingTarget, setSendingTarget] = useState<PreviewSendTarget | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewInteractionMode>("navigate");
+  const [previewInspectorTab, setPreviewInspectorTab] = useState<"elements" | "console" | "network">("elements");
   const [selectionComposer, setSelectionComposer] = useState<SelectionComposerState | null>(null);
   const [urlInput, setUrlInput] = useState("");
   const [imageMetrics, setImageMetrics] = useState({
@@ -219,6 +219,19 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const mountedAtRef = useRef(Date.now());
+  const firstStatusLoadedAtRef = useRef<number | null>(null);
+  const firstConnectedAtRef = useRef<number | null>(null);
+  const lastConnectedAtRef = useRef<number | null>(null);
+  const statusLoadCountRef = useRef(0);
+  const statusLoadFailureCountRef = useRef(0);
+  const statusPollCountRef = useRef(0);
+  const commandCountRef = useRef(0);
+  const commandFailureCountRef = useRef(0);
+  const domLoadCountRef = useRef(0);
+  const domLoadFailureCountRef = useRef(0);
+  const autoConnectAttemptCountRef = useRef(0);
+  const screenshotLoadCountRef = useRef(0);
   const [pageVisible, setPageVisible] = useState(true);
   const shouldRunPreview = active && pageVisible;
   const autoConnectCandidate = selectPreviewAutoConnectCandidate(status?.candidateUrls ?? []);
@@ -234,34 +247,65 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     };
   }, []);
 
-  const loadStatus = useCallback(async () => {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
-      cache: "no-store",
-    });
-    const payload = await response.json().catch(() => null) as
-      | PreviewStatusResponse
-      | { error?: string }
-      | null;
+  useEffect(() => {
+    mountedAtRef.current = Date.now();
+    firstStatusLoadedAtRef.current = null;
+    firstConnectedAtRef.current = null;
+    lastConnectedAtRef.current = null;
+    statusLoadCountRef.current = 0;
+    statusLoadFailureCountRef.current = 0;
+    statusPollCountRef.current = 0;
+    commandCountRef.current = 0;
+    commandFailureCountRef.current = 0;
+    domLoadCountRef.current = 0;
+    domLoadFailureCountRef.current = 0;
+    autoConnectAttemptCountRef.current = 0;
+    screenshotLoadCountRef.current = 0;
+  }, [sessionId]);
 
-    if (!response.ok) {
-      throw new Error(payload && "error" in payload ? payload.error ?? "Failed to load preview state" : `Failed to load preview state: ${response.status}`);
+  const loadStatus = useCallback(async (reason: "initial" | "poll" | "manual" = "manual") => {
+    statusLoadCountRef.current += 1;
+    if (reason === "poll") {
+      statusPollCountRef.current += 1;
     }
 
-    setStatus(payload as PreviewStatusResponse);
-    setCommandError(null);
-    setUrlInput((current) => {
-      const nextStatus = payload as PreviewStatusResponse;
-      if (current.trim().length > 0 && current !== nextStatus.currentUrl) {
-        return current;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => null) as
+        | PreviewStatusResponse
+        | { error?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(payload && "error" in payload ? payload.error ?? "Failed to load preview state" : `Failed to load preview state: ${response.status}`);
       }
-      return nextStatus.currentUrl
-        ?? selectPreviewAutoConnectCandidate(nextStatus.candidateUrls)
-        ?? nextStatus.candidateUrls[0]
-        ?? current;
-    });
+
+      const now = Date.now();
+      if (firstStatusLoadedAtRef.current === null) {
+        firstStatusLoadedAtRef.current = now;
+      }
+      setStatus(payload as PreviewStatusResponse);
+      setCommandError(null);
+      setUrlInput((current) => {
+        const nextStatus = payload as PreviewStatusResponse;
+        if (current.trim().length > 0 && current !== nextStatus.currentUrl) {
+          return current;
+        }
+        return nextStatus.currentUrl
+          ?? selectPreviewAutoConnectCandidate(nextStatus.candidateUrls)
+          ?? nextStatus.candidateUrls[0]
+          ?? current;
+      });
+    } catch (error) {
+      statusLoadFailureCountRef.current += 1;
+      throw error;
+    }
   }, [sessionId]);
 
   const runCommand = useCallback(async (command: PreviewCommandRequest): Promise<PreviewStatusResponse> => {
+    commandCountRef.current += 1;
     setBusy(true);
     setCommandError(null);
     try {
@@ -287,6 +331,9 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       const nextStatus = payload as PreviewStatusResponse;
       setStatus(nextStatus);
       return nextStatus;
+    } catch (error) {
+      commandFailureCountRef.current += 1;
+      throw error;
     } finally {
       setBusy(false);
     }
@@ -310,6 +357,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       return;
     }
 
+    domLoadCountRef.current += 1;
     setDomLoading(true);
     try {
       const searchParams = new URLSearchParams();
@@ -327,6 +375,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       }
       setDomNodes((payload as PreviewDomResponse).nodes);
     } catch (error) {
+      domLoadFailureCountRef.current += 1;
       setCommandError(error instanceof Error ? error.message : "Failed to inspect DOM");
       setDomNodes([]);
     } finally {
@@ -343,7 +392,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
 
     (async () => {
       try {
-        await loadStatus();
+        await loadStatus("initial");
       } catch (error) {
         if (mounted) {
           setCommandError(error instanceof Error ? error.message : "Failed to load preview");
@@ -358,7 +407,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
     const pollInterval = isMobile ? STATUS_POLL_INTERVAL_MS * 2 : STATUS_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      void loadStatus().catch((error: unknown) => {
+      void loadStatus("poll").catch((error: unknown) => {
         if (mounted) {
           setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
         }
@@ -372,8 +421,11 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   }, [loadStatus, shouldRunPreview]);
 
   useEffect(() => {
-    if (!shouldRunPreview || !status?.connected) {
+    if (!status?.connected) {
       setDomNodes([]);
+      return;
+    }
+    if (!shouldRunPreview) {
       return;
     }
     void loadDom(status.activeFrameId);
@@ -401,14 +453,69 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     }
 
     autoConnectRef.current = { candidate, attemptedAt: now };
+    autoConnectAttemptCountRef.current += 1;
     void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     });
   }, [autoConnectCandidate, runCommand, shouldRunPreview, status?.connected]);
 
   useEffect(() => {
+    if (status?.connected) {
+      const now = Date.now();
+      lastConnectedAtRef.current = now;
+      if (firstConnectedAtRef.current === null) {
+        firstConnectedAtRef.current = now;
+      }
+    }
     onConnectionChange?.(Boolean(shouldRunPreview && status?.connected && status?.screenshotKey));
   }, [onConnectionChange, shouldRunPreview, status?.connected, status?.screenshotKey]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+
+    window.__conductorSessionPreviewDebug = {
+      sessionId,
+      getState: () => ({
+        sessionId,
+        active,
+        pageVisible,
+        shouldRunPreview,
+        connected: Boolean(status?.connected),
+        screenshotReady: Boolean(status?.screenshotKey),
+        previewMode,
+        inspectorTab: previewInspectorTab,
+        domNodes: domNodes.length,
+        metrics: {
+          mountedAt: new Date(mountedAtRef.current).toISOString(),
+          mountedAgeMs: Date.now() - mountedAtRef.current,
+          firstStatusLoadLatencyMs: firstStatusLoadedAtRef.current === null
+            ? null
+            : firstStatusLoadedAtRef.current - mountedAtRef.current,
+          firstConnectedLatencyMs: firstConnectedAtRef.current === null
+            ? null
+            : firstConnectedAtRef.current - mountedAtRef.current,
+          lastConnectedAt: lastConnectedAtRef.current === null
+            ? null
+            : new Date(lastConnectedAtRef.current).toISOString(),
+          statusLoadCount: statusLoadCountRef.current,
+          statusLoadFailureCount: statusLoadFailureCountRef.current,
+          statusPollCount: statusPollCountRef.current,
+          commandCount: commandCountRef.current,
+          commandFailureCount: commandFailureCountRef.current,
+          domLoadCount: domLoadCountRef.current,
+          domLoadFailureCount: domLoadFailureCountRef.current,
+          autoConnectAttemptCount: autoConnectAttemptCountRef.current,
+          screenshotLoadCount: screenshotLoadCountRef.current,
+        },
+      }),
+    };
+
+    return () => {
+      if (window.__conductorSessionPreviewDebug?.sessionId === sessionId) {
+        delete window.__conductorSessionPreviewDebug;
+      }
+    };
+  }, [active, domNodes.length, pageVisible, previewInspectorTab, previewMode, sessionId, shouldRunPreview, status?.connected, status?.screenshotKey]);
 
   const screenshotUrl = useMemo(() => (
     status?.connected
@@ -467,6 +574,9 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
 
   const handlePreviewModeChange = useCallback((mode: PreviewInteractionMode) => {
     setPreviewMode(mode);
+    if (mode === "inspect") {
+      setPreviewInspectorTab("elements");
+    }
     setSelectionComposer(null);
     setSendError(null);
     setSendSuccess(null);
@@ -756,103 +866,75 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   }, [status?.selectedElement?.selector]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 overflow-auto">
-      <Card>
-        <CardHeader className="flex flex-col items-start gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-2">
-            <Globe className="h-4 w-4 text-[var(--vk-text-muted)]" />
-            <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Dev preview browser</span>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+      <div className="border-b border-[var(--vk-border)] px-3 py-3">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2">
+              <Globe className="h-4 w-4 text-[var(--vk-text-muted)]" />
+              <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Preview browser</span>
+            </div>
             {status?.connected
               ? <Badge variant="success">connected</Badge>
               : <Badge variant="outline">idle</Badge>}
             {activeFrame
               ? <Badge variant="outline">{activeFrame.isMain ? "main frame" : "nested frame"}</Badge>
               : null}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void loadStatus().catch((error: unknown) => {
-                setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
-              })}
-              disabled={loading || busy}
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void runCommand({ command: "reload" }).catch((error: unknown) => {
-                setCommandError(error instanceof Error ? error.message : "Failed to reload preview");
-              })}
-              disabled={!status?.connected || busy}
-            >
-              <Waypoints className="h-3.5 w-3.5" />
-              Reload page
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              value={urlInput}
-              onChange={(event) => setUrlInput(event.target.value)}
-              placeholder={preferredUrlInputCandidate ?? "http://127.0.0.1:3000"}
-              className="h-9 min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-            />
-            <Button
-              type="button"
-              variant="primary"
-              onClick={() => void handleConnect()}
-              disabled={busy || !urlInput.trim()}
-            >
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MousePointerClick className="h-4 w-4" />}
-              Connect
-            </Button>
+            {status?.title
+              ? <Badge variant="outline">{truncate(status.title, 40)}</Badge>
+              : null}
+            {selectionComposer?.pending
+              ? <Badge variant="warning">selecting element…</Badge>
+              : null}
           </div>
 
-          {status?.candidateUrls.length ? (
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3">
+              <Globe className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+              <input
+                value={urlInput}
+                onChange={(event) => setUrlInput(event.target.value)}
+                placeholder={preferredUrlInputCandidate ?? "http://127.0.0.1:3000"}
+                className="h-10 min-w-0 flex-1 bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+              />
+            </div>
             <div className="flex flex-wrap items-center gap-2">
-              {status.candidateUrls.map((candidate) => (
-                <button
-                  key={candidate}
-                  type="button"
-                  className="inline-flex max-w-full items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2 py-1 text-left text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-                  onClick={() => {
-                    setUrlInput(candidate);
-                    void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
-                      setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
-                    });
-                  }}
-                >
-                  <Globe className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{candidate}</span>
-                </button>
-              ))}
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => void handleConnect()}
+                disabled={busy || !urlInput.trim()}
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MousePointerClick className="h-4 w-4" />}
+                Connect
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void loadStatus("manual").catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
+                })}
+                disabled={loading || busy}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
+                Refresh
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void runCommand({ command: "reload" }).catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to reload preview");
+                })}
+                disabled={!status?.connected || busy}
+              >
+                <Waypoints className="h-3.5 w-3.5" />
+                Reload
+              </Button>
             </div>
-          ) : null}
-
-          {commandError || status?.lastError ? (
-            <div className="flex items-start gap-2 rounded-[4px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{commandError ?? status?.lastError}</span>
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <Card className="min-h-0 shrink-0 overflow-hidden">
-        <CardHeader className="flex flex-col items-start gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-2">
-            <Eye className="h-4 w-4 text-[var(--vk-text-muted)]" />
-            <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Preview</span>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-1">
+
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-1">
               <Button
                 type="button"
                 size="sm"
@@ -872,293 +954,332 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 Inspect
               </Button>
             </div>
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--vk-text-muted)]">
-              <Badge variant="outline">{status?.title ? truncate(status.title, 40) : "Untitled page"}</Badge>
-              <Badge variant="outline">
-                {previewMode === "navigate"
-                  ? "navigate mode: clicks interact with the page"
-                  : canSelectByPoint
-                    ? "inspect mode: click once to select, double-click to queue for terminal input"
-                    : "inspect mode: use DOM list for this frame"}
-              </Badge>
+            <div className="text-[11px] text-[var(--vk-text-muted)]">
+              {previewMode === "navigate"
+                ? "Navigate mode sends clicks and typing into the running app."
+                : canSelectByPoint
+                  ? "Inspect mode lets you click once to inspect, double-click to queue for terminal input."
+                  : "Inspect mode is limited to the frame DOM list for nested frames."}
             </div>
           </div>
-        </CardHeader>
-        <CardContent className="min-h-0">
-          <div className="flex h-[56vh] min-h-[200px] max-h-[620px] items-center justify-center overflow-auto rounded-[6px] border border-[var(--vk-border)] bg-[#111] p-2 sm:h-[72vh] sm:min-h-[360px] sm:max-h-[760px] sm:p-3">
-            {loading ? (
-              <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading preview…
-              </div>
-            ) : screenshotUrl ? (
-              <div
-                ref={previewSurfaceRef}
-                tabIndex={status?.connected ? 0 : -1}
-                onKeyDown={handlePreviewKeyDown}
-                onPaste={handlePreviewPaste}
-                className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[6px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#111]"
-              >
-                <img
-                  ref={imageRef}
-                  src={screenshotUrl}
-                  alt="Session preview"
-                  className={cn(
-                    "max-h-full max-w-full rounded-[4px] object-contain shadow-[0_18px_36px_rgba(0,0,0,0.28)]",
-                    previewMode === "navigate"
-                      ? "cursor-pointer"
-                      : canSelectByPoint
-                        ? "cursor-crosshair"
-                        : "cursor-default",
-                  )}
-                  onClick={(event) => void handleImageClick(event)}
-                  onDoubleClick={(event) => void handleImageDoubleClick(event)}
-                  onLoad={(event) => {
-                    const target = event.currentTarget;
-                    setImageMetrics({
-                      naturalWidth: target.naturalWidth,
-                      naturalHeight: target.naturalHeight,
-                      renderedWidth: target.clientWidth,
-                      renderedHeight: target.clientHeight,
-                    });
-                  }}
-                />
-                {previewMode === "inspect" && selectionOverlayStyle ? (
-                  <div
-                    className="pointer-events-none absolute border-2 border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_18%,transparent)] shadow-[0_0_0_1px_rgba(0,0,0,0.5)]"
-                    style={selectionOverlayStyle}
-                  />
-                ) : null}
-                {previewMode === "inspect" && selectionComposer && selectionComposerStyle ? (
-                  <div
-                    className="pointer-events-auto absolute z-20 flex flex-col overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_94%,black_6%)] shadow-[0_20px_44px_rgba(0,0,0,0.42)] backdrop-blur"
-                    style={selectionComposerStyle}
-                  >
-                    <div className="flex items-start justify-between gap-3 border-b border-[var(--vk-border)] px-3 py-3">
-                      <div className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">Terminal input</div>
-                        <div className="mt-1 text-[13px] font-medium text-[var(--vk-text-normal)]">
-                          {selectionComposer.pending ? "Selecting element…" : "Queue selection for the terminal"}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void handleCopySelector()}
-                          disabled={selectionComposer.pending || !status?.selectedElement}
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setSelectionComposer(null)}
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
-                      {selectionComposer.pending ? (
-                        <div className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Capturing the selected element from the preview…
-                        </div>
-                      ) : status?.selectedElement ? (
-                        <>
-                          <div className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-[12px] text-[var(--vk-text-normal)]">{status.selectedElement.tag}</span>
-                              {status.selectedElement.role ? <Badge variant="outline">{status.selectedElement.role}</Badge> : null}
-                            </div>
-                            <div className="mt-2 text-[12px] text-[var(--vk-text-normal)]">
-                              {truncate(status.selectedElement.name || status.selectedElement.text || "Selected element", 140)}
-                            </div>
-                            <div className="mt-2 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
-                              {status.selectedElement.selector}
-                            </div>
-                          </div>
-                          <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
-                            Double-click the element in the preview to queue it immediately, or use the button below. The text is inserted into terminal input instead of being sent to the agent, so you can add more context before submitting.
-                          </div>
-                          {sendError ? (
-                            <div className="text-[12px] text-[var(--vk-red)]">{sendError}</div>
-                          ) : null}
-                          <Button
-                            type="button"
-                            variant="primary"
-                            className="w-full"
-                            onClick={() => void handleSendContext("selection")}
-                            disabled={sending || !status.selectedElement}
-                          >
-                            {sendingTarget === "selection" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                            Queue for terminal input
-                          </Button>
-                        </>
-                      ) : (
-                        <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                          Single-click an element to inspect it here. Double-click to queue it for terminal input.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                Connect a local dev URL or explicit preview URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and queue browser context into terminal input.
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
 
-      {sendSuccess ? (
-        <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-green)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-green)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-green)]">
-          {sendSuccess}
-        </div>
-      ) : null}
-      {!selectionComposer && sendError ? (
-        <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
-          {sendError}
-        </div>
-      ) : null}
-
-      <div className="grid gap-2">
-        <Card className="min-h-0">
-          <CardHeader className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Boxes className="h-4 w-4 text-[var(--vk-text-muted)]" />
-              <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Frames and DOM</span>
-              <Badge variant="outline">{previewMode === "inspect" ? "inspect" : "read-only in navigate mode"}</Badge>
-            </div>
-            <Button
-              type="button"
-              variant={interactiveOnly ? "primary" : "outline"}
-              size="sm"
-              onClick={() => setInteractiveOnly((current) => !current)}
-            >
-              {interactiveOnly ? "Interactive only" : "All nodes"}
-            </Button>
-          </CardHeader>
-          <CardContent className="grid gap-2 xl:grid-cols-[220px_minmax(0,1fr)]">
-            <div className="space-y-2">
-              {status?.frames.map((frame) => (
+          {!status?.connected && status?.candidateUrls.length ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {status.candidateUrls.map((candidate) => (
                 <button
-                  key={frame.id}
+                  key={candidate}
                   type="button"
+                  className="inline-flex max-w-full items-center gap-1 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-1.5 text-left text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
                   onClick={() => {
-                    void runCommand({ command: "selectFrame", frameId: frame.id }).catch((error: unknown) => {
-                      setCommandError(error instanceof Error ? error.message : "Failed to select frame");
+                    setUrlInput(candidate);
+                    void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
+                      setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
                     });
                   }}
-                  className={cn(
-                    "flex w-full flex-col items-start gap-1 rounded-[4px] border px-2 py-2 text-left transition-colors",
-                    status.activeFrameId === frame.id
-                      ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_10%,transparent)]"
-                      : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] hover:bg-[var(--vk-bg-hover)]",
-                  )}
                 >
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">{frame.isMain ? "main" : "frame"}</Badge>
-                    <span className="truncate text-[12px] text-[var(--vk-text-normal)]">{frame.name}</span>
-                  </div>
-                  <span className="w-full truncate text-[11px] text-[var(--vk-text-muted)]">
-                    {frame.url || "about:blank"}
-                  </span>
+                  <Globe className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{candidate}</span>
                 </button>
               ))}
             </div>
+          ) : null}
 
-            <div className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
-              <ScrollArea className="h-[200px] sm:h-[300px] xl:h-[360px]">
-                <div className="space-y-1 p-2">
-                  {previewMode === "navigate" ? (
-                    <div className="rounded-[4px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-[11px] text-[var(--vk-text-muted)]">
-                      Switch to Inspect mode to pick DOM nodes. Single-click selects a node. Double-click queues it for terminal input.
+          {commandError || status?.lastError ? (
+            <div className="flex items-start gap-2 rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{commandError ?? status?.lastError}</span>
+            </div>
+          ) : null}
+          {sendSuccess ? (
+            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-green)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-green)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-green)]">
+              {sendSuccess}
+            </div>
+          ) : null}
+          {sendError ? (
+            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+              {sendError}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)]">
+        <div className="flex min-h-0 flex-col border-b border-[var(--vk-border)] lg:border-b-0 lg:border-r">
+          <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-2 text-[11px] text-[var(--vk-text-muted)]">
+            <div className="min-w-0">
+              <div className="truncate text-[var(--vk-text-normal)]">
+                {status?.currentUrl ?? preferredUrlInputCandidate ?? "No active preview URL yet"}
+              </div>
+            </div>
+            {status?.connected ? (
+              <Badge variant="outline">{status?.frames.length ?? 0} frame{(status?.frames.length ?? 0) === 1 ? "" : "s"}</Badge>
+            ) : null}
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-auto bg-[#0f1012] p-3">
+            <div className="flex h-full min-h-[260px] items-center justify-center">
+              {loading ? (
+                <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading preview…
+                </div>
+              ) : screenshotUrl ? (
+                <div
+                  ref={previewSurfaceRef}
+                  tabIndex={status?.connected ? 0 : -1}
+                  onKeyDown={handlePreviewKeyDown}
+                  onPaste={handlePreviewPaste}
+                  className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[10px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1012]"
+                >
+                  <img
+                    ref={imageRef}
+                    src={screenshotUrl}
+                    alt="Session preview"
+                    className={cn(
+                      "max-h-full max-w-full rounded-[8px] object-contain shadow-[0_18px_36px_rgba(0,0,0,0.28)]",
+                      previewMode === "navigate"
+                        ? "cursor-pointer"
+                        : canSelectByPoint
+                          ? "cursor-crosshair"
+                          : "cursor-default",
+                    )}
+                    onClick={(event) => void handleImageClick(event)}
+                    onDoubleClick={(event) => void handleImageDoubleClick(event)}
+                    onLoad={(event) => {
+                      screenshotLoadCountRef.current += 1;
+                      const target = event.currentTarget;
+                      setImageMetrics({
+                        naturalWidth: target.naturalWidth,
+                        naturalHeight: target.naturalHeight,
+                        renderedWidth: target.clientWidth,
+                        renderedHeight: target.clientHeight,
+                      });
+                    }}
+                  />
+                  {previewMode === "inspect" && selectionOverlayStyle ? (
+                    <div
+                      className="pointer-events-none absolute border-2 border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_18%,transparent)] shadow-[0_0_0_1px_rgba(0,0,0,0.5)]"
+                      style={selectionOverlayStyle}
+                    />
+                  ) : null}
+                  {previewMode === "inspect" && selectionComposer && selectionComposerStyle ? (
+                    <div
+                      className="pointer-events-none absolute z-20 rounded-[10px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_94%,black_6%)] px-3 py-2 text-[11px] text-[var(--vk-text-normal)] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
+                      style={selectionComposerStyle}
+                    >
+                      {selectionComposer.pending
+                        ? "Selecting element…"
+                        : status?.selectedElement
+                          ? `${status.selectedElement.tag} · ${truncate(status.selectedElement.selector, 120)}`
+                          : "Selection ready"}
                     </div>
                   ) : null}
-                  {domLoading ? (
-                    <div className="flex items-center gap-2 px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Inspecting frame DOM…
-                    </div>
-                  ) : domNodes.length ? (
-                    domNodes.map((node, index) => (
-                      <button
-                        key={`${node.id ?? "node"}-${index}-${node.selector}-${node.tag}-${node.text}`}
-                        type="button"
-                        className={cn(
-                          "w-full rounded-[4px] border border-[transparent] px-2 py-2 text-left",
-                          previewMode === "inspect"
-                            ? "hover:border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
-                            : "cursor-not-allowed opacity-60",
-                        )}
-                        disabled={previewMode !== "inspect"}
-                        onClick={() => {
-                          setSelectionComposer(null);
-                          setSendError(null);
-                          setSendSuccess(null);
-                          void selectDomNode(node.selector, status?.activeFrameId)
-                            .catch((error: unknown) => {
-                              setCommandError(error instanceof Error ? error.message : "Failed to select DOM node");
-                            });
-                        }}
-                        onDoubleClick={() => {
-                          setSendError(null);
-                          setSendSuccess(null);
-                          void selectDomNode(node.selector, status?.activeFrameId)
-                            .then((nextStatus) => {
-                              if (!nextStatus.selectedElement) {
-                                throw new Error("Failed to resolve the selected DOM node");
-                              }
-                              queueContextInsert(buildSelectionInsert(nextStatus.selectedElement, nextStatus.currentUrl));
-                            })
-                            .catch((error: unknown) => {
-                              setCommandError(error instanceof Error ? error.message : "Failed to queue DOM node");
-                            });
-                        }}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-[12px] text-[var(--vk-text-normal)]">{node.tag}</span>
-                          {node.interactive ? <Badge variant="warning">interactive</Badge> : null}
-                          {node.role ? <Badge variant="outline">{node.role}</Badge> : null}
-                        </div>
-                        <div className="mt-1 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
-                          {node.selector}
-                        </div>
-                        {node.text ? (
-                          <div className="mt-1 text-[12px] text-[var(--vk-text-normal)]">
-                            {truncate(node.text, 180)}
-                          </div>
-                        ) : null}
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-2 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                      No DOM nodes to show for the current frame yet.
-                    </div>
-                  )}
                 </div>
-              </ScrollArea>
+              ) : (
+                <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
+                  Connect a local dev URL or explicit preview URL to start the preview browser. Navigate mode lets you interact with the running app. Inspect mode lets you capture UI context and queue it into terminal input.
+                </div>
+              )}
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
 
-        <div className="grid gap-2 lg:grid-cols-2">
-          <Card className="min-h-0">
-            <CardHeader className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <TerminalSquare className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Console</span>
+        <Tabs
+          value={previewInspectorTab}
+          onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network")}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          <div className="border-b border-[var(--vk-border)] px-2 py-2">
+            <TabsList className="w-full justify-start border-0 bg-transparent p-0">
+              <TabsTrigger value="elements">
+                <Boxes className="h-3.5 w-3.5" />
+                Elements
+              </TabsTrigger>
+              <TabsTrigger value="console">
+                <TerminalSquare className="h-3.5 w-3.5" />
+                Console
                 <Badge variant="outline">{status?.consoleLogs.length ?? 0}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="network">
+                <FileJson2 className="h-3.5 w-3.5" />
+                Network
+                <Badge variant="outline">{status?.networkLogs.length ?? 0}</Badge>
+              </TabsTrigger>
+            </TabsList>
+          </div>
+
+          <TabsContent value="elements" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="border-b border-[var(--vk-border)] px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Selected element</div>
+                  <div className="text-[11px] text-[var(--vk-text-muted)]">
+                    {previewMode === "inspect"
+                      ? "Single-click to inspect. Double-click to queue the element for terminal input."
+                      : "Switch to Inspect mode to capture element context from the preview."}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={interactiveOnly ? "primary" : "outline"}
+                    size="sm"
+                    onClick={() => setInteractiveOnly((current) => !current)}
+                  >
+                    {interactiveOnly ? "Interactive only" : "All nodes"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleCopySelector()}
+                    disabled={!status?.selectedElement}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    Copy selector
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    onClick={() => void handleSendContext("selection")}
+                    disabled={sending || !status?.selectedElement}
+                  >
+                    {sendingTarget === "selection" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    Queue for terminal
+                  </Button>
+                </div>
+              </div>
+
+              {status?.selectedElement ? (
+                <div className="mt-3 rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-[12px] text-[var(--vk-text-normal)]">{status.selectedElement.tag}</span>
+                    {status.selectedElement.role ? <Badge variant="outline">{status.selectedElement.role}</Badge> : null}
+                    {status.selectedElement.frameName ? <Badge variant="outline">{status.selectedElement.frameName}</Badge> : null}
+                  </div>
+                  <div className="mt-2 text-[12px] text-[var(--vk-text-normal)]">
+                    {truncate(status.selectedElement.name || status.selectedElement.text || "Selected element", 180)}
+                  </div>
+                  <div className="mt-2 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
+                    {status.selectedElement.selector}
+                  </div>
+                  {status.selectedElement.htmlPreview ? (
+                    <div className="mt-2 rounded-[6px] border border-dashed border-[var(--vk-border)] px-2.5 py-2 text-[11px] text-[var(--vk-text-muted)]">
+                      {truncate(status.selectedElement.htmlPreview, 260)}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="mt-3 rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                  No element selected yet.
+                </div>
+              )}
+
+              {status?.frames.length ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {status.frames.map((frame) => (
+                    <button
+                      key={frame.id}
+                      type="button"
+                      onClick={() => {
+                        void runCommand({ command: "selectFrame", frameId: frame.id }).catch((error: unknown) => {
+                          setCommandError(error instanceof Error ? error.message : "Failed to select frame");
+                        });
+                      }}
+                      className={cn(
+                        "inline-flex max-w-full items-center gap-2 rounded-[5px] border px-2.5 py-1.5 text-[11px]",
+                        status.activeFrameId === frame.id
+                          ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_10%,transparent)] text-[var(--vk-text-normal)]"
+                          : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]",
+                      )}
+                    >
+                      <Badge variant="outline">{frame.isMain ? "main" : "frame"}</Badge>
+                      <span className="truncate">{frame.name}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-1 p-3">
+                {domLoading ? (
+                  <div className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Inspecting frame DOM…
+                  </div>
+                ) : domNodes.length ? (
+                  domNodes.map((node, index) => (
+                    <button
+                      key={`${node.id ?? "node"}-${index}-${node.selector}-${node.tag}-${node.text}`}
+                      type="button"
+                      className={cn(
+                        "w-full rounded-[6px] border px-3 py-2.5 text-left transition-colors",
+                        previewMode === "inspect"
+                          ? "border-[var(--vk-border)] bg-[var(--vk-bg-main)] hover:bg-[var(--vk-bg-hover)]"
+                          : "cursor-not-allowed border-[var(--vk-border)] bg-[var(--vk-bg-main)] opacity-60",
+                      )}
+                      disabled={previewMode !== "inspect"}
+                      onClick={() => {
+                        setSelectionComposer(null);
+                        setSendError(null);
+                        setSendSuccess(null);
+                        void selectDomNode(node.selector, status?.activeFrameId)
+                          .catch((error: unknown) => {
+                            setCommandError(error instanceof Error ? error.message : "Failed to select DOM node");
+                          });
+                      }}
+                      onDoubleClick={() => {
+                        setSendError(null);
+                        setSendSuccess(null);
+                        void selectDomNode(node.selector, status?.activeFrameId)
+                          .then((nextStatus) => {
+                            if (!nextStatus.selectedElement) {
+                              throw new Error("Failed to resolve the selected DOM node");
+                            }
+                            queueContextInsert(buildSelectionInsert(nextStatus.selectedElement, nextStatus.currentUrl));
+                          })
+                          .catch((error: unknown) => {
+                            setCommandError(error instanceof Error ? error.message : "Failed to queue DOM node");
+                          });
+                      }}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-[12px] text-[var(--vk-text-normal)]">{node.tag}</span>
+                        {node.interactive ? <Badge variant="warning">interactive</Badge> : null}
+                        {node.role ? <Badge variant="outline">{node.role}</Badge> : null}
+                      </div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
+                        {node.selector}
+                      </div>
+                      {node.text ? (
+                        <div className="mt-1 text-[12px] text-[var(--vk-text-normal)]">
+                          {truncate(node.text, 180)}
+                        </div>
+                      ) : null}
+                    </button>
+                  ))
+                ) : (
+                  <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                    {previewMode === "inspect"
+                      ? "No DOM nodes to show for the current frame yet."
+                      : "Switch to Inspect mode to browse the current frame DOM."}
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="console" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Console output</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">Live browser console events from the preview worker.</div>
               </div>
               <Button
                 type="button"
-                variant="ghost"
+                variant="primary"
                 size="sm"
                 onClick={() => void handleSendContext("console")}
                 disabled={sending || !status?.consoleLogs.length}
@@ -1166,43 +1287,40 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 {sendingTarget === "console" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                 Queue for terminal
               </Button>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[180px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
-                <div className="space-y-1 p-2">
-                  {status?.consoleLogs.length ? status.consoleLogs.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="rounded-[3px] px-2 py-1.5 text-[11px] text-[var(--vk-text-normal)]"
-                    >
-                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
-                        <span>{entry.level}</span>
-                        <span>{formatTime(entry.timestamp)}</span>
-                      </div>
-                      <div className="mt-1 whitespace-pre-wrap break-all font-mono">
-                        {entry.message}
-                      </div>
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-1 p-3">
+                {status?.consoleLogs.length ? status.consoleLogs.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2.5 text-[11px] text-[var(--vk-text-normal)]"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
+                      <span>{entry.level}</span>
+                      <span>{formatTime(entry.timestamp)}</span>
                     </div>
-                  )) : (
-                    <div className="px-2 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                      Console output appears here once the page loads.
+                    <div className="mt-1 whitespace-pre-wrap break-all font-mono">
+                      {entry.message}
                     </div>
-                  )}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
+                  </div>
+                )) : (
+                  <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                    Console output appears here once the page loads.
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
 
-          <Card className="min-h-0">
-            <CardHeader className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <FileJson2 className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Network</span>
-                <Badge variant="outline">{status?.networkLogs.length ?? 0}</Badge>
+          <TabsContent value="network" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Network requests</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">Recent requests captured by the preview worker.</div>
               </div>
               <Button
                 type="button"
-                variant="ghost"
+                variant="primary"
                 size="sm"
                 onClick={() => void handleSendContext("network")}
                 disabled={sending || !status?.networkLogs.length}
@@ -1210,33 +1328,31 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 {sendingTarget === "network" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                 Queue for terminal
               </Button>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[180px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
-                <div className="space-y-1 p-2">
-                  {status?.networkLogs.length ? status.networkLogs.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="rounded-[3px] px-2 py-1.5 text-[11px] text-[var(--vk-text-normal)]"
-                    >
-                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
-                        <span>{entry.method ?? "GET"}</span>
-                        {typeof entry.status === "number" ? <span>{entry.status}</span> : null}
-                        {entry.resourceType ? <span>{entry.resourceType}</span> : null}
-                        <span>{formatTime(entry.timestamp)}</span>
-                      </div>
-                      <div className="mt-1 break-all font-mono">{entry.url ?? entry.message}</div>
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-1 p-3">
+                {status?.networkLogs.length ? status.networkLogs.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2.5 text-[11px] text-[var(--vk-text-normal)]"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
+                      <span>{entry.method ?? "GET"}</span>
+                      {typeof entry.status === "number" ? <span>{entry.status}</span> : null}
+                      {entry.resourceType ? <span>{entry.resourceType}</span> : null}
+                      <span>{formatTime(entry.timestamp)}</span>
                     </div>
-                  )) : (
-                    <div className="px-2 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                      Network requests appear here after the preview loads.
-                    </div>
-                  )}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
+                    <div className="mt-1 break-all font-mono">{entry.url ?? entry.message}</div>
+                  </div>
+                )) : (
+                  <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                    Network requests appear here after the preview loads.
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

@@ -32,12 +32,16 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
 
   assert.match(injected, /conductor-bridge-ttyd-relay-shim/);
   assert.match(injected, /RELAY_TTYD_WS_URL/);
+  assert.match(injected, /REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request'/);
+  assert.match(injected, /TOKEN_REQUEST_THROTTLE_MS = 1500/);
   assert.match(injected, /LOOPBACK_HOSTS/);
   assert.match(injected, /candidate\.hostname/);
   assert.match(injected, /candidate\.pathname === '\/'/);
   assert.match(injected, /candidate\.pathname === '\/ws'/);
   assert.match(injected, /candidate\.pathname\.endsWith\('\/ws'\)/);
   assert.match(injected, /normalizedUrl = RELAY_TTYD_WS_URL/);
+  assert.match(injected, /requestFreshRelay\('bridge-websocket-close'\)/);
+  assert.match(injected, /requestFreshRelay\('bridge-websocket-error'\)/);
   assert.ok(
     injected.indexOf("conductor-bridge-ttyd-relay-shim") < injected.indexOf("<script src=\"/refresh.js\">"),
     "relay shim should be injected before ttyd bootstrap scripts",

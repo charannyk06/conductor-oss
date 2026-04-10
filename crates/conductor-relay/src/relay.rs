@@ -89,11 +89,14 @@ struct DeviceRecord {
 
 #[derive(Debug)]
 struct TerminalSessionRecord {
+    terminal_id: String,
+    session_id: String,
     device_id: String,
     owner_user_id: String,
     browser: Option<TerminalConnectionRecord>,
     bridge: Option<TerminalConnectionRecord>,
     bridge_ready_waiters: Vec<oneshot::Sender<()>>,
+    browser_disconnected_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,10 @@ struct ProxiedPreviewResponse {
 }
 
 const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(not(test))]
+const TERMINAL_BROWSER_REATTACH_GRACE: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const TERMINAL_BROWSER_REATTACH_GRACE: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
 struct RateBucket {
@@ -1092,10 +1099,27 @@ impl RelayState {
         device_id: &str,
         session_id: &str,
     ) -> std::result::Result<String, (StatusCode, String)> {
-        let terminal_id = Uuid::new_v4().to_string();
-        let (bridge_ready_tx, bridge_ready_rx) = oneshot::channel();
+        let normalized_session_id = session_id.trim();
+        if normalized_session_id.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Session id is required.".to_string(),
+            ));
+        }
 
-        let start_message = {
+        enum TerminalSessionStart {
+            Reuse {
+                terminal_id: String,
+            },
+            StartNew {
+                terminal_id: String,
+                bridge_tx: mpsc::UnboundedSender<Message>,
+                payload: String,
+            },
+        }
+
+        let (bridge_ready_tx, bridge_ready_rx) = oneshot::channel();
+        let start = {
             let mut inner = self.inner.lock().await;
             let Some(device) = inner.devices.get(device_id) else {
                 return Err((StatusCode::NOT_FOUND, "Device not found.".to_string()));
@@ -1103,75 +1127,100 @@ impl RelayState {
             if device.owner_user_id != user_id {
                 return Err((StatusCode::FORBIDDEN, "Device access denied.".to_string()));
             }
-            if session_id.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Session id is required.".to_string(),
-                ));
+
+            if let Some(existing) = inner.terminal_sessions.values_mut().find(|session| {
+                session.owner_user_id == user_id
+                    && session.device_id == device_id
+                    && session.session_id == normalized_session_id
+                    && session.browser.is_none()
+            }) {
+                let terminal_id = existing.terminal_id.clone();
+                existing.browser_disconnected_at = None;
+                if existing.bridge.is_some() {
+                    let _ = bridge_ready_tx.send(());
+                } else {
+                    existing.bridge_ready_waiters.push(bridge_ready_tx);
+                }
+                TerminalSessionStart::Reuse { terminal_id }
+            } else {
+                let terminal_id = Uuid::new_v4().to_string();
+                let bridge_tx = inner
+                    .channels
+                    .get(device_id)
+                    .and_then(|channel| channel.bridge.as_ref().map(|record| record.tx.clone()))
+                    .ok_or((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Device is offline.".to_string(),
+                    ))?;
+
+                inner.terminal_sessions.insert(
+                    terminal_id.clone(),
+                    TerminalSessionRecord {
+                        terminal_id: terminal_id.clone(),
+                        session_id: normalized_session_id.to_string(),
+                        device_id: device_id.to_string(),
+                        owner_user_id: user_id.to_string(),
+                        browser: None,
+                        bridge: None,
+                        bridge_ready_waiters: vec![bridge_ready_tx],
+                        browser_disconnected_at: None,
+                    },
+                );
+
+                let payload = serde_json::to_string(&BrowserToBridgeMessage::TerminalProxyStart {
+                    terminal_id: terminal_id.clone(),
+                    session_id: normalized_session_id.to_string(),
+                })
+                .map_err(|err| (StatusCode::BAD_GATEWAY, err.to_string()))?;
+
+                TerminalSessionStart::StartNew {
+                    terminal_id,
+                    bridge_tx,
+                    payload,
+                }
             }
-
-            let bridge_tx = inner
-                .channels
-                .get(device_id)
-                .and_then(|channel| channel.bridge.as_ref().map(|record| record.tx.clone()))
-                .ok_or((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Device is offline.".to_string(),
-                ))?;
-
-            inner.terminal_sessions.insert(
-                terminal_id.clone(),
-                TerminalSessionRecord {
-                    device_id: device_id.to_string(),
-                    owner_user_id: user_id.to_string(),
-                    browser: None,
-                    bridge: None,
-                    bridge_ready_waiters: vec![bridge_ready_tx],
-                },
-            );
-
-            let payload = serde_json::to_string(&BrowserToBridgeMessage::TerminalProxyStart {
-                terminal_id: terminal_id.clone(),
-                session_id: session_id.trim().to_string(),
-            })
-            .map_err(|err| (StatusCode::BAD_GATEWAY, err.to_string()))?;
-
-            (bridge_tx, payload)
         };
 
-        let (bridge_tx, payload) = start_message;
-        if bridge_tx.send(Message::Text(payload.into())).is_err() {
-            let mut inner = self.inner.lock().await;
-            inner.terminal_sessions.remove(&terminal_id);
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Device disconnected before terminal could start.".to_string(),
-            ));
-        }
+        let terminal_id = match start {
+            TerminalSessionStart::Reuse { terminal_id } => terminal_id,
+            TerminalSessionStart::StartNew {
+                terminal_id,
+                bridge_tx,
+                payload,
+            } => {
+                if bridge_tx.send(Message::Text(payload.into())).is_err() {
+                    let mut inner = self.inner.lock().await;
+                    inner.terminal_sessions.remove(&terminal_id);
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Device disconnected before terminal could start.".to_string(),
+                    ));
+                }
+                terminal_id
+            }
+        };
 
         match tokio::time::timeout(TERMINAL_SESSION_READY_TIMEOUT, bridge_ready_rx).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => Ok(terminal_id),
             Ok(Err(_)) => {
                 let mut inner = self.inner.lock().await;
                 inner.terminal_sessions.remove(&terminal_id);
-                return Err((
+                Err((
                     StatusCode::BAD_GATEWAY,
                     "Device stopped attaching the relay terminal before it became ready."
                         .to_string(),
-                ));
+                ))
             }
             Err(_) => {
                 let mut inner = self.inner.lock().await;
                 inner.terminal_sessions.remove(&terminal_id);
-                return Err((
+                Err((
                     StatusCode::GATEWAY_TIMEOUT,
                     "Timed out waiting for the paired device relay terminal to become ready."
                         .to_string(),
-                ));
+                ))
             }
         }
-
-        Ok(terminal_id)
     }
 
     async fn authorize_terminal_session_browser(
@@ -1216,39 +1265,104 @@ impl RelayState {
         peer_kind: TerminalPeerKind,
         tx: mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        let session = inner
-            .terminal_sessions
-            .get_mut(terminal_id)
-            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-        let record = TerminalConnectionRecord { tx };
-        match peer_kind {
-            TerminalPeerKind::Browser => session.browser = Some(record),
-            TerminalPeerKind::Bridge => {
-                session.bridge = Some(record);
-                for waiter in session.bridge_ready_waiters.drain(..) {
-                    let _ = waiter.send(());
+        let replaced = {
+            let mut inner = self.inner.lock().await;
+            let session = inner
+                .terminal_sessions
+                .get_mut(terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let record = TerminalConnectionRecord { tx };
+            match peer_kind {
+                TerminalPeerKind::Browser => {
+                    session.browser_disconnected_at = None;
+                    session.browser.replace(record).map(|record| record.tx)
+                }
+                TerminalPeerKind::Bridge => {
+                    let replaced = session.bridge.replace(record).map(|record| record.tx);
+                    for waiter in session.bridge_ready_waiters.drain(..) {
+                        let _ = waiter.send(());
+                    }
+                    replaced
                 }
             }
+        };
+
+        if let Some(previous) = replaced {
+            let _ = previous.send(Message::Close(None));
         }
         Ok(())
     }
 
     async fn unregister_terminal_connection(&self, terminal_id: &str, peer_kind: TerminalPeerKind) {
+        let mut bridge_cleanup = None;
         let counterpart = {
             let mut inner = self.inner.lock().await;
-            let Some(session) = inner.terminal_sessions.remove(terminal_id) else {
+            let Some(session) = inner.terminal_sessions.get_mut(terminal_id) else {
                 return;
             };
 
             match peer_kind {
-                TerminalPeerKind::Browser => session.bridge.map(|record| record.tx),
-                TerminalPeerKind::Bridge => session.browser.map(|record| record.tx),
+                TerminalPeerKind::Browser => {
+                    session.browser = None;
+                    if session.bridge.is_some() {
+                        let disconnected_at = Instant::now();
+                        session.browser_disconnected_at = Some(disconnected_at);
+                        bridge_cleanup = Some(disconnected_at);
+                        None
+                    } else {
+                        inner.terminal_sessions.remove(terminal_id);
+                        None
+                    }
+                }
+                TerminalPeerKind::Bridge => {
+                    let session = inner
+                        .terminal_sessions
+                        .remove(terminal_id)
+                        .expect("session exists");
+                    session.browser.map(|record| record.tx)
+                }
             }
         };
 
+        if let Some(disconnected_at) = bridge_cleanup {
+            let state = self.clone();
+            let terminal_id = terminal_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(TERMINAL_BROWSER_REATTACH_GRACE).await;
+                state
+                    .cleanup_terminal_session_if_browser_absent(&terminal_id, disconnected_at)
+                    .await;
+            });
+        }
+
         if let Some(counterpart) = counterpart {
             let _ = counterpart.send(Message::Close(None));
+        }
+    }
+
+    async fn cleanup_terminal_session_if_browser_absent(
+        &self,
+        terminal_id: &str,
+        disconnected_at: Instant,
+    ) {
+        let bridge = {
+            let mut inner = self.inner.lock().await;
+            let Some(session) = inner.terminal_sessions.get(terminal_id) else {
+                return;
+            };
+            if session.browser.is_some() || session.browser_disconnected_at != Some(disconnected_at)
+            {
+                return;
+            }
+
+            inner
+                .terminal_sessions
+                .remove(terminal_id)
+                .and_then(|session| session.bridge.map(|record| record.tx))
+        };
+
+        if let Some(bridge) = bridge {
+            let _ = bridge.send(Message::Close(None));
         }
     }
 
@@ -2879,6 +2993,166 @@ mod tests {
             .expect("create task should finish")
             .expect("terminal should be created");
         assert_eq!(created_terminal_id, terminal_id);
+    }
+
+    #[tokio::test]
+    async fn create_terminal_session_reuses_existing_detached_terminal() {
+        let state = RelayState::default();
+        let (control_bridge_tx, mut control_bridge_rx) = mpsc::unbounded_channel::<Message>();
+        let (terminal_bridge_tx, _terminal_bridge_rx) = mpsc::unbounded_channel::<Message>();
+
+        {
+            let mut inner = state.inner.lock().await;
+            inner.devices.insert(
+                "device-123".to_string(),
+                DeviceRecord {
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    name: "Mac".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            );
+            inner.channels.insert(
+                "device-123".to_string(),
+                BridgeChannel {
+                    bridge: Some(ConnectionRecord {
+                        id: 1,
+                        user_id: "user@example.com".to_string(),
+                        tx: control_bridge_tx,
+                    }),
+                    browsers: HashMap::new(),
+                    last_status: None,
+                },
+            );
+            inner.terminal_sessions.insert(
+                "terminal-1".to_string(),
+                TerminalSessionRecord {
+                    terminal_id: "terminal-1".to_string(),
+                    session_id: "session-abc".to_string(),
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    browser: None,
+                    bridge: Some(TerminalConnectionRecord {
+                        tx: terminal_bridge_tx,
+                    }),
+                    bridge_ready_waiters: vec![],
+                    browser_disconnected_at: Some(Instant::now()),
+                },
+            );
+        }
+
+        let terminal_id = state
+            .create_terminal_session("user@example.com", "device-123", "session-abc")
+            .await
+            .expect("terminal should be reused");
+
+        assert_eq!(terminal_id, "terminal-1");
+        assert!(
+            control_bridge_rx.try_recv().is_err(),
+            "reuse should not start a new bridge proxy session"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_disconnect_keeps_bridge_alive_long_enough_to_reattach() {
+        let state = RelayState::default();
+        let (browser_tx, _browser_rx) = mpsc::unbounded_channel::<Message>();
+        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<Message>();
+
+        {
+            let mut inner = state.inner.lock().await;
+            inner.terminal_sessions.insert(
+                "terminal-1".to_string(),
+                TerminalSessionRecord {
+                    terminal_id: "terminal-1".to_string(),
+                    session_id: "session-abc".to_string(),
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    browser: Some(TerminalConnectionRecord { tx: browser_tx }),
+                    bridge: Some(TerminalConnectionRecord { tx: bridge_tx }),
+                    bridge_ready_waiters: vec![],
+                    browser_disconnected_at: None,
+                },
+            );
+        }
+
+        state
+            .unregister_terminal_connection("terminal-1", TerminalPeerKind::Browser)
+            .await;
+
+        let (replacement_browser_tx, _replacement_browser_rx) =
+            mpsc::unbounded_channel::<Message>();
+        state
+            .register_terminal_connection(
+                "terminal-1",
+                TerminalPeerKind::Browser,
+                replacement_browser_tx,
+            )
+            .await
+            .expect("browser should reattach");
+
+        tokio::time::sleep(TERMINAL_BROWSER_REATTACH_GRACE + Duration::from_millis(10)).await;
+
+        {
+            let inner = state.inner.lock().await;
+            let session = inner
+                .terminal_sessions
+                .get("terminal-1")
+                .expect("session should stay alive after browser reattach");
+            assert!(session.browser.is_some());
+            assert!(session.bridge.is_some());
+        }
+        assert!(
+            bridge_rx.try_recv().is_err(),
+            "bridge should stay open after reattach"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_disconnect_eventually_closes_bridge_if_not_reattached() {
+        let state = RelayState::default();
+        let (browser_tx, _browser_rx) = mpsc::unbounded_channel::<Message>();
+        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<Message>();
+
+        {
+            let mut inner = state.inner.lock().await;
+            inner.terminal_sessions.insert(
+                "terminal-1".to_string(),
+                TerminalSessionRecord {
+                    terminal_id: "terminal-1".to_string(),
+                    session_id: "session-abc".to_string(),
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    browser: Some(TerminalConnectionRecord { tx: browser_tx }),
+                    bridge: Some(TerminalConnectionRecord { tx: bridge_tx }),
+                    bridge_ready_waiters: vec![],
+                    browser_disconnected_at: None,
+                },
+            );
+        }
+
+        state
+            .unregister_terminal_connection("terminal-1", TerminalPeerKind::Browser)
+            .await;
+
+        tokio::time::sleep(TERMINAL_BROWSER_REATTACH_GRACE + Duration::from_millis(10)).await;
+
+        {
+            let inner = state.inner.lock().await;
+            assert!(
+                !inner.terminal_sessions.contains_key("terminal-1"),
+                "session should be cleaned up after grace period"
+            );
+        }
+
+        let close_message = bridge_rx
+            .recv()
+            .await
+            .expect("bridge should receive cleanup close");
+        assert!(matches!(close_message, Message::Close(_)));
     }
 }
 

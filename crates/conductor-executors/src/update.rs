@@ -399,8 +399,11 @@ mod tests {
 
     #[test]
     fn binary_exists_on_path_is_sane() {
-        // `sh` is available in all CI runners and developer environments.
-        assert!(binary_exists_on_path(&["sh"]));
+        // Use the current test binary path so this assertion stays stable even when other
+        // tests temporarily override PATH in parallel.
+        let current_exe = std::env::current_exe().expect("current test binary path");
+        let current_exe = current_exe.to_string_lossy().to_string();
+        assert!(binary_exists_on_path(&[current_exe.as_str()]));
         // Definitely fake name should not.
         assert!(!binary_exists_on_path(&[
             "conductor-this-does-not-exist-xyz"

@@ -43,98 +43,21 @@ import { isDispatcherFeedNearBottom } from "@/components/dispatcher/dispatcherFe
 import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
 import type { DashboardSession } from "@/lib/types";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
-
-type FeedEntryKind = "assistant" | "status" | "system" | "tool" | "user";
-
-type SessionFeedEntry = {
-  id: string;
-  kind: FeedEntryKind;
-  label: string;
-  text: string;
-  createdAt: string | null;
-  attachments: unknown[];
-  source: string;
-  streaming: boolean;
-  metadata: Record<string, unknown>;
-};
-
-type SessionParserState = {
-  kind: string;
-  message: string;
-  command: string | null;
-};
-
-type DispatcherFeedIntegration = {
-  projectId: string;
-  threadId: string;
-  bridgeId: string | null;
-  openclaw: {
-    threadId: string | null;
-    sessionId: string | null;
-  };
-  heartbeat: {
-    state: string | null;
-    nextAt: string | null;
-  };
-  memory: {
-    projectPath: string | null;
-    sessionPath: string | null;
-  };
-};
-
-type SessionFeedPayload = {
-  entries: SessionFeedEntry[];
-  totalEntries: number;
-  windowLimit: number;
-  truncated: boolean;
-  sessionStatus: string | null;
-  approvalState: string | null;
-  parserState: SessionParserState | null;
-  runtimeStatus: SessionRuntimeStatus | null;
-  source: string | null;
-  error: string | null;
-  integration: DispatcherFeedIntegration | null;
-};
-
-type FeedDeltaEvent =
-  | {
-      type: "append";
-      entries: SessionFeedEntry[];
-      totalEntries: number;
-      windowLimit: number;
-      truncated: boolean;
-      sessionStatus: string | null;
-      approvalState: string | null;
-      parserState: SessionParserState | null;
-      runtimeStatus: SessionRuntimeStatus | null;
-      source: string | null;
-      error: string | null;
-      integration: DispatcherFeedIntegration | null;
-    }
-  | {
-      type: "patch";
-      entryId: string;
-      entry: SessionFeedEntry | null;
-      textDelta: string | null;
-      totalEntries: number;
-      windowLimit: number;
-      truncated: boolean;
-      sessionStatus: string | null;
-      approvalState: string | null;
-      parserState: SessionParserState | null;
-      runtimeStatus: SessionRuntimeStatus | null;
-      source: string | null;
-      error: string | null;
-      integration: DispatcherFeedIntegration | null;
-    }
-  | {
-      type: "replace";
-      payload: SessionFeedPayload;
-    };
+import {
+  EMPTY_FEED_PAYLOAD,
+  applyFeedDelta,
+  type DispatcherFeedIntegration,
+  type FeedDeltaEvent,
+  type FeedEntryKind,
+  type SessionFeedEntry,
+  type SessionFeedPayload,
+  type SessionParserState,
+} from "./dispatcherFeedState";
 
 type DispatcherSessionPaneProps = {
   session: DashboardSession;
   bridgeId?: string | null;
+  active?: boolean;
   onClose?: () => void;
   onToggleCollapse?: () => void;
   className?: string;
@@ -190,20 +113,6 @@ type RepositorySettingsPayload = {
   archiveScript: string;
   copyFiles: string;
   pathHealth: RepositoryPathHealth;
-};
-
-const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
-  entries: [],
-  totalEntries: 0,
-  windowLimit: 120,
-  truncated: false,
-  sessionStatus: null,
-  approvalState: null,
-  parserState: null,
-  runtimeStatus: null,
-  source: null,
-  error: null,
-  integration: null,
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -372,85 +281,6 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
     };
   }
   return null;
-}
-
-function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEvent): SessionFeedPayload {
-  if (delta.type === "replace") {
-    return delta.payload;
-  }
-
-  if (delta.type === "append") {
-    return {
-      entries: [...current.entries, ...delta.entries],
-      totalEntries: delta.totalEntries,
-      windowLimit: delta.windowLimit,
-      truncated: delta.truncated,
-      sessionStatus: delta.sessionStatus,
-      approvalState: delta.approvalState,
-      parserState: delta.parserState,
-      runtimeStatus: delta.runtimeStatus,
-      source: delta.source,
-      error: delta.error,
-      integration: delta.integration ?? current.integration,
-    };
-  }
-
-  const nextEntry = delta.entry;
-  if (!nextEntry) {
-    return {
-      ...current,
-      totalEntries: delta.totalEntries,
-      windowLimit: delta.windowLimit,
-      truncated: delta.truncated,
-      sessionStatus: delta.sessionStatus,
-      approvalState: delta.approvalState,
-      parserState: delta.parserState,
-      runtimeStatus: delta.runtimeStatus,
-      source: delta.source,
-      error: delta.error,
-      integration: delta.integration ?? current.integration,
-    };
-  }
-
-  const entries = current.entries.slice();
-  let patchIndex = -1;
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (entries[index]?.id === delta.entryId) {
-      patchIndex = index;
-      break;
-    }
-  }
-
-  if (patchIndex >= 0) {
-    const existing = entries[patchIndex];
-    if (
-      delta.textDelta !== null
-      && nextEntry.text.startsWith(existing.text)
-    ) {
-      entries[patchIndex] = {
-        ...nextEntry,
-        text: existing.text + delta.textDelta,
-      };
-    } else {
-      entries[patchIndex] = nextEntry;
-    }
-  } else {
-    entries.push(nextEntry);
-  }
-
-  return {
-    entries,
-    totalEntries: delta.totalEntries,
-    windowLimit: delta.windowLimit,
-    truncated: delta.truncated,
-    sessionStatus: delta.sessionStatus,
-    approvalState: delta.approvalState,
-    parserState: delta.parserState,
-    runtimeStatus: delta.runtimeStatus,
-    source: delta.source,
-    error: delta.error,
-    integration: delta.integration ?? current.integration,
-  };
 }
 
 function normalizeRepositorySettings(value: unknown): RepositorySettingsPayload | null {
@@ -1135,6 +965,7 @@ function shouldShowDispatcherApprovalBanner(
 export function DispatcherSessionPane({
   session,
   bridgeId = null,
+  active = true,
   onClose,
   onToggleCollapse,
   className,
@@ -1160,6 +991,48 @@ export function DispatcherSessionPane({
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
+  const [pageVisible, setPageVisible] = useState(true);
+  const shouldRunLiveUpdates = active && pageVisible;
+  const mountedAtRef = useRef(Date.now());
+  const firstFeedLoadedAtRef = useRef<number | null>(null);
+  const lastFeedLoadedAtRef = useRef<number | null>(null);
+  const lastStreamEventAtRef = useRef<number | null>(null);
+  const loadFeedCountRef = useRef(0);
+  const loadFeedFailureCountRef = useRef(0);
+  const streamConnectCountRef = useRef(0);
+  const streamReconnectCountRef = useRef(0);
+  const streamFallbackReloadCountRef = useRef(0);
+  const deltaAppendCountRef = useRef(0);
+  const deltaPatchCountRef = useRef(0);
+  const deltaReplaceCountRef = useRef(0);
+  const liveUpdatePauseCountRef = useRef(0);
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setPageVisible(!document.hidden);
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    mountedAtRef.current = Date.now();
+    firstFeedLoadedAtRef.current = null;
+    lastFeedLoadedAtRef.current = null;
+    lastStreamEventAtRef.current = null;
+    loadFeedCountRef.current = 0;
+    loadFeedFailureCountRef.current = 0;
+    streamConnectCountRef.current = 0;
+    streamReconnectCountRef.current = 0;
+    streamFallbackReloadCountRef.current = 0;
+    deltaAppendCountRef.current = 0;
+    deltaPatchCountRef.current = 0;
+    deltaReplaceCountRef.current = 0;
+    liveUpdatePauseCountRef.current = 0;
+  }, [session.id]);
+
   const sessionApiPaths = useMemo(() => ({
     feed: apiPaths.feed,
     stream: apiPaths.stream,
@@ -1233,6 +1106,7 @@ export function DispatcherSessionPane({
   }, [bridgeId, hideRepositoryControls, session.projectId, sessionApiPaths.repositories]);
 
   const loadFeed = useCallback(async () => {
+    loadFeedCountRef.current += 1;
     setLoading(true);
     setLoadingError(null);
     try {
@@ -1241,27 +1115,40 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(nextPayload.error ?? `Failed to load session feed (${response.status})`);
       }
+      const now = Date.now();
+      if (firstFeedLoadedAtRef.current === null) {
+        firstFeedLoadedAtRef.current = now;
+      }
+      lastFeedLoadedAtRef.current = now;
       setPayload(nextPayload);
     } catch (error) {
+      loadFeedFailureCountRef.current += 1;
       setLoadingError(error instanceof Error ? error.message : "Failed to load session feed");
-      setPayload(EMPTY_FEED_PAYLOAD);
     } finally {
       setLoading(false);
     }
   }, [bridgeId, sessionApiPaths.feed]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
     void loadFeed();
-  }, [loadFeed]);
+  }, [active, loadFeed]);
 
   useEffect(() => {
-    if (hideRepositoryControls) {
+    if (!active || hideRepositoryControls) {
       return;
     }
     void loadRepository();
-  }, [hideRepositoryControls, loadRepository]);
+  }, [active, hideRepositoryControls, loadRepository]);
 
   useEffect(() => {
+    if (!shouldRunLiveUpdates) {
+      liveUpdatePauseCountRef.current += 1;
+      return;
+    }
+
     let cancelled = false;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
@@ -1279,6 +1166,7 @@ export function DispatcherSessionPane({
       try {
         parsed = JSON.parse(raw) as unknown;
       } catch {
+        streamFallbackReloadCountRef.current += 1;
         void loadFeed();
         return;
       }
@@ -1287,6 +1175,7 @@ export function DispatcherSessionPane({
         ? (parsed as Record<string, unknown>)
         : null;
       if (record?.type === "refresh") {
+        streamFallbackReloadCountRef.current += 1;
         dispatchProjectBoardRefresh({
           projectId: session.projectId,
           reason: "dispatcher_feed_refresh",
@@ -1297,8 +1186,18 @@ export function DispatcherSessionPane({
 
       const delta = normalizeFeedDelta(parsed);
       if (!delta) {
+        streamFallbackReloadCountRef.current += 1;
         void loadFeed();
         return;
+      }
+
+      lastStreamEventAtRef.current = Date.now();
+      if (delta.type === "append") {
+        deltaAppendCountRef.current += delta.entries.length;
+      } else if (delta.type === "patch") {
+        deltaPatchCountRef.current += 1;
+      } else {
+        deltaReplaceCountRef.current += 1;
       }
 
       const boardRefreshReason = delta.type === "append"
@@ -1324,6 +1223,7 @@ export function DispatcherSessionPane({
           ? 250
           : Math.min(500 * 2 ** (reconnectAttempt - 1), 12_000);
       reconnectAttempt += 1;
+      streamReconnectCountRef.current += 1;
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
         void connect();
@@ -1339,12 +1239,14 @@ export function DispatcherSessionPane({
       streamAbortRef.current = ac;
       const streamUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
       try {
+        streamConnectCountRef.current += 1;
         const res = await fetch(streamUrl, {
           cache: "no-store",
           signal: ac.signal,
         });
         if (!res.ok || !res.body) {
           if (!cancelled) {
+            streamFallbackReloadCountRef.current += 1;
             void loadFeed();
             scheduleReconnect();
           }
@@ -1358,11 +1260,13 @@ export function DispatcherSessionPane({
           applySseData(frame.data);
         }
         if (!cancelled) {
+          streamFallbackReloadCountRef.current += 1;
           void loadFeed();
           scheduleReconnect();
         }
       } catch {
         if (!cancelled && !ac.signal.aborted) {
+          streamFallbackReloadCountRef.current += 1;
           void loadFeed();
           scheduleReconnect();
         }
@@ -1376,7 +1280,52 @@ export function DispatcherSessionPane({
       clearReconnect();
       streamAbortRef.current?.abort();
     };
-  }, [bridgeId, loadFeed, session.projectId, sessionApiPaths.stream]);
+  }, [bridgeId, loadFeed, session.projectId, sessionApiPaths.stream, shouldRunLiveUpdates]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+
+    window.__conductorDispatcherDebug = {
+      sessionId: session.id,
+      getState: () => ({
+        sessionId: session.id,
+        active,
+        pageVisible,
+        shouldRunLiveUpdates,
+        entries: payload.entries.length,
+        loading,
+        loadingError,
+        metrics: {
+          mountedAt: new Date(mountedAtRef.current).toISOString(),
+          mountedAgeMs: Date.now() - mountedAtRef.current,
+          firstFeedLoadLatencyMs: firstFeedLoadedAtRef.current === null
+            ? null
+            : firstFeedLoadedAtRef.current - mountedAtRef.current,
+          lastFeedLoadedAt: lastFeedLoadedAtRef.current === null
+            ? null
+            : new Date(lastFeedLoadedAtRef.current).toISOString(),
+          lastStreamEventAt: lastStreamEventAtRef.current === null
+            ? null
+            : new Date(lastStreamEventAtRef.current).toISOString(),
+          loadFeedCount: loadFeedCountRef.current,
+          loadFeedFailureCount: loadFeedFailureCountRef.current,
+          streamConnectCount: streamConnectCountRef.current,
+          streamReconnectCount: streamReconnectCountRef.current,
+          streamFallbackReloadCount: streamFallbackReloadCountRef.current,
+          deltaAppendCount: deltaAppendCountRef.current,
+          deltaPatchCount: deltaPatchCountRef.current,
+          deltaReplaceCount: deltaReplaceCountRef.current,
+          liveUpdatePauseCount: liveUpdatePauseCountRef.current,
+        },
+      }),
+    };
+
+    return () => {
+      if (window.__conductorDispatcherDebug?.sessionId === session.id) {
+        delete window.__conductorDispatcherDebug;
+      }
+    };
+  }, [active, loading, loadingError, pageVisible, payload.entries.length, session.id, shouldRunLiveUpdates]);
 
   useEffect(() => {
     autoScrollEnabledRef.current = true;

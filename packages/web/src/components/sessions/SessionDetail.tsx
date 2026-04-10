@@ -80,6 +80,11 @@ interface SessionDetailProps {
 
 type SessionTab = "overview" | "dispatcher" | "terminal" | "preview" | "skills";
 
+const STANDARD_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0";
+// Keep terminal-like surfaces painted with opacity only. `visibility:hidden` was causing browser-level
+// suspension / blanking on tab switches even though the panels stayed force-mounted.
+const PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=active]:relative data-[state=active]:z-10 data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:opacity-0 data-[state=inactive]:select-none";
+
 function resolveSessionTab(
   value: string | null,
   session: Pick<DashboardSession, "metadata"> | null | undefined,
@@ -363,7 +368,7 @@ export function SessionDetail({
         )}
 
         <div className="relative min-h-0 min-w-0 h-0 flex-1 overflow-hidden">
-          <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
+          <TabsContent value="overview" className={STANDARD_TAB_PANEL_CLASS_NAME}>
             <SessionOverview session={session} sessionId={sessionId} active={active && activeTab === "overview"} />
           </TabsContent>
 
@@ -371,12 +376,13 @@ export function SessionDetail({
             <TabsContent
               value="dispatcher"
               forceMount
-              className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+              className={PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}
             >
               <DispatcherPane
                 thread={session}
                 projectId={session.projectId}
                 bridgeId={session.bridgeId ?? bridgeId}
+                active={active && activeTab === "dispatcher"}
                 className="h-full w-full border-0 xl:w-full"
               />
             </TabsContent>
@@ -385,8 +391,8 @@ export function SessionDetail({
               value="terminal"
               forceMount
               className={immersiveTerminalActive
-                ? "flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-                : "flex min-h-0 h-full min-w-0 flex-col w-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
+                ? `flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] ${PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}`
+                : `flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-transparent ${PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}`}
             >
               <SessionTerminal
                 sessionId={sessionId}
@@ -403,22 +409,21 @@ export function SessionDetail({
           )}
           <TabsContent
             value="preview"
-            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+            forceMount
+            className={PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}
           >
-            {previewTabActive ? (
-              <SessionPreview
-                key={sessionId}
-                sessionId={sessionId}
-                active={previewTabActive}
-                onQueueTerminalInsert={queueTerminalInsert}
-                onConnectionChange={handlePreviewConnectionChange}
-              />
-            ) : null}
+            <SessionPreview
+              key={sessionId}
+              sessionId={sessionId}
+              active={previewTabActive}
+              onQueueTerminalInsert={queueTerminalInsert}
+              onConnectionChange={handlePreviewConnectionChange}
+            />
           </TabsContent>
 
           <TabsContent
             value="skills"
-            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+            className={STANDARD_TAB_PANEL_CLASS_NAME}
           >
             <SessionSkills
               session={session}

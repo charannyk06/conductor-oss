@@ -375,9 +375,43 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   const RELAY_TTYD_WS_URL = ${relayWsLiteral};
   if (!RELAY_TTYD_WS_URL) return;
 
+  const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';
+  const TOKEN_REQUEST_THROTTLE_MS = 1500;
   const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
   const previousWebSocket = window.WebSocket;
   if (typeof previousWebSocket !== 'function') return;
+
+  let lastTokenRequestAt = 0;
+  let unloading = false;
+
+  function requestFreshRelay(reason) {
+    if (unloading || !window.parent || window.parent === window) return;
+
+    const now = Date.now();
+    if (now - lastTokenRequestAt < TOKEN_REQUEST_THROTTLE_MS) return;
+    lastTokenRequestAt = now;
+
+    try {
+      window.parent.postMessage({
+        type: REQUEST_MESSAGE_TYPE,
+        reason,
+      }, '*');
+    } catch {
+    }
+  }
+
+  function attachSocketListeners(socket) {
+    if (!socket || socket.__conductorTokenRefreshHookAttached) return socket;
+
+    socket.__conductorTokenRefreshHookAttached = true;
+    socket.addEventListener('close', function() {
+      requestFreshRelay('bridge-websocket-close');
+    });
+    socket.addEventListener('error', function() {
+      requestFreshRelay('bridge-websocket-error');
+    });
+    return socket;
+  }
 
   const patchedWebSocket = function(url, protocols) {
     let normalizedUrl = String(url);
@@ -395,14 +429,18 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
     }
 
     if (arguments.length > 1) {
-      return new previousWebSocket(normalizedUrl, protocols);
+      return attachSocketListeners(new previousWebSocket(normalizedUrl, protocols));
     }
-    return new previousWebSocket(normalizedUrl);
+    return attachSocketListeners(new previousWebSocket(normalizedUrl));
   };
 
   Object.setPrototypeOf(patchedWebSocket, previousWebSocket);
   patchedWebSocket.prototype = previousWebSocket.prototype;
   window.WebSocket = patchedWebSocket;
+
+  window.addEventListener('beforeunload', function() {
+    unloading = true;
+  }, { once: true });
 })();
 </script>`;
 

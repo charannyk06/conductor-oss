@@ -29,12 +29,12 @@ import type { SessionTerminalProps } from "./terminal/terminalTypes";
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const TOKEN_REFRESH_LEAD_SECONDS = 30;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
+const TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE = "conductor-ttyd-auth-token-request";
 const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 /** Staggered fits so xterm catches up after ttyd boot, layout, and fonts. */
 const TERMINAL_RESIZE_BURST_DELAYS_MS = [0, 50, 150, 400, 1000] as const;
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
-const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 1_800_000; // 30 minutes - only reload if hidden for 30+ minutes
 const TERMINAL_IFRAME_LOAD_TIMEOUT_MS = 25_000;
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
@@ -173,6 +173,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const frameLoadedRef = useRef(false);
   const pageHiddenAtRef = useRef<number | null>(null);
   const lastLifecycleRefreshAtRef = useRef(0);
+  const mountedAtRef = useRef(Date.now());
+  const firstFrameLoadedAtRef = useRef<number | null>(null);
+  const lastFrameLoadedAtRef = useRef<number | null>(null);
+  const iframeLoadCountRef = useRef(0);
+  const silentRefreshCountRef = useRef(0);
+  const resolvingRefreshCountRef = useRef(0);
+  const iframeRefreshRequestCountRef = useRef(0);
+  const retryCountRef = useRef(0);
 
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
@@ -269,6 +277,42 @@ function SessionTerminalView(props: SessionTerminalProps) {
     postTerminalAuthToken(iframe, token);
   }, [terminalLinkUrl]);
 
+  const requestSilentConnectionRefresh = useCallback((options?: {
+    force?: boolean;
+    resetResizeCache?: boolean;
+    syncCurrentToken?: boolean;
+    resolveConnection?: boolean;
+  }) => {
+    if (!expectsLiveTerminal || typeof window === "undefined") {
+      return;
+    }
+
+    const now = window.Date.now();
+    const force = options?.force === true;
+    if (!force && now - lastLifecycleRefreshAtRef.current < TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS) {
+      return;
+    }
+
+    lastLifecycleRefreshAtRef.current = now;
+
+    if (options?.resetResizeCache) {
+      lastPostedTerminalHostSizeRef.current = null;
+      resizeSuppressUntilRef.current = now + 120;
+    }
+
+    if (options?.syncCurrentToken !== false) {
+      syncTerminalAuthToken();
+      scheduleTerminalResizeBurst();
+    }
+
+    if (options?.resolveConnection) {
+      resolvingRefreshCountRef.current += 1;
+      setConnectionRefreshTick((current) => current + 1);
+    } else {
+      silentRefreshCountRef.current += 1;
+    }
+  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
+
   useEffect(() => {
     terminalUrlRef.current = terminalUrl;
   }, [terminalUrl]);
@@ -301,6 +345,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
     lastPostedTerminalHostSizeRef.current = null;
+    firstFrameLoadedAtRef.current = null;
+    lastFrameLoadedAtRef.current = null;
+    iframeLoadCountRef.current = 0;
+    silentRefreshCountRef.current = 0;
+    resolvingRefreshCountRef.current = 0;
+    iframeRefreshRequestCountRef.current = 0;
+    retryCountRef.current = 0;
+    mountedAtRef.current = Date.now();
     clearBurstResizeTimers();
   }, [clearBurstResizeTimers, sessionId]);
 
@@ -465,21 +517,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
     if (!panelVisible) {
       return;
     }
-    // Radix keeps inactive tabs mounted but hidden (0×0). Cached host size would skip
-    // maybePostTerminalResize when the user returns — clear and refit after layout.
+    // When the terminal panel becomes visible again, silently refresh auth/cookie state
+    // instead of showing a blocking reload path. This keeps reconnects feeling attached
+    // to the same terminal surface.
     if (previous === false) {
-      lastPostedTerminalHostSizeRef.current = null;
-      if (typeof window !== "undefined") {
-        resizeSuppressUntilRef.current = window.Date.now() + 120;
-      }
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          syncTerminalAuthToken();
-          scheduleTerminalResizeBurst();
-        });
-      });
+      requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
     }
-  }, [panelVisible, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
+  }, [panelVisible, requestSilentConnectionRefresh]);
 
   const requestLifecycleRefresh = useCallback(() => {
     if (!expectsLiveTerminal || typeof window === "undefined") {
@@ -487,30 +531,20 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     const now = window.Date.now();
-    if (now - lastLifecycleRefreshAtRef.current < TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS) {
-      return;
-    }
-    lastLifecycleRefreshAtRef.current = now;
-
     const hiddenDuration = pageHiddenAtRef.current === null
       ? 0
       : now - pageHiddenAtRef.current;
     pageHiddenAtRef.current = null;
 
-    // Do not bump connectionRefreshTick here: refetching the token endpoint on every
-    // focus/visibility event causes resolving-state flicker and fights the iframe.
-    // Token rotation stays on its timer; we only re-sync the known token and refit xterm.
-    syncTerminalAuthToken();
-    scheduleTerminalResizeBurst();
-    if (
-      hiddenDuration >= TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS
-      && frameLoadedRef.current
-      && terminalUrlRef.current
-    ) {
-      forceTerminalReloadRef.current = true;
-      setConnectionRefreshTick((current) => current + 1);
-    }
-  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
+    // Passive lifecycle events should keep the current terminal identity hot without
+    // minting a brand-new ttyd/relay target. If the embedded terminal actually lost
+    // its websocket, the iframe shim will request an active refresh explicitly.
+    requestSilentConnectionRefresh({
+      force: hiddenDuration > 0,
+      resetResizeCache: hiddenDuration > 0,
+      resolveConnection: false,
+    });
+  }, [expectsLiveTerminal, requestSilentConnectionRefresh]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -537,8 +571,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     };
 
     const handleOnline = () => {
-      // Network back: refresh token URL from the server (silent if already connected).
-      setConnectionRefreshTick((current) => current + 1);
+      requestLifecycleRefresh();
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -551,6 +584,32 @@ function SessionTerminalView(props: SessionTerminalProps) {
       window.removeEventListener("online", handleOnline);
     };
   }, [requestLifecycleRefresh]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleMessage = (event: MessageEvent) => {
+      if (!event.data || typeof event.data !== "object") {
+        return;
+      }
+      if ((event.data as { type?: string }).type !== TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE) {
+        return;
+      }
+      if (event.source !== ttydIframeRef.current?.contentWindow) {
+        return;
+      }
+
+      iframeRefreshRequestCountRef.current += 1;
+      requestSilentConnectionRefresh({ force: true, resetResizeCache: true, resolveConnection: true });
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
+  }, [requestSilentConnectionRefresh]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -821,6 +880,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
         connectionError,
         promptError,
         queuedInsertError,
+        metrics: {
+          mountedAt: new Date(mountedAtRef.current).toISOString(),
+          mountedAgeMs: Date.now() - mountedAtRef.current,
+          firstFrameLoadLatencyMs: firstFrameLoadedAtRef.current === null
+            ? null
+            : firstFrameLoadedAtRef.current - mountedAtRef.current,
+          lastFrameLoadAt: lastFrameLoadedAtRef.current === null
+            ? null
+            : new Date(lastFrameLoadedAtRef.current).toISOString(),
+          iframeLoadCount: iframeLoadCountRef.current,
+          silentRefreshCount: silentRefreshCountRef.current,
+          resolvingRefreshCount: resolvingRefreshCountRef.current,
+          iframeRequestedRefreshCount: iframeRefreshRequestCountRef.current,
+          retryCount: retryCountRef.current,
+        },
       }),
     };
 
@@ -844,6 +918,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   ]);
 
   const handleRetry = useCallback(() => {
+    retryCountRef.current += 1;
     setConnectionError(null);
     retryAttemptRef.current = 0;
     forceTerminalReloadRef.current = true;
@@ -972,6 +1047,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
               }}
               onLoad={() => {
+                const now = Date.now();
+                iframeLoadCountRef.current += 1;
+                lastFrameLoadedAtRef.current = now;
+                if (firstFrameLoadedAtRef.current === null) {
+                  firstFrameLoadedAtRef.current = now;
+                }
                 setFrameLoaded(true);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
@@ -1142,15 +1223,30 @@ function sessionTerminalPropsEqual(
   previous: SessionTerminalProps,
   next: SessionTerminalProps,
 ): boolean {
+  const previousPanelVisible = previous.panelVisible ?? true;
+  const nextPanelVisible = next.panelVisible ?? true;
+
+  if (
+    previous.sessionId !== next.sessionId
+    || previous.projectId !== next.projectId
+    || previous.bridgeId !== next.bridgeId
+    || previousPanelVisible !== nextPanelVisible
+    || !arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
+  ) {
+    return false;
+  }
+
+  // Lunel-style behavior: once a terminal surface is inactive, stop re-rendering it on
+  // background session-status churn. Apply the latest runtime/status only when it becomes
+  // visible again.
+  if (!previousPanelVisible && !nextPanelVisible) {
+    return true;
+  }
+
   return (
-    previous.sessionId === next.sessionId
-    && previous.projectId === next.projectId
-    && previous.bridgeId === next.bridgeId
-    && previous.sessionState === next.sessionState
+    previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
-    && (previous.panelVisible ?? true) === (next.panelVisible ?? true)
-    && arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
   );
 }
 

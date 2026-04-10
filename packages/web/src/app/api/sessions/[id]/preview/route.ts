@@ -44,6 +44,8 @@ function withLookupError(
   };
 }
 
+const MISSING_SESSION_PREVIEW_ERROR = "Session is no longer available.";
+
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
@@ -59,11 +61,16 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
     request,
     headers: forwardedHeaders,
   });
+  const manager = getPreviewBrowserManager();
   if (!previewContext.session && !previewContext.error) {
-    return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
+    await manager.destroySession(id);
+    const status = withLookupError(
+      await manager.getStatus(id, []),
+      MISSING_SESSION_PREVIEW_ERROR,
+    );
+    return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
   }
 
-  const manager = getPreviewBrowserManager();
   if (previewContext.session && TERMINAL_STATUSES.has(previewContext.session.status)) {
     await manager.destroySession(id);
     const status = withLookupError(
@@ -102,8 +109,10 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
     request,
     headers: forwardedHeaders,
   });
+  const manager = getPreviewBrowserManager();
   if (!previewContext.session && !previewContext.error) {
-    return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
+    await manager.destroySession(id);
+    return NextResponse.json({ error: MISSING_SESSION_PREVIEW_ERROR }, { status: 404 });
   }
 
   let body: PreviewCommandRequest;
@@ -113,7 +122,6 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
     return NextResponse.json({ error: "Invalid preview command payload" }, { status: 400 });
   }
 
-  const manager = getPreviewBrowserManager();
   await manager.configureBridgePreview(
     id,
     previewContext.bridgePreview,
