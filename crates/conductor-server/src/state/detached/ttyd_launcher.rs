@@ -849,6 +849,9 @@ async fn run_ttyd_session_owner_with_retry(
                             "Terminal backend exhausted all reconnection attempts. The session may need to be restarted.".to_string()
                         ),
                     ).await;
+                    // Detach the terminal runtime so a subsequent restore_ttyd_runtime()
+                    // can create a fresh owner instead of finding a stale attachment.
+                    state.detach_terminal_runtime(sid).await;
                     return Ok(());
                 }
                 let delay = owner_reconnect_delay(attempt);

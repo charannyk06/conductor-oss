@@ -381,6 +381,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
   // Debounced so rapid SSE status flickers don't tear down/rebuild the terminal connection.
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      // Seed the ref on the very first invocation so the debounce logic
+      // always has a valid previous value to compare against.
+      if (prevExpectsLiveTerminalRef.current === null || prevExpectsLiveTerminalRef.current === undefined) {
+        prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
+      }
       const prev = prevExpectsLiveTerminalRef.current;
       prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
       if (!expectsLiveTerminal && prev === true) {
@@ -603,6 +608,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
         // Let layout settle (Radix tabs, split view, embedded webviews) before xterm fit.
         resizeSuppressUntilRef.current = window.Date.now() + 200;
         requestLifecycleRefresh();
+        // Bump connectionRefreshTick to force a fresh token resolve and
+        // re-establish the proactive refresh schedule that was cancelled
+        // when the page went hidden.
+        setConnectionRefreshTick((current) => current + 1);
       }
     };
     const handlePageShow = () => {

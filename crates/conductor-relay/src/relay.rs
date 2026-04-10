@@ -1411,39 +1411,31 @@ impl RelayState {
                     }
                     TTYD_CMD_RESUME => {
                         info!(%terminal_id, "relay terminal browser sent RESUME");
-                        // Collect buffered messages and clear pause state under one lock.
-                        let buffered = {
+                        // Collect buffered messages, replay them, and forward RESUME — all
+                        // orchestrated from a SINGLE lock acquisition to prevent bridge frames
+                        // from racing between the pause_buffer drain and the state change.
+                        let bridge_tx = {
                             let mut inner = self.inner.lock().await;
                             if let Some(session) = inner.terminal_sessions.get_mut(terminal_id) {
-                                session.browser_paused = false;
-                                std::mem::take(&mut session.pause_buffer)
-                            } else {
-                                Vec::new()
-                            }
-                        };
-                        // Replay buffered messages to the browser.
-                        let browser_tx = {
-                            let inner = self.inner.lock().await;
-                            inner
-                                .terminal_sessions
-                                .get(terminal_id)
-                                .and_then(|s| s.browser.as_ref().map(|r| r.tx.clone()))
-                        };
-                        if let Some(tx) = browser_tx {
-                            for buffered_msg in buffered {
-                                if tx.send(buffered_msg).is_err() {
-                                    break;
+                                let buffered = std::mem::take(&mut session.pause_buffer);
+                                let browser_tx = session.browser.as_ref().map(|r| r.tx.clone());
+                                // Replay buffered messages WHILE still holding the lock so no
+                                // bridge frame can overtake or sneak into the drained buffer.
+                                if let Some(ref tx) = browser_tx {
+                                    for buffered_msg in buffered {
+                                        if tx.send(buffered_msg).is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
+                                // Only NOW mark as un-paused — after replay is complete.
+                                session.browser_paused = false;
+                                session.bridge.as_ref().map(|r| r.tx.clone())
+                            } else {
+                                None
                             }
-                        }
-                        // Forward RESUME to bridge so upstream can also resume if supported.
-                        let bridge_tx = {
-                            let inner = self.inner.lock().await;
-                            inner
-                                .terminal_sessions
-                                .get(terminal_id)
-                                .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
                         };
+                        // Lock is dropped; safe to forward RESUME to bridge.
                         if let Some(tx) = bridge_tx {
                             let _ = tx.send(Message::Binary(vec![TTYD_CMD_RESUME].into()));
                         }
@@ -1472,17 +1464,16 @@ impl RelayState {
         }
 
         // When the browser is paused, buffer bridge→browser output instead of forwarding.
+        // Check browser_paused AND append in a single lock acquisition to prevent TOCTOU races
+        // where a bridge frame could arrive between the check and the append.
         if peer_kind == TerminalPeerKind::Bridge {
-            let should_buffer = {
-                let inner = self.inner.lock().await;
-                inner
-                    .terminal_sessions
-                    .get(terminal_id)
-                    .map(|s| s.browser_paused)
-                    .unwrap_or(false)
-            };
+            let mut inner = self.inner.lock().await;
+            let should_buffer = inner
+                .terminal_sessions
+                .get(terminal_id)
+                .map(|s| s.browser_paused)
+                .unwrap_or(false);
             if should_buffer {
-                let mut inner = self.inner.lock().await;
                 if let Some(session) = inner.terminal_sessions.get_mut(terminal_id) {
                     if let Some(cloned) = clone_websocket_message(message) {
                         if session.pause_buffer.len() >= TERMINAL_PAUSE_BUFFER_CAPACITY {

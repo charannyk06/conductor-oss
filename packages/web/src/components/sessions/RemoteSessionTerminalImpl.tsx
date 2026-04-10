@@ -398,8 +398,12 @@ export function RemoteSessionTerminal({
     console.debug(
       `[conductor:terminal] relay reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
     );
-    retryAttemptRef.current = attempt;
     reconnectTimerRef.current = window.setTimeout(() => {
+      // Only increment the attempt counter when the reconnect actually fires,
+      // not when it is scheduled — otherwise hide/show cycles with cancelled
+      // timers exhaust the budget without ever hitting the network.
+      retryAttemptRef.current = attempt;
+      reconnectTimerRef.current = null;
       setConnectionTick((value) => value + 1);
     }, delay);
   }, [expectsRelayTerminal]);
@@ -672,7 +676,10 @@ export function RemoteSessionTerminal({
         // closed, trigger a reconnect attempt.
         const socket = socketRef.current;
         if (hiddenAt !== null && (!socket || socket.readyState !== WebSocket.OPEN)) {
-          setConnectionTick((value) => value + 1);
+          // Only reconnect if we haven't already exhausted the budget.
+          if (retryAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
+            setConnectionTick((value) => value + 1);
+          }
         }
         hiddenAt = null;
       }
