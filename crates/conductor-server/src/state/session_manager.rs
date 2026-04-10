@@ -1583,7 +1583,7 @@ impl AppState {
             OutputConsumerConfig {
                 terminal_rx,
                 mirror_terminal_output: !streams_terminal_bytes,
-                output_is_parsed: true,
+                output_is_parsed: !streams_terminal_bytes,
                 timeout: project
                     .agent_config
                     .session_timeout_secs
@@ -2481,7 +2481,7 @@ impl AppState {
             OutputConsumerConfig {
                 terminal_rx,
                 mirror_terminal_output: !streams_terminal_bytes_resume,
-                output_is_parsed: true,
+                output_is_parsed: !streams_terminal_bytes_resume,
                 timeout: project
                     .agent_config
                     .session_timeout_secs

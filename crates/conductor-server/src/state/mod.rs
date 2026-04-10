@@ -76,7 +76,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 
 pub(crate) struct DevServerRecord {
@@ -863,7 +863,7 @@ impl AppState {
 
     async fn append_terminal_capture_buffered(
         &self,
-        session_id: &str,
+        _session_id: &str,
         handle: &Arc<LiveSessionHandle>,
         bytes: &[u8],
     ) -> Result<()> {
@@ -871,33 +871,10 @@ impl AppState {
             return Ok(());
         }
 
-        let path = self.session_terminal_capture_path(session_id);
         let mut capture = handle.terminal_capture.lock().await;
-        if capture.writer.is_none() {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await?;
-            capture.writer = Some(tokio::io::BufWriter::with_capacity(
-                TERMINAL_CAPTURE_BUFFER_CAPACITY,
-                file,
-            ));
-        }
-
-        let write_result = capture
-            .writer
-            .as_mut()
-            .expect("terminal capture writer should exist after lazy open")
-            .write_all(bytes)
-            .await;
-        if let Err(err) = write_result {
-            capture.writer = None;
-            return Err(err.into());
-        }
-
+        capture.pending.extend_from_slice(bytes);
         capture.dirty = true;
-        capture.pending_bytes = capture.pending_bytes.saturating_add(bytes.len());
+        capture.pending_bytes = capture.pending.len();
         let should_request_flush = Self::should_flush_terminal_capture(&capture);
         drop(capture);
         if should_request_flush {
@@ -991,12 +968,54 @@ impl AppState {
             return;
         }
 
-        let Some(writer) = capture.writer.as_mut() else {
+        if capture.pending.is_empty() {
             capture.dirty = false;
             capture.pending_bytes = 0;
             capture.last_flushed_at = Some(Instant::now());
             return;
+        }
+
+        if capture.writer.is_none() {
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.session_terminal_capture_path(session_id))
+                .await
+            {
+                Ok(file) => {
+                    capture.writer = Some(tokio::io::BufWriter::with_capacity(
+                        TERMINAL_CAPTURE_BUFFER_CAPACITY,
+                        file,
+                    ));
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        session_id,
+                        error = %err,
+                        "Failed to open terminal capture file"
+                    );
+                    capture.dirty = true;
+                    return;
+                }
+            }
+        }
+
+        let pending = capture.pending.clone();
+        let Some(writer) = capture.writer.as_mut() else {
+            capture.dirty = true;
+            return;
         };
+
+        if let Err(err) = writer.write_all(&pending).await {
+            tracing::debug!(
+                session_id,
+                error = %err,
+                "Failed to write terminal capture bytes"
+            );
+            capture.writer = None;
+            capture.dirty = true;
+            return;
+        }
 
         if let Err(err) = writer.flush().await {
             tracing::debug!(
@@ -1009,6 +1028,7 @@ impl AppState {
             return;
         }
 
+        capture.pending.clear();
         capture.dirty = false;
         capture.pending_bytes = 0;
         capture.last_flushed_at = Some(Instant::now());
@@ -1147,12 +1167,76 @@ impl AppState {
         }
     }
 
+    async fn read_terminal_capture_tail_bytes(
+        &self,
+        session_id: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let path = self.session_terminal_capture_path(session_id);
+        let mut bytes = Vec::new();
+
+        match tokio::fs::File::open(&path).await {
+            Ok(mut file) => {
+                let len = file.metadata().await?.len();
+                let start = len.saturating_sub(max_bytes as u64);
+                file.seek(SeekFrom::Start(start)).await?;
+                file.read_to_end(&mut bytes).await?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+
+        if let Some(handle) = self.terminal_hosts.peek(session_id).await {
+            let capture = handle.terminal_capture.lock().await;
+            if !capture.pending.is_empty() {
+                let history_budget = max_bytes.saturating_sub(capture.pending.len());
+                if history_budget == 0 {
+                    bytes.clear();
+                } else if bytes.len() > history_budget {
+                    let start = bytes.len().saturating_sub(history_budget);
+                    bytes = bytes[start..].to_vec();
+                }
+                bytes.extend_from_slice(&capture.pending);
+            }
+        }
+
+        if bytes.is_empty() || String::from_utf8_lossy(&bytes).trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(bytes))
+        }
+    }
+
+    fn trim_utf8_tail_string(value: String, max_bytes: usize) -> String {
+        if max_bytes == 0 || value.len() <= max_bytes {
+            return value;
+        }
+
+        let bytes = value.into_bytes();
+        let mut start = bytes.len().saturating_sub(max_bytes);
+        while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
+            start += 1;
+        }
+        String::from_utf8_lossy(&bytes[start..]).into_owned()
+    }
+
     pub(crate) async fn current_terminal_transcript(
         &self,
         session_id: &str,
         lines: usize,
         max_bytes: usize,
     ) -> Option<String> {
+        if let Ok(Some(bytes)) = self
+            .read_terminal_capture_tail_bytes(session_id, max_bytes.saturating_mul(4).max(max_bytes))
+            .await
+        {
+            let sanitized = sanitize_terminal_text(String::from_utf8_lossy(&bytes).as_ref());
+            let transcript = Self::trim_utf8_tail_string(trim_lines_tail(&sanitized, lines), max_bytes);
+            if !transcript.trim().is_empty() {
+                return Some(transcript);
+            }
+        }
+
         if let Some(handle) = self.terminal_hosts.get(session_id).await {
             if let Some(transcript) = handle
                 .terminal_store

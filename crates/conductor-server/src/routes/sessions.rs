@@ -34,6 +34,7 @@ const SPAWN_RATE_LIMIT: u64 = 10;
 const SPAWN_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
+const TERMINAL_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const BOARD_PLANNING_SESSION_KIND: &str = "board_planning";
 const PROJECT_DISPATCHER_SESSION_KIND: &str = "project_dispatcher";
 
@@ -797,9 +798,15 @@ async fn get_output(
     Query(query): Query<OutputQuery>,
 ) -> ApiResponse {
     match state.get_session(&id).await {
-        Some(session) => ok(json!({
-            "output": trim_lines_tail(&session.output, query.lines.unwrap_or(500)),
-        })),
+        Some(session) => {
+            let lines = query.lines.unwrap_or(500);
+            let output = state
+                .current_terminal_transcript(&id, lines, TERMINAL_OUTPUT_MAX_BYTES)
+                .await
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| trim_lines_tail(&session.output, lines));
+            ok(json!({ "output": output }))
+        }
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
@@ -809,11 +816,17 @@ async fn output_stream(
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
-    let initial_output = state
-        .get_session(&id)
-        .await
-        .map(|session| trim_lines_tail(&session.output, query.lines.unwrap_or(500)))
-        .unwrap_or_default();
+    let initial_output = match state.get_session(&id).await {
+        Some(session) => {
+            let lines = query.lines.unwrap_or(500);
+            state
+                .current_terminal_transcript(&id, lines, TERMINAL_OUTPUT_MAX_BYTES)
+                .await
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| trim_lines_tail(&session.output, lines))
+        }
+        None => String::new(),
+    };
     let initial_stream = stream::iter(vec![Ok(
         SseEvent::default().data(json!({ "type": "output", "output": initial_output }).to_string())
     )]);

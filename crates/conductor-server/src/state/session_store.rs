@@ -364,4 +364,56 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
+
+    #[tokio::test]
+    async fn current_terminal_transcript_includes_unflushed_capture_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-terminal-transcript-live-test-{}",
+            Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let state = build_state(&root).await;
+        state.emit_terminal_bytes("session-3", b"hello\r\n").await;
+        state.emit_terminal_bytes("session-3", b"world\r\n").await;
+
+        let transcript = state
+            .current_terminal_transcript("session-3", 20, 4096)
+            .await
+            .expect("live transcript should include buffered bytes");
+
+        assert!(transcript.contains("hello"));
+        assert!(transcript.contains("world"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn current_terminal_transcript_reads_persisted_capture_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-terminal-transcript-capture-test-{}",
+            Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let state = build_state(&root).await;
+        tokio::fs::write(
+            state.session_terminal_capture_path("session-4"),
+            b"one\r\n\x1b[32mtwo\x1b[0m\r\nthree\r\n",
+        )
+        .await
+        .unwrap();
+
+        let transcript = state
+            .current_terminal_transcript("session-4", 2, 4096)
+            .await
+            .expect("persisted transcript should load from capture file");
+
+        assert!(!transcript.contains("one"));
+        assert!(transcript.contains("two"));
+        assert!(transcript.contains("three"));
+        assert!(!transcript.contains("\u{001b}"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
 }
