@@ -22,6 +22,7 @@ import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
+import { TerminalSnapshotFallback } from "./terminal/TerminalSnapshotFallback";
 import { extractTerminalAuthToken } from "./terminal/terminalToken";
 import { terminalUrlNeedsReload } from "./terminal/terminalUrl";
 import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
@@ -151,6 +152,52 @@ function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined)
   }
 }
 
+type TerminalFallbackSnapshot = {
+  snapshot: string;
+  transcript: string | null;
+  source: string | null;
+  live: boolean | null;
+  restored: boolean | null;
+};
+
+async function fetchTerminalFallbackSnapshot(
+  sessionId: string,
+  bridgeId?: string | null,
+  signal?: AbortSignal,
+): Promise<TerminalFallbackSnapshot> {
+  const response = await fetch(
+    withBridgeQuery(
+      `/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=500&live=1`,
+      bridgeId,
+    ),
+    {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal,
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as {
+    snapshot?: string;
+    transcript?: string;
+    source?: string;
+    live?: boolean;
+    restored?: boolean;
+    error?: string;
+  } | null;
+
+  if (!response.ok) {
+    throw new Error(payload?.error ?? `Failed to load terminal snapshot (${response.status})`);
+  }
+
+  return {
+    snapshot: typeof payload?.snapshot === "string" ? payload.snapshot : "",
+    transcript: typeof payload?.transcript === "string" ? payload.transcript : null,
+    source: typeof payload?.source === "string" ? payload.source : null,
+    live: typeof payload?.live === "boolean" ? payload.live : null,
+    restored: typeof payload?.restored === "boolean" ? payload.restored : null,
+  };
+}
+
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
@@ -214,6 +261,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [fallbackSnapshot, setFallbackSnapshot] = useState<string | null>(null);
+  const [fallbackTranscript, setFallbackTranscript] = useState<string | null>(null);
+  const [fallbackSource, setFallbackSource] = useState<string | null>(null);
+  const [fallbackLoading, setFallbackLoading] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
@@ -340,6 +391,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setQueuedInsertError(null);
     setAttachmentError(null);
     setAttachmentUploading(false);
+    setFallbackSnapshot(null);
+    setFallbackTranscript(null);
+    setFallbackSource(null);
+    setFallbackLoading(false);
     forceTerminalReloadRef.current = false;
     frameLoadedRef.current = false;
     pageHiddenAtRef.current = null;
@@ -365,6 +420,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setTerminalLinkUrl(null);
     setFrameLoaded(false);
     setConnectionError(null);
+    setFallbackLoading(false);
     forceTerminalReloadRef.current = false;
   }, [normalizedSessionStatus, sessionId]);
 
@@ -511,6 +567,51 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
     };
   }, [bridgeId, connectionRefreshTick, sessionId]);
+
+  useEffect(() => {
+    if (!expectsLiveTerminal) {
+      setFallbackLoading(false);
+      return;
+    }
+
+    if (frameLoaded && !connectionError) {
+      setFallbackLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const abortController = new AbortController();
+    setFallbackLoading(true);
+
+    void fetchTerminalFallbackSnapshot(sessionId, bridgeId, abortController.signal)
+      .then((snapshot) => {
+        if (cancelled) {
+          return;
+        }
+        setFallbackSnapshot(snapshot.snapshot);
+        setFallbackTranscript(snapshot.transcript);
+        setFallbackSource(snapshot.source);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setFallbackSource(null);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFallbackLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+    };
+  }, [bridgeId, connectionError, expectsLiveTerminal, frameLoaded, sessionId, terminalUrl]);
 
   useEffect(() => {
     const previous = prevPanelVisibleRef.current;
@@ -926,6 +1027,20 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setConnectionRefreshTick((current) => current + 1);
   }, []);
 
+  const fallbackValue = (fallbackSnapshot?.length ? fallbackSnapshot : fallbackTranscript) ?? "";
+  const hasFallbackOutput = fallbackValue.trim().length > 0;
+  const fallbackSurfaceVisible = expectsLiveTerminal
+    && (!frameLoaded || !terminalUrl || connectionError !== null)
+    && (fallbackLoading || hasFallbackOutput);
+  const renderTerminalSurface = expectsLiveTerminal && (terminalUrl !== null || fallbackSurfaceVisible);
+  const terminalStateBadge = resolvingConnection
+    ? "reconnecting"
+    : frameLoaded
+      ? "live"
+      : fallbackSurfaceVisible
+        ? "restore"
+        : "loading";
+
   const emptyStateTitle = expectsLiveTerminal
     ? "Connecting live terminal"
     : showPromptBar
@@ -1023,7 +1138,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
             : "min-h-0 min-w-0 h-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"
         }
       >
-        {expectsLiveTerminal && terminalUrl ? (
+        {renderTerminalSurface ? (
           <div
             ref={terminalHostRef}
             className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
@@ -1039,10 +1154,17 @@ function SessionTerminalView(props: SessionTerminalProps) {
                     ? "bg-[color:color-mix(in_srgb,#f59e0b_18%,transparent)] text-[#f7c56f]"
                     : frameLoaded
                       ? "bg-[color:color-mix(in_srgb,#22c55e_18%,transparent)] text-[#7ce8a0]"
-                      : "bg-[color:color-mix(in_srgb,#94a3b8_16%,transparent)] text-[#c9c0b7]",
+                      : fallbackSurfaceVisible
+                        ? "bg-[color:color-mix(in_srgb,#94a3b8_16%,transparent)] text-[#d7cfc8]"
+                        : "bg-[color:color-mix(in_srgb,#94a3b8_16%,transparent)] text-[#c9c0b7]",
                 )}>
-                  {resolvingConnection ? "reconnecting" : frameLoaded ? "live" : "loading"}
+                  {terminalStateBadge}
                 </span>
+                {fallbackSurfaceVisible ? (
+                  <span className="rounded-[999px] border border-white/10 bg-[#181212] px-2 py-0.5 text-[#a79c94]">
+                    Read-only restore{fallbackSource ? ` · ${fallbackSource}` : ""}
+                  </span>
+                ) : null}
                 {sessionState ? (
                   <span className="truncate text-[#8f857d]">{sessionState}</span>
                 ) : null}
@@ -1060,39 +1182,66 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 ) : null}
               </div>
             </div>
-            {!frameLoaded ? (
-              <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
-                <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Loading ttyd terminal…</span>
-                </div>
-              </div>
-            ) : null}
-            <iframe
-              key={sessionId}
-              ref={ttydIframeRef}
-              title={`ttyd terminal for ${sessionId}`}
-              src={terminalUrl}
-              className="block h-full min-h-0 w-full flex-1 border-0 bg-[#060404]"
-              allow="clipboard-read; clipboard-write"
-              loading="eager"
-              onError={() => {
-                setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
-              }}
-              onLoad={() => {
-                const now = Date.now();
-                iframeLoadCountRef.current += 1;
-                lastFrameLoadedAtRef.current = now;
-                if (firstFrameLoadedAtRef.current === null) {
-                  firstFrameLoadedAtRef.current = now;
-                }
-                setFrameLoaded(true);
-                setConnectionError(null);
-                applyKeyboardAwareTerminalHeight();
-                syncTerminalAuthToken();
-                scheduleTerminalResizeBurst();
-              }}
-            />
+            <div className="relative min-h-0 flex-1 bg-[#060404]">
+              {fallbackSurfaceVisible ? (
+                <TerminalSnapshotFallback
+                  snapshot={fallbackSnapshot}
+                  transcript={fallbackTranscript}
+                  className="absolute inset-0"
+                />
+              ) : null}
+              {!frameLoaded ? (
+                fallbackSurfaceVisible ? (
+                  <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2">
+                    <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>{connectionError ? "Recovering terminal output…" : "Loading ttyd terminal…"}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
+                    <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Loading ttyd terminal…</span>
+                    </div>
+                  </div>
+                )
+              ) : null}
+              {terminalUrl ? (
+                <iframe
+                  key={sessionId}
+                  ref={ttydIframeRef}
+                  title={`ttyd terminal for ${sessionId}`}
+                  src={terminalUrl}
+                  className="block h-full min-h-0 w-full flex-1 border-0 bg-[#060404]"
+                  style={{
+                    opacity: frameLoaded ? 1 : 0,
+                    position: fallbackSurfaceVisible ? "absolute" : "relative",
+                    inset: fallbackSurfaceVisible ? 0 : undefined,
+                    zIndex: 5,
+                    pointerEvents: frameLoaded ? "auto" : "none",
+                  }}
+                  allow="clipboard-read; clipboard-write"
+                  loading="eager"
+                  onError={() => {
+                    setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
+                  }}
+                  onLoad={() => {
+                    const now = Date.now();
+                    iframeLoadCountRef.current += 1;
+                    lastFrameLoadedAtRef.current = now;
+                    if (firstFrameLoadedAtRef.current === null) {
+                      firstFrameLoadedAtRef.current = now;
+                    }
+                    setFrameLoaded(true);
+                    setConnectionError(null);
+                    applyKeyboardAwareTerminalHeight();
+                    syncTerminalAuthToken();
+                    scheduleTerminalResizeBurst();
+                  }}
+                />
+              ) : null}
+            </div>
           </div>
         ) : (
           <div className="flex h-full items-center justify-center p-4">
@@ -1127,10 +1276,16 @@ function SessionTerminalView(props: SessionTerminalProps) {
         )}
       </div>
 
-      {!showPromptBar && (queuedInsertError || attachmentError) ? (
+      {!showPromptBar && (connectionError || queuedInsertError || attachmentError) ? (
         <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
-          {queuedInsertError ? (
+          {connectionError ? (
             <div className="flex items-center gap-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{connectionError}</span>
+            </div>
+          ) : null}
+          {queuedInsertError ? (
+            <div className={`flex items-center gap-1.5 ${connectionError ? "mt-2" : ""}`}>
               <AlertCircle className="h-3 w-3 shrink-0" />
               <span className="truncate">{queuedInsertError}</span>
               <button
@@ -1143,7 +1298,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
             </div>
           ) : null}
           {attachmentError ? (
-            <div className={`flex items-center gap-1.5 ${queuedInsertError ? "mt-2" : ""}`}>
+            <div className={`flex items-center gap-1.5 ${(connectionError || queuedInsertError) ? "mt-2" : ""}`}>
               <AlertCircle className="h-3 w-3 shrink-0" />
               <span className="truncate">{attachmentError}</span>
               <button
