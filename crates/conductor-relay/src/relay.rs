@@ -1315,7 +1315,10 @@ impl RelayState {
                     }
                 }
                 TerminalPeerKind::Bridge => {
-                    let session = inner.terminal_sessions.remove(terminal_id).expect("session exists");
+                    let session = inner
+                        .terminal_sessions
+                        .remove(terminal_id)
+                        .expect("session exists");
                     session.browser.map(|record| record.tx)
                 }
             }
@@ -1347,7 +1350,8 @@ impl RelayState {
             let Some(session) = inner.terminal_sessions.get(terminal_id) else {
                 return;
             };
-            if session.browser.is_some() || session.browser_disconnected_at != Some(disconnected_at) {
+            if session.browser.is_some() || session.browser_disconnected_at != Some(disconnected_at)
+            {
                 return;
             }
 
@@ -3031,7 +3035,9 @@ mod tests {
                     device_id: "device-123".to_string(),
                     owner_user_id: "user@example.com".to_string(),
                     browser: None,
-                    bridge: Some(TerminalConnectionRecord { tx: terminal_bridge_tx }),
+                    bridge: Some(TerminalConnectionRecord {
+                        tx: terminal_bridge_tx,
+                    }),
                     bridge_ready_waiters: vec![],
                     browser_disconnected_at: Some(Instant::now()),
                 },
@@ -3044,7 +3050,10 @@ mod tests {
             .expect("terminal should be reused");
 
         assert_eq!(terminal_id, "terminal-1");
-        assert!(control_bridge_rx.try_recv().is_err(), "reuse should not start a new bridge proxy session");
+        assert!(
+            control_bridge_rx.try_recv().is_err(),
+            "reuse should not start a new bridge proxy session"
+        );
     }
 
     #[tokio::test]
@@ -3074,9 +3083,14 @@ mod tests {
             .unregister_terminal_connection("terminal-1", TerminalPeerKind::Browser)
             .await;
 
-        let (replacement_browser_tx, _replacement_browser_rx) = mpsc::unbounded_channel::<Message>();
+        let (replacement_browser_tx, _replacement_browser_rx) =
+            mpsc::unbounded_channel::<Message>();
         state
-            .register_terminal_connection("terminal-1", TerminalPeerKind::Browser, replacement_browser_tx)
+            .register_terminal_connection(
+                "terminal-1",
+                TerminalPeerKind::Browser,
+                replacement_browser_tx,
+            )
             .await
             .expect("browser should reattach");
 
@@ -3091,7 +3105,10 @@ mod tests {
             assert!(session.browser.is_some());
             assert!(session.bridge.is_some());
         }
-        assert!(bridge_rx.try_recv().is_err(), "bridge should stay open after reattach");
+        assert!(
+            bridge_rx.try_recv().is_err(),
+            "bridge should stay open after reattach"
+        );
     }
 
     #[tokio::test]
@@ -3131,7 +3148,10 @@ mod tests {
             );
         }
 
-        let close_message = bridge_rx.recv().await.expect("bridge should receive cleanup close");
+        let close_message = bridge_rx
+            .recv()
+            .await
+            .expect("bridge should receive cleanup close");
         assert!(matches!(close_message, Message::Close(_)));
     }
 }

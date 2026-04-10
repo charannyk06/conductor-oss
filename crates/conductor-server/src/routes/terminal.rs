@@ -2563,7 +2563,9 @@ mod tests {
         assert!(injected.contains("const sessionIdFromPath = () => {"));
         assert!(injected.contains("const storageKey = () => {"));
         assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
-        assert!(injected.contains("const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';"));
+        assert!(
+            injected.contains("const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';")
+        );
         assert!(injected.contains("const TOKEN_REQUEST_THROTTLE_MS = 1500;"));
         assert!(
             injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
