@@ -1028,7 +1028,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
             ref={terminalHostRef}
             className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
           >
-            <div className="flex items-center justify-between gap-2 border-b border-white/8 bg-[#0f0b0b]/92 px-3 py-2 text-[11px] text-[#c9c0b7]">
+            <div className="relative z-20 flex items-center justify-between gap-2 border-b border-white/8 bg-[#0f0b0b]/92 px-3 py-2 text-[11px] text-[#c9c0b7]">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="rounded-[999px] border border-white/10 bg-[#181212] px-2 py-0.5 uppercase tracking-wide text-[#efe8e1]">
                   {normalizedRuntimeMode ?? "agent"}

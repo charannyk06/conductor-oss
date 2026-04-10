@@ -321,22 +321,24 @@ export class BrowserManager {
       return { canGoBack: false, canGoForward: false };
     }
 
+    let cdpSession: Awaited<ReturnType<PreviewSession["page"]["createCDPSession"]>> | null = null;
     try {
-      const cdpSession = await session.page.createCDPSession();
+      cdpSession = await session.page.createCDPSession();
       const history = await cdpSession.send("Page.getNavigationHistory") as {
         currentIndex: number;
         entries: Array<unknown>;
       };
-      await cdpSession.detach().catch(() => null);
       return {
         canGoBack: history.currentIndex > 0,
         canGoForward: history.currentIndex < history.entries.length - 1,
       };
     } catch {
       return {
-        canGoBack: session.page.url() !== "about:blank",
+        canGoBack: false,
         canGoForward: false,
       };
+    } finally {
+      await cdpSession?.detach().catch(() => null);
     }
   }
 
