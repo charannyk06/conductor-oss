@@ -97,6 +97,11 @@ struct TerminalSessionRecord {
     bridge: Option<TerminalConnectionRecord>,
     bridge_ready_waiters: Vec<oneshot::Sender<()>>,
     browser_disconnected_at: Option<Instant>,
+    /// When true, the browser has sent a PAUSE frame and output from the bridge
+    /// should not be forwarded until a RESUME frame arrives.
+    browser_paused: bool,
+    /// Buffered output chunks received while the browser was paused, replayed on resume.
+    pause_buffer: Vec<Message>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +135,12 @@ struct ProxiedPreviewResponse {
 }
 
 const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(8);
+/// Maximum number of output chunks buffered while the browser peer is paused.
+const TERMINAL_PAUSE_BUFFER_CAPACITY: usize = 256;
+/// ttyd protocol command bytes (first byte of binary WebSocket message).
+const TTYD_CMD_RESIZE: u8 = b'1';
+const TTYD_CMD_PAUSE: u8 = b'2';
+const TTYD_CMD_RESUME: u8 = b'3';
 #[cfg(not(test))]
 const TERMINAL_BROWSER_REATTACH_GRACE: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -1164,6 +1175,8 @@ impl RelayState {
                         bridge: None,
                         bridge_ready_waiters: vec![bridge_ready_tx],
                         browser_disconnected_at: None,
+                    browser_paused: false,
+                    pause_buffer: Vec::new(),
                     },
                 );
 
@@ -1372,6 +1385,105 @@ impl RelayState {
         peer_kind: TerminalPeerKind,
         message: &Message,
     ) {
+        // Handle PAUSE/RESUME control frames from the browser peer.
+        if peer_kind == TerminalPeerKind::Browser {
+            if let Some(cmd) = Self::extract_ttyd_command(message) {
+                match cmd {
+                    TTYD_CMD_PAUSE => {
+                        info!(%terminal_id, "relay terminal browser sent PAUSE");
+                        let mut inner = self.inner.lock().await;
+                        if let Some(session) = inner.terminal_sessions.get_mut(terminal_id) {
+                            session.browser_paused = true;
+                            session.pause_buffer.clear();
+                        }
+                        // Forward PAUSE to bridge so upstream can also pause if supported.
+                        let bridge_tx = {
+                            let inner = self.inner.lock().await;
+                            inner.terminal_sessions.get(terminal_id)
+                                .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
+                        };
+                        if let Some(tx) = bridge_tx {
+                            let _ = tx.send(Message::Binary(vec![TTYD_CMD_PAUSE].into()));
+                        }
+                        return;
+                    }
+                    TTYD_CMD_RESUME => {
+                        info!(%terminal_id, "relay terminal browser sent RESUME");
+                        // Collect buffered messages and clear pause state under one lock.
+                        let buffered = {
+                            let mut inner = self.inner.lock().await;
+                            if let Some(session) = inner.terminal_sessions.get_mut(terminal_id) {
+                                session.browser_paused = false;
+                                std::mem::take(&mut session.pause_buffer)
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        // Replay buffered messages to the browser.
+                        let browser_tx = {
+                            let inner = self.inner.lock().await;
+                            inner.terminal_sessions.get(terminal_id)
+                                .and_then(|s| s.browser.as_ref().map(|r| r.tx.clone()))
+                        };
+                        if let Some(tx) = browser_tx {
+                            for buffered_msg in buffered {
+                                if tx.send(buffered_msg).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        // Forward RESUME to bridge so upstream can also resume if supported.
+                        let bridge_tx = {
+                            let inner = self.inner.lock().await;
+                            inner.terminal_sessions.get(terminal_id)
+                                .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
+                        };
+                        if let Some(tx) = bridge_tx {
+                            let _ = tx.send(Message::Binary(vec![TTYD_CMD_RESUME].into()));
+                        }
+                        return;
+                    }
+                    TTYD_CMD_RESIZE => {
+                        // Log and forward RESIZE frames from browser to bridge.
+                        info!(%terminal_id, "relay terminal browser sent RESIZE");
+                        let bridge_tx = {
+                            let inner = self.inner.lock().await;
+                            inner.terminal_sessions.get(terminal_id)
+                                .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
+                        };
+                        if let (Some(tx), Some(cloned)) = (bridge_tx, clone_websocket_message(message)) {
+                            let _ = tx.send(cloned);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // When the browser is paused, buffer bridge→browser output instead of forwarding.
+        if peer_kind == TerminalPeerKind::Bridge {
+            let should_buffer = {
+                let inner = self.inner.lock().await;
+                inner.terminal_sessions.get(terminal_id)
+                    .map(|s| s.browser_paused)
+                    .unwrap_or(false)
+            };
+            if should_buffer {
+                let mut inner = self.inner.lock().await;
+                if let Some(session) = inner.terminal_sessions.get_mut(terminal_id) {
+                    if let Some(cloned) = clone_websocket_message(message) {
+                        if session.pause_buffer.len() >= TERMINAL_PAUSE_BUFFER_CAPACITY {
+                            session.pause_buffer.remove(0);
+                        }
+                        session.pause_buffer.push(cloned);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Default: forward to the counterpart peer.
         let counterpart = {
             let inner = self.inner.lock().await;
             inner
@@ -1386,6 +1498,15 @@ impl RelayState {
 
         if let (Some(counterpart), Some(cloned)) = (counterpart, clone_websocket_message(message)) {
             let _ = counterpart.send(cloned);
+        }
+    }
+
+    /// Extract the ttyd command byte from a WebSocket message.
+    /// Returns the first byte for binary messages, or None for text/non-binary.
+    fn extract_ttyd_command(message: &Message) -> Option<u8> {
+        match message {
+            Message::Binary(data) if data.len() >= 1 => Some(data[0]),
+            _ => None,
         }
     }
 
@@ -3040,6 +3161,8 @@ mod tests {
                     }),
                     bridge_ready_waiters: vec![],
                     browser_disconnected_at: Some(Instant::now()),
+                    browser_paused: false,
+                    pause_buffer: Vec::new(),
                 },
             );
         }
@@ -3075,6 +3198,8 @@ mod tests {
                     bridge: Some(TerminalConnectionRecord { tx: bridge_tx }),
                     bridge_ready_waiters: vec![],
                     browser_disconnected_at: None,
+                    browser_paused: false,
+                    pause_buffer: Vec::new(),
                 },
             );
         }
@@ -3130,6 +3255,8 @@ mod tests {
                     bridge: Some(TerminalConnectionRecord { tx: bridge_tx }),
                     bridge_ready_waiters: vec![],
                     browser_disconnected_at: None,
+                    browser_paused: false,
+                    pause_buffer: Vec::new(),
                 },
             );
         }
