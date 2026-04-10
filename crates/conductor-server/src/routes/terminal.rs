@@ -1862,7 +1862,6 @@ async fn handle_ttyd_frontend_socket(
     }
     let handle = state.ensure_terminal_host(&session_id).await;
     let mut terminal_rx = handle.terminal_tx.subscribe();
-    let snapshot = state.current_terminal_restore_snapshot(&session_id).await;
     let mut last_sequence_sent = 0_u64;
     let mut client_ready = false;
     let mut paused = false;
@@ -1889,7 +1888,6 @@ async fn handle_ttyd_frontend_socket(
                             &handle,
                             &session_id,
                             &mut client_socket,
-                            &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
@@ -1916,7 +1914,6 @@ async fn handle_ttyd_frontend_socket(
                             &handle,
                             &session_id,
                             &mut client_socket,
-                            &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
@@ -1983,14 +1980,16 @@ async fn handle_ttyd_frontend_socket(
                         if paused {
                             continue;
                         }
-                        if let Some(snapshot) = state.current_terminal_restore_snapshot(&session_id).await {
-                            let bytes =
-                                render_restore_snapshot_bytes(&snapshot, &mut last_sequence_sent);
-                            if !bytes.is_empty()
-                                && client_socket.send(Message::Binary(ttyd_protocol::encode_output(&bytes).into())).await.is_err()
-                            {
-                                break;
-                            }
+                        let bytes = render_current_restore_snapshot_bytes(
+                            &state,
+                            &session_id,
+                            &mut last_sequence_sent,
+                        )
+                        .await;
+                        if !bytes.is_empty()
+                            && client_socket.send(Message::Binary(ttyd_protocol::encode_output(&bytes).into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2008,13 +2007,24 @@ fn render_restore_snapshot_bytes(
     snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES)
 }
 
+async fn render_current_restore_snapshot_bytes(
+    state: &Arc<AppState>,
+    session_id: &str,
+    last_sequence_sent: &mut u64,
+) -> Vec<u8> {
+    state
+        .current_terminal_restore_snapshot(session_id)
+        .await
+        .map(|snapshot| render_restore_snapshot_bytes(&snapshot, last_sequence_sent))
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_ttyd_frontend_client_message(
     state: &Arc<AppState>,
     handle: &Arc<crate::state::LiveSessionHandle>,
     session_id: &str,
     client_socket: &mut WebSocket,
-    snapshot: &Option<TerminalRestoreSnapshot>,
     client_ready: &mut bool,
     last_sequence_sent: &mut u64,
     paused: &mut bool,
@@ -2032,13 +2042,17 @@ async fn handle_ttyd_frontend_client_message(
                     ttyd_protocol::encode_preferences(&ttyd_protocol::default_preferences()).into(),
                 ))
                 .await?;
-            if let Some(snapshot) = snapshot.as_ref() {
-                let bytes = render_restore_snapshot_bytes(snapshot, last_sequence_sent);
-                if !bytes.is_empty() {
-                    client_socket
-                        .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
-                        .await?;
-                }
+            // Always pull a fresh restore snapshot at handshake time. The browser can
+            // attach slightly after the socket opens, and output may arrive during
+            // that gap. Re-reading the durable terminal state here keeps reconnects
+            // lossless and mirrors Cabinet's "rehydrate from retained session state"
+            // behavior without replaying the whole raw stream.
+            let bytes =
+                render_current_restore_snapshot_bytes(state, session_id, last_sequence_sent).await;
+            if !bytes.is_empty() {
+                client_socket
+                    .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                    .await?;
             }
         }
         Some(ttyd_protocol::ClientMessage::Input(mut data)) => {
@@ -2087,13 +2101,13 @@ async fn handle_ttyd_frontend_client_message(
                 // Send the current snapshot as the authoritative terminal state.
                 // The snapshot includes all output up to this point, so it
                 // provides a smooth transition from the pause gap.
-                if let Some(snapshot) = state.current_terminal_restore_snapshot(session_id).await {
-                    let bytes = render_restore_snapshot_bytes(&snapshot, last_sequence_sent);
-                    if !bytes.is_empty() {
-                        client_socket
-                            .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
-                            .await?;
-                    }
+                let bytes =
+                    render_current_restore_snapshot_bytes(state, session_id, last_sequence_sent)
+                        .await;
+                if !bytes.is_empty() {
+                    client_socket
+                        .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                        .await?;
                 }
             }
         }
@@ -2450,6 +2464,33 @@ mod tests {
 
         assert_eq!(last_sequence_sent, 42);
         assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_current_restore_snapshot_bytes_pulls_fresh_terminal_state() {
+        let (state, root) = build_test_state().await;
+        let (session, _input_rx) =
+            seed_live_terminal_session(&state, "session-handshake-fresh").await;
+
+        let stale = state
+            .current_terminal_restore_snapshot(&session.id)
+            .await
+            .expect("stale snapshot should exist");
+
+        state
+            .emit_terminal_text(&session.id, "late line after socket open\r\n")
+            .await;
+
+        let mut last_sequence_sent = 0;
+        let bytes =
+            render_current_restore_snapshot_bytes(&state, &session.id, &mut last_sequence_sent)
+                .await;
+        let rendered = String::from_utf8_lossy(&bytes);
+
+        assert!(rendered.contains("late line after socket open"));
+        assert!(last_sequence_sent > stale.sequence);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
