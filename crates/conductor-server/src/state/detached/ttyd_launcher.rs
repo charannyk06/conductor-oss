@@ -36,7 +36,12 @@ const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from
 const TTYD_OWNER_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const TTYD_OWNER_RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 const TTYD_OWNER_RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
-const TTYD_OWNER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Maximum silence before considering the ttyd connection dead.
+/// ttyd sends pings every 30s (via --ping-interval), so 5 minutes of silence
+/// means ~10 missed pings, which is a clear sign the connection is gone.
+/// This replaces the old 90s read timeout which caused false disconnects
+/// during normal interactive idle periods.
+const TTYD_OWNER_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// Maximum reconnect attempts before giving up permanently.
 /// Prevents unbounded retry loops and output consumer task leaks.
 const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 20;
@@ -836,6 +841,17 @@ async fn run_ttyd_session_owner_with_retry(
                         attempts = attempt,
                         "ttyd session owner exceeded max reconnect attempts, giving up"
                     );
+                    // Notify all connected frontend clients that the terminal backend
+                    // has failed, instead of silently dying and leaving a frozen terminal.
+                    state.emit_terminal_stream_event(
+                        sid,
+                        crate::state::types::TerminalStreamEvent::Error(
+                            "Terminal backend exhausted all reconnection attempts. The session may need to be restarted.".to_string()
+                        ),
+                    ).await;
+                    // Detach the terminal runtime so a subsequent restore_ttyd_runtime()
+                    // can create a fresh owner instead of finding a stale attachment.
+                    state.detach_terminal_runtime(sid).await;
                     return Ok(());
                 }
                 let delay = owner_reconnect_delay(attempt);
@@ -927,9 +943,23 @@ async fn run_ttyd_session_owner(
         }
     };
     let (mut w, mut r) = ws.split();
+    // Use the last-known terminal dimensions from the state store instead of
+    // hardcoded 160x48. This prevents a jarring resize flash on reconnect.
+    let (init_cols, init_rows) = state
+        .terminal_hosts
+        .get(sid)
+        .await
+        .and_then(|handle| {
+            handle
+                .terminal_store
+                .lock()
+                .ok()
+                .map(|store| store.dimensions())
+        })
+        .unwrap_or((160, 48));
     if let Err(err) = w
         .send(WsMessage::Binary(
-            ttyd_protocol::encode_handshake(160, 48).into(),
+            ttyd_protocol::encode_handshake(init_cols, init_rows).into(),
         ))
         .await
     {
@@ -954,7 +984,7 @@ async fn run_ttyd_session_owner(
     let mut batch_flush_interval = tokio::time::interval(std::time::Duration::from_millis(16));
     batch_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut batch_dirty = false;
-    let mut read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
+    let mut last_activity = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -966,10 +996,10 @@ async fn run_ttyd_session_owner(
                         .await
                         .context("ttyd session owner pong send failed")?;
                     tracing::debug!(session_id = %sid, "ttyd session owner sent pong");
-                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
+                    last_activity = tokio::time::Instant::now();
                 }
                 Some(Ok(WsMessage::Binary(data))) if data.len() > 1 && data[0] == ttyd_protocol::CMD_OUTPUT => {
-                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
+                    last_activity = tokio::time::Instant::now();
                     let payload = &data[1..];
                     state.emit_terminal_bytes(sid, payload).await;
                     match std::str::from_utf8(payload) {
@@ -995,14 +1025,18 @@ async fn run_ttyd_session_owner(
                     }
                 }
                 Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {
-                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
+                    last_activity = tokio::time::Instant::now();
                 }
                 Some(Ok(WsMessage::Close(_))) | None => break,
                 Some(Err(err)) => return Err(err.into()),
             },
-            _ = tokio::time::sleep_until(read_deadline) => {
-                tracing::info!(session_id = %sid, timeout_secs = TTYD_OWNER_READ_TIMEOUT.as_secs(), "ttyd session owner detected a stale connection");
-                return Err(anyhow!("ttyd session owner read timeout"));
+            _ = tokio::time::sleep_until(last_activity + TTYD_OWNER_SILENCE_TIMEOUT) => {
+                tracing::warn!(
+                    session_id = %sid,
+                    silence_secs = TTYD_OWNER_SILENCE_TIMEOUT.as_secs(),
+                    "ttyd session owner detected prolonged silence (no pings or data), connection likely dead"
+                );
+                return Err(anyhow!("ttyd session owner silence timeout"));
             },
             input = channels.input_rx.recv(), if !input_closed => match input {
                 Some(input) => {

@@ -182,6 +182,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const resolvingRefreshCountRef = useRef(0);
   const iframeRefreshRequestCountRef = useRef(0);
   const retryCountRef = useRef(0);
+  const refreshTimerRef = useRef<number | null>(null);
 
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
@@ -377,17 +378,26 @@ function SessionTerminalView(props: SessionTerminalProps) {
   }, [clearBurstResizeTimers]);
 
   // When the session stops being live, abort token fetch; when it becomes live again, refetch.
+  // Debounced so rapid SSE status flickers don't tear down/rebuild the terminal connection.
   useEffect(() => {
-    const prev = prevExpectsLiveTerminalRef.current;
-    prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
-    if (!expectsLiveTerminal && prev === true) {
-      terminalTokenFetchAbortRef.current?.abort();
-      setResolvingConnection(false);
-      setConnectionError(null);
-    }
-    if (expectsLiveTerminal && prev === false) {
-      setConnectionRefreshTick((current) => current + 1);
-    }
+    const timer = window.setTimeout(() => {
+      // Seed the ref on the very first invocation so the debounce logic
+      // always has a valid previous value to compare against.
+      if (prevExpectsLiveTerminalRef.current === null || prevExpectsLiveTerminalRef.current === undefined) {
+        prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
+      }
+      const prev = prevExpectsLiveTerminalRef.current;
+      prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
+      if (!expectsLiveTerminal && prev === true) {
+        terminalTokenFetchAbortRef.current?.abort();
+        setResolvingConnection(false);
+        setConnectionError(null);
+      }
+      if (expectsLiveTerminal && prev === false) {
+        setConnectionRefreshTick((current) => current + 1);
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
   }, [expectsLiveTerminal]);
 
   useEffect(() => {
@@ -456,8 +466,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
           const delayMs = computeTokenRefreshDelayMs(connection.expiresInSeconds);
           if (delayMs !== null) {
             refreshTimer = window.setTimeout(() => {
+              refreshTimerRef.current = null;
               setConnectionRefreshTick((current) => current + 1);
             }, delayMs);
+            refreshTimerRef.current = refreshTimer;
           }
           return;
         }
@@ -508,6 +520,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
       if (refreshTimer !== null) {
         window.clearTimeout(refreshTimer);
+      }
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
       }
     };
   }, [bridgeId, connectionRefreshTick, sessionId]);
@@ -580,6 +596,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
         // Suppress resize to avoid ResizeObserver fitting while the browser/webview
         // reports zero or intermediate sizes during tab or window transitions.
         resizeSuppressUntilRef.current = window.Date.now() + 320;
+        // Pause token refresh while the page is hidden to avoid wasted fetches.
+        if (refreshTimerRef.current !== null) {
+          window.clearTimeout(refreshTimerRef.current);
+          refreshTimerRef.current = null;
+        }
         return;
       }
 
@@ -587,6 +608,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
         // Let layout settle (Radix tabs, split view, embedded webviews) before xterm fit.
         resizeSuppressUntilRef.current = window.Date.now() + 200;
         requestLifecycleRefresh();
+        // Bump connectionRefreshTick to force a fresh token resolve and
+        // re-establish the proactive refresh schedule that was cancelled
+        // when the page went hidden.
+        setConnectionRefreshTick((current) => current + 1);
       }
     };
     const handlePageShow = () => {

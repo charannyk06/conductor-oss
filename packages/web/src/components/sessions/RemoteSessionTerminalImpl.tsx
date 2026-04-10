@@ -25,9 +25,15 @@ import {
 } from "@/lib/clipboardImage";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
-const CMD_OUTPUT = "0".charCodeAt(0);
-const CMD_RESIZE = "1".charCodeAt(0);
+// Server→client command bytes (ttyd binary protocol).
+// See crates/conductor-server/src/routes/ttyd_protocol.rs for the authoritative list.
+const CMD_OUTPUT = "0".charCodeAt(0);            // 0x30 – terminal output
+const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);  // 0x31 – server-set window title
+const CMD_SET_PREFERENCES = "2".charCodeAt(0);   // 0x32 – server-set preferences
+// Client→server command bytes (used for encoding outgoing frames).
+const CMD_RESIZE = "1".charCodeAt(0);            // 0x31 – resize terminal
 const RECONNECT_MAX_DELAY_MS = 4_000;
+const MAX_RECONNECT_ATTEMPTS = 20;
 type TerminalSyncMode = "resize" | "handshake";
 
 const TERMINAL_THEME = {
@@ -380,12 +386,24 @@ export function RemoteSessionTerminal({
     if (!expectsRelayTerminal) {
       return;
     }
+    if (retryAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      setError("Max reconnect attempts reached. Click the reload button to retry manually.");
+      return;
+    }
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
     }
     const delay = Math.min(RECONNECT_MAX_DELAY_MS, 500 * 2 ** retryAttemptRef.current);
-    retryAttemptRef.current = Math.min(retryAttemptRef.current + 1, 3);
+    const attempt = retryAttemptRef.current + 1;
+    console.debug(
+      `[conductor:terminal] relay reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
+    );
     reconnectTimerRef.current = window.setTimeout(() => {
+      // Only increment the attempt counter when the reconnect actually fires,
+      // not when it is scheduled — otherwise hide/show cycles with cancelled
+      // timers exhaust the budget without ever hitting the network.
+      retryAttemptRef.current = attempt;
+      reconnectTimerRef.current = null;
       setConnectionTick((value) => value + 1);
     }, delay);
   }, [expectsRelayTerminal]);
@@ -638,9 +656,32 @@ export function RemoteSessionTerminal({
         applyGeometry();
       });
     const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+    let hiddenAt: number | null = null;
     const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = window.Date.now();
+        // Pause reconnect timer while the tab is hidden to avoid unnecessary
+        // reconnection attempts when the user isn't looking at the terminal.
+        if (reconnectTimerRef.current !== null) {
+          window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        return;
+      }
       if (document.visibilityState === "visible") {
         refreshTerminalLayout();
+        // If we were previously disconnected, schedule a reconnect now that
+        // the tab is visible again. Use the connection quality to decide:
+        // if the socket is still open, just refresh layout; if offline or
+        // closed, trigger a reconnect attempt.
+        const socket = socketRef.current;
+        if (hiddenAt !== null && (!socket || socket.readyState !== WebSocket.OPEN)) {
+          // Only reconnect if we haven't already exhausted the budget.
+          if (retryAttemptRef.current < MAX_RECONNECT_ATTEMPTS) {
+            setConnectionTick((value) => value + 1);
+          }
+        }
+        hiddenAt = null;
       }
     };
     const fontSet = typeof document === "undefined" ? null : document.fonts;
@@ -780,6 +821,38 @@ export function RemoteSessionTerminal({
                     terminal.scrollToBottom();
                   }
                   setHasOutput(true);
+                }
+                break;
+              }
+              case CMD_SET_WINDOW_TITLE: {
+                // ttyd sends the terminal title as UTF-8 after the command byte.
+                // Update document.title so the browser tab reflects the session.
+                const titleBytes = frame.slice(1);
+                if (titleBytes.length > 0) {
+                  try {
+                    const title = new TextDecoder().decode(titleBytes);
+                    if (title.trim()) {
+                      document.title = title.trim();
+                    }
+                  } catch {
+                    // Ignore malformed title payloads.
+                  }
+                }
+                break;
+              }
+              case CMD_SET_PREFERENCES: {
+                // The server sends JSON preferences (e.g. { bellSound: "" }).
+                // Decode and acknowledge; the frontend owns the terminal theme
+                // and font sizing so we intentionally skip applying those fields.
+                const prefBytes = frame.slice(1);
+                if (prefBytes.length > 0) {
+                  try {
+                    const _prefs = JSON.parse(new TextDecoder().decode(prefBytes));
+                    // Preferences acknowledged. Terminal theme and font sizing are
+                    // managed by the frontend via resolveSessionTerminalViewportOptions.
+                  } catch {
+                    // Ignore malformed preference payloads.
+                  }
                 }
                 break;
               }

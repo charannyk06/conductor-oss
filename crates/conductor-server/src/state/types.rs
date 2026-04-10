@@ -235,6 +235,10 @@ impl TerminalStateStore {
         }
     }
 
+    pub fn dimensions(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
     pub fn hydrate_from_snapshot(&mut self, snapshot: &TerminalRestoreSnapshot) {
         let mut next = Self::with_size(snapshot.rows, snapshot.cols);
         let bytes = snapshot.full_render_bytes();
