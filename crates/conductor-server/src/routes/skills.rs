@@ -32,6 +32,7 @@ const ALL_SKILL_AGENTS: &[&str] = &[
     "qwen-code",
     "ccr",
     "github-copilot",
+    "letta",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +110,12 @@ static SKILL_AGENT_CATALOG: &[SkillAgentCatalogEntry] = &[
         name: "GitHub Copilot",
         project_roots: &[".github/skills", ".claude/skills", ".agents/skills"],
         user_roots: &["~/.copilot/skills", "~/.claude/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "letta",
+        name: "Letta Code",
+        project_roots: &[".skills", ".letta/skills", ".agents/skills"],
+        user_roots: &["~/.letta/skills", "~/.agents/skills"],
     },
 ];
 

@@ -240,6 +240,11 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
       installPackage: "@musistudio/claude-code-router",
       installLabel: "Install Claude Code Router",
     },
+    letta: {
+      commands: ["letta", "letta-code"],
+      installPackage: "@letta-ai/letta-code",
+      installLabel: "Install Letta Code",
+    },
   };
 
   return byAgent[normalized] ?? { commands: [normalized] };

@@ -228,6 +228,9 @@ export async function ensureBridgeTtydSession(
  *
  * Additionally, it attempts a direct xterm fit+refresh if the terminal
  * instance can be located, providing a belt-and-suspenders approach.
+ *
+ * `dispatchResize` preserves xterm scroll position (or stick-to-bottom), matching
+ * `TTYD_RESIZE_SHIM` in `crates/conductor-server/src/routes/terminal.rs`.
  */
 export function injectTtydResizeShim(html: string): string {
   const marker = "conductor-ttyd-resize-shim";
@@ -244,28 +247,23 @@ export function injectTtydResizeShim(html: string): string {
 
   var RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
   var pendingRaf = null;
+  var pendingBurstRaf = null;
   var burstTimers = [];
 
   function clearBurstTimers() {
+    if (pendingBurstRaf !== null) {
+      window.cancelAnimationFrame(pendingBurstRaf);
+      pendingBurstRaf = null;
+    }
     for (var i = 0; i < burstTimers.length; i++) {
       window.clearTimeout(burstTimers[i]);
     }
     burstTimers = [];
   }
 
-  function dispatchResize() {
-    window.dispatchEvent(new Event("resize"));
-  }
-
-  function scheduleResizeBurst() {
-    clearBurstTimers();
-    if (typeof window.requestAnimationFrame === "function") {
-      window.requestAnimationFrame(dispatchResize);
-    } else {
-      dispatchResize();
-    }
-    burstTimers.push(window.setTimeout(dispatchResize, 120));
-    burstTimers.push(window.setTimeout(dispatchResize, 360));
+  function findXtermScrollHost() {
+    return document.querySelector(".xterm-viewport")
+      || document.querySelector(".xterm-scrollable-element");
   }
 
   function findXtermTerminal() {
@@ -292,6 +290,55 @@ export function injectTtydResizeShim(html: string): string {
         if (rows > 0) terminal.refresh(0, rows - 1);
       } catch(e) {}
     });
+  }
+
+  function dispatchResize() {
+    var scrollHost = findXtermScrollHost();
+    if (!scrollHost) {
+      window.dispatchEvent(new Event("resize"));
+      queueXtermFit();
+      return;
+    }
+
+    var maxScroll = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+    var atBottom = maxScroll <= 0 || maxScroll - scrollHost.scrollTop < 12;
+    var scrollRatio = maxScroll > 0 ? scrollHost.scrollTop / maxScroll : 1;
+
+    window.dispatchEvent(new Event("resize"));
+
+    function restore() {
+      var sh = findXtermScrollHost();
+      if (!sh) return;
+      var newMax = Math.max(0, sh.scrollHeight - sh.clientHeight);
+      if (newMax <= 0) return;
+      if (atBottom) {
+        sh.scrollTop = newMax;
+      } else {
+        sh.scrollTop = Math.round(scrollRatio * newMax);
+      }
+      queueXtermFit();
+    }
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(function() {
+        window.requestAnimationFrame(restore);
+      });
+    } else {
+      restore();
+    }
+  }
+
+  function scheduleResizeBurst() {
+    clearBurstTimers();
+    if (typeof window.requestAnimationFrame === "function") {
+      pendingBurstRaf = window.requestAnimationFrame(function() {
+        pendingBurstRaf = null;
+        dispatchResize();
+      });
+    } else {
+      dispatchResize();
+    }
+    burstTimers.push(window.setTimeout(dispatchResize, 120));
+    burstTimers.push(window.setTimeout(dispatchResize, 360));
   }
 
   function handleResizeMessage(event) {
@@ -342,6 +389,8 @@ export function injectTtydResizeShim(html: string): string {
     void document.fonts.ready.then(function() { scheduleResizeBurst(); queueXtermFit(); }).catch(function() {});
   }
   syncViewportSizeEmbedded();
+  // Match TTYD_RESIZE_SHIM boot in terminal.rs (initial sync + scheduleResizeBurst).
+  scheduleResizeBurst();
 
   window.addEventListener("message", handleResizeMessage, false);
 

@@ -107,6 +107,14 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
             global_flag: "-g",
         },
     ),
+    (
+        AgentKind::Letta,
+        AgentInstallInfo {
+            binaries: &["letta", "letta-code"],
+            package: "@letta-ai/letta-code",
+            global_flag: "-g",
+        },
+    ),
 ];
 
 /// Returns true when auto-update is enabled via environment.
@@ -416,6 +424,7 @@ mod tests {
         assert!(install_info_for(&AgentKind::Codex).is_some());
         assert!(install_info_for(&AgentKind::CursorCli).is_some());
         assert!(install_info_for(&AgentKind::OpenCode).is_some());
+        assert!(install_info_for(&AgentKind::Letta).is_some());
         assert!(install_info_for(&AgentKind::Hermes).is_none());
     }
 }

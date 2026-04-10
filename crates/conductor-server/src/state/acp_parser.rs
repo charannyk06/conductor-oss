@@ -74,6 +74,7 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
         "amp login",
         "opencode auth login",
         "qwen auth login",
+        "letta connect",
     ] {
         if lower.contains(candidate) {
             return Some(candidate.to_string());
@@ -90,6 +91,7 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
         "droid" => Some("export FACTORY_API_KEY=...".to_string()),
         "opencode" => Some("opencode auth login".to_string()),
         "qwen-code" => Some("qwen auth login".to_string()),
+        "letta" => Some("letta connect".to_string()),
         _ => None,
     }
 }

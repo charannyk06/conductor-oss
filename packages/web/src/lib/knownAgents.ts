@@ -94,6 +94,16 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     installUrl: "https://opencode.ai",
   },
   {
+    name: "letta",
+    label: "Letta Code",
+    description: "Letta Code CLI (memory-first agent)",
+    homepage: "https://docs.letta.com/letta-code",
+    iconUrl: "/agents/letta-light.svg",
+    installHint: "npm install -g @letta-ai/letta-code",
+    installUrl: "https://docs.letta.com/letta-code",
+    setupUrl: "https://app.letta.com/",
+  },
+  {
     name: "openclaw",
     label: "OpenClaw",
     description: "OpenClaw gateway-backed chat runtime",

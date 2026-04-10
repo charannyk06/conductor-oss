@@ -38,6 +38,7 @@ pub enum AgentKind {
     QwenCode,
     Ccr,
     GithubCopilot,
+    Letta,
     Custom(String),
 }
 
@@ -57,6 +58,7 @@ impl AgentKind {
             "qwen" | "qwen-code" => Self::QwenCode,
             "ccr" => Self::Ccr,
             "copilot" | "github-copilot" => Self::GithubCopilot,
+            "letta" | "letta-code" => Self::Letta,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -77,6 +79,7 @@ impl std::fmt::Display for AgentKind {
             Self::QwenCode => write!(f, "qwen-code"),
             Self::Ccr => write!(f, "ccr"),
             Self::GithubCopilot => write!(f, "github-copilot"),
+            Self::Letta => write!(f, "letta"),
             Self::Custom(s) => write!(f, "{s}"),
         }
     }
@@ -426,6 +429,7 @@ mod tests {
         assert_eq!(AgentKind::GithubCopilot.to_string(), "github-copilot");
         assert_eq!(AgentKind::OpenClaw.to_string(), "openclaw");
         assert_eq!(AgentKind::Hermes.to_string(), "hermes");
+        assert_eq!(AgentKind::Letta.to_string(), "letta");
         assert_eq!(
             AgentKind::Custom("my-agent".to_string()).to_string(),
             "my-agent"
@@ -452,6 +456,8 @@ mod tests {
         assert_eq!(AgentKind::parse("qwen-code"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("qwen"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("copilot"), AgentKind::GithubCopilot);
+        assert_eq!(AgentKind::parse("letta"), AgentKind::Letta);
+        assert_eq!(AgentKind::parse("letta-code"), AgentKind::Letta);
         assert_eq!(
             AgentKind::parse("unknown"),
             AgentKind::Custom("unknown".to_string())
