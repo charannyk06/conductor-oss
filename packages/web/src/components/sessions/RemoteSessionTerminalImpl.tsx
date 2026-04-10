@@ -25,9 +25,13 @@ import {
 } from "@/lib/clipboardImage";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
-const CMD_OUTPUT = "0".charCodeAt(0);
-const CMD_RESIZE = "1".charCodeAt(0);
-const CMD_SET_WINDOW_TITLE = "2".charCodeAt(0);
+// Server→client command bytes (ttyd binary protocol).
+// See crates/conductor-server/src/routes/ttyd_protocol.rs for the authoritative list.
+const CMD_OUTPUT = "0".charCodeAt(0);            // 0x30 – terminal output
+const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);  // 0x31 – server-set window title
+const CMD_SET_PREFERENCES = "2".charCodeAt(0);   // 0x32 – server-set preferences
+// Client→server command bytes (used for encoding outgoing frames).
+const CMD_RESIZE = "1".charCodeAt(0);            // 0x31 – resize terminal
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const MAX_RECONNECT_ATTEMPTS = 20;
 type TerminalSyncMode = "resize" | "handshake";
@@ -814,8 +818,35 @@ export function RemoteSessionTerminal({
                 break;
               }
               case CMD_SET_WINDOW_TITLE: {
-                // Server-set window title — currently ignored but handled
-                // to avoid falling through to default on legitimate frames.
+                // ttyd sends the terminal title as UTF-8 after the command byte.
+                // Update document.title so the browser tab reflects the session.
+                const titleBytes = frame.slice(1);
+                if (titleBytes.length > 0) {
+                  try {
+                    const title = new TextDecoder().decode(titleBytes);
+                    if (title.trim()) {
+                      document.title = title.trim();
+                    }
+                  } catch {
+                    // Ignore malformed title payloads.
+                  }
+                }
+                break;
+              }
+              case CMD_SET_PREFERENCES: {
+                // The server sends JSON preferences (e.g. { bellSound: "" }).
+                // Decode and acknowledge; the frontend owns the terminal theme
+                // and font sizing so we intentionally skip applying those fields.
+                const prefBytes = frame.slice(1);
+                if (prefBytes.length > 0) {
+                  try {
+                    const _prefs = JSON.parse(new TextDecoder().decode(prefBytes));
+                    // Preferences acknowledged. Terminal theme and font sizing are
+                    // managed by the frontend via resolveSessionTerminalViewportOptions.
+                  } catch {
+                    // Ignore malformed preference payloads.
+                  }
+                }
                 break;
               }
               default:
