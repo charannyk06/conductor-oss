@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestBridgeBinaryName(t *testing.T) {
+	if got := bridgeBinaryName("windows"); got != "conductor-bridge.exe" {
+		t.Fatalf("bridgeBinaryName(windows) = %q, want %q", got, "conductor-bridge.exe")
+	}
+	if got := bridgeBinaryName("darwin"); got != "conductor-bridge" {
+		t.Fatalf("bridgeBinaryName(darwin) = %q, want %q", got, "conductor-bridge")
+	}
+}
+
 func TestBuildRestartCommandDarwin(t *testing.T) {
 	cmd, err := buildRestartCommand("darwin", "/Users/test user")
 	if err != nil {

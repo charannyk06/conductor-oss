@@ -34,6 +34,15 @@ func resolveLaunchdPath(home string) string {
 	)
 }
 
+func bridgeBinaryName(goos string) string {
+	switch goos {
+	case "windows":
+		return "conductor-bridge.exe"
+	default:
+		return "conductor-bridge"
+	}
+}
+
 func Install(binaryPath string) error {
 	if binaryPath == "" {
 		// Find our own binary
@@ -54,7 +63,7 @@ func Install(binaryPath string) error {
 		return fmt.Errorf("create install dir: %w", err)
 	}
 
-	destPath := filepath.Join(installDir, "conductor-bridge")
+	destPath := filepath.Join(installDir, bridgeBinaryName(runtime.GOOS))
 	if binaryPath != destPath {
 		if err := copyFile(binaryPath, destPath); err != nil {
 			return fmt.Errorf("copy binary: %w", err)

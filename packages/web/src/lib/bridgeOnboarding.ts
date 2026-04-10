@@ -19,6 +19,33 @@ function powerShellQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function powerShellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:=@%+\\-]+$/.test(value)) {
+    return value;
+  }
+
+  return powerShellQuote(value);
+}
+
+function formatPowerShellCommand(invocation: string, args: string[]): string {
+  return [invocation, ...args.map(powerShellArg)].join(" ");
+}
+
+function buildWindowsBridgeInvocation(): string {
+  return "& (Join-Path $HOME '.conductor\\bin\\conductor-bridge.exe')";
+}
+
+function buildBridgeCliCommand(
+  args: string[],
+  platform: BridgeInstallPlatform = "unix",
+): string {
+  if (platform === "windows") {
+    return formatPowerShellCommand(buildWindowsBridgeInvocation(), args);
+  }
+
+  return formatCommand(["conductor-bridge", ...args]);
+}
+
 export function resolveBridgeInstallPlatform(os: string | null | undefined): BridgeInstallPlatform {
   const normalized = os?.trim().toLowerCase() ?? "";
   return normalized.startsWith("windows") ? "windows" : "unix";
@@ -89,26 +116,28 @@ export function buildBridgeBootstrapConnectCommand(
 export function buildBridgeConnectCommand(
   dashboardUrl: string,
   relayUrl?: string | null,
+  platform: BridgeInstallPlatform = "unix",
 ): string {
-  const parts = ["conductor-bridge", "connect", "--dashboard-url", dashboardUrl];
+  const parts = ["connect", "--dashboard-url", dashboardUrl];
   if (relayUrl?.trim()) {
     parts.push("--relay-url", relayUrl.trim());
   }
-  return formatCommand(parts);
+  return buildBridgeCliCommand(parts, platform);
 }
 
 export function buildBridgeManualPairCommand(
   pairingCode: string | null | undefined,
   relayUrl?: string | null,
+  platform: BridgeInstallPlatform = "unix",
 ): string {
   const resolvedPairingCode = pairingCode?.trim() || "ABC123";
-  const pairParts = ["conductor-bridge", "pair", "--code", resolvedPairingCode];
-  const daemonParts = ["conductor-bridge", "daemon"];
+  const pairParts = ["pair", "--code", resolvedPairingCode];
+  const daemonParts = ["daemon"];
 
   if (relayUrl?.trim()) {
     pairParts.push("--relay-url", relayUrl.trim());
     daemonParts.push("--relay-url", relayUrl.trim());
   }
 
-  return `${formatCommand(pairParts)}\n${formatCommand(daemonParts)}`;
+  return `${buildBridgeCliCommand(pairParts, platform)}\n${buildBridgeCliCommand(daemonParts, platform)}`;
 }
