@@ -1,6 +1,5 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -21,18 +20,6 @@ import {
 import type { DashboardSession } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 
-const SessionDiff = dynamic(
-  () => import("./SessionDiff").then((mod) => mod.SessionDiff),
-  {
-    loading: () => (
-      <div className="flex h-32 items-center justify-center text-[12px] text-[var(--vk-text-muted)]">
-        Loading changes…
-      </div>
-    ),
-    ssr: false,
-  },
-);
-
 type SessionData = DashboardSession & {
   agent?: string;
   worktree?: string | null;
@@ -48,8 +35,6 @@ interface SessionOverviewProps {
   sessionId: string;
   active: boolean;
 }
-
-type OverviewTab = "changes" | "files";
 
 /* ─── File tree types ───────────────────────────────────────────────── */
 
@@ -754,8 +739,6 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
 /* ─── Main Overview component ───────────────────────────────────────── */
 
 export function SessionOverview({ session, sessionId, active }: SessionOverviewProps) {
-  const [innerTab, setInnerTab] = useState<OverviewTab>("changes");
-
   const prompt = useMemo(
     () => (
       pickMetadata(session, "task")
@@ -842,39 +825,15 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
         ) : null}
       </div>
 
-      {/* Inner tab switcher: Changes | Files */}
-      <div className="flex shrink-0 items-center gap-0 border-b border-white/8 px-2">
-        <button
-          type="button"
-          onClick={() => setInnerTab("changes")}
-          className={`px-3 py-2 text-[12px] font-medium transition-colors ${
-            innerTab === "changes"
-              ? "border-b-2 border-[var(--vk-orange)] text-[var(--vk-text-strong)]"
-              : "border-b-2 border-transparent text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
-          }`}
-        >
-          Changes
-        </button>
-        <button
-          type="button"
-          onClick={() => setInnerTab("files")}
-          className={`px-3 py-2 text-[12px] font-medium transition-colors ${
-            innerTab === "files"
-              ? "border-b-2 border-[var(--vk-orange)] text-[var(--vk-text-strong)]"
-              : "border-b-2 border-transparent text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
-          }`}
-        >
-          Files
-        </button>
-      </div>
-
-      {/* Tab content */}
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
-        {innerTab === "changes" ? (
-          <SessionDiff key={sessionId} sessionId={sessionId} active={active} />
-        ) : (
-          <FilesBrowser sessionId={sessionId} active={active && innerTab === "files"} />
-        )}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-t border-white/8">
+        <div className="shrink-0 border-b border-white/8 px-3 py-2">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--vk-text-muted)]">
+            Workspace files
+          </p>
+        </div>
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          <FilesBrowser sessionId={sessionId} active={active} />
+        </div>
       </div>
     </div>
   );

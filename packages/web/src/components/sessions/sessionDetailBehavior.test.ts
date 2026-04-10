@@ -36,4 +36,15 @@ test("shouldAutoOpenPreviewTab only opens preview for active terminal sessions",
     }),
     false,
   );
+
+  assert.equal(
+    shouldAutoOpenPreviewTab({
+      active: true,
+      activeTab: "diff",
+      alreadyOpened: false,
+      connected: true,
+      suppressAutoOpen: false,
+    }),
+    false,
+  );
 });

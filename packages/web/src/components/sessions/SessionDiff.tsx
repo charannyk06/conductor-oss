@@ -1032,7 +1032,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
   }, [isMobileViewport]);
 
   const listPane = (
-    <div className="min-h-0 overflow-y-auto overscroll-contain lg:border-r lg:border-[var(--vk-border)]">
+    <div className="flex min-h-0 h-full max-h-full flex-col overflow-y-auto overscroll-contain lg:border-r lg:border-[var(--vk-border)]">
       <div className="py-1">
         {visibleEntries.map((entry) => {
           const isSelected = entry.fileKey === selectedFileKey;
