@@ -2,6 +2,7 @@ import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { isBridgeRelayConfigurationError } from "@/lib/bridgeRelayErrors";
 import { requireBridgeRelayUrl, resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { normalizeBridgeId } from "@/lib/bridgeSessionIds";
 
@@ -265,9 +266,10 @@ export async function guardAndProxyToBridgeDevice(
   try {
     return await proxyToBridgeDevice(request, bridgeId, pathname, options);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to reach paired device";
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to reach paired device" },
-      { status: 502 },
+      { error: message },
+      { status: isBridgeRelayConfigurationError(message) ? 503 : 502 },
     );
   }
 }
@@ -300,9 +302,10 @@ export async function guardAndProxyEventStreamToBridgeDevice(
   try {
     return await proxyEventStreamToBridgeDevice(request, bridgeId, pathname);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to reach paired device";
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to reach paired device" },
-      { status: 502 },
+      { error: message },
+      { status: isBridgeRelayConfigurationError(message) ? 503 : 502 },
     );
   }
 }

@@ -77,6 +77,7 @@ import { uploadProjectAttachments } from "@/components/sessions/attachmentUpload
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { archiveSession } from "@/lib/sessionArchive";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
+import { isBridgeRelayConfigurationError } from "@/lib/bridgeRelayErrors";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import {
   isPairedBridgeScopePending,
@@ -351,6 +352,7 @@ type BridgeDevice = {
 
 type DevicesResponse = {
   devices?: BridgeDevice[];
+  error?: string;
 };
 
 type BridgeInventoryStatus = "loading" | "ready" | "error";
@@ -932,7 +934,9 @@ export default function DashboardClient({
   const effectiveBridgeId = selectedBridgeIdValue ?? selectedSessionBridgeId;
   const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
   const [bridgeInventoryStatus, setBridgeInventoryStatus] = useState<BridgeInventoryStatus>("loading");
+  const [bridgeRelayUnavailableReason, setBridgeRelayUnavailableReason] = useState<string | null>(null);
   const bridgeRelayUrl = resolveBridgeRelayUrl();
+  const bridgeRelayConfigured = Boolean(bridgeRelayUrl) && bridgeRelayUnavailableReason === null;
   const connectedBridges = useMemo(
     () => bridges.filter((bridge) => bridge.connected),
     [bridges],
@@ -1130,7 +1134,7 @@ export default function DashboardClient({
 
 
   useEffect(() => {
-    if (!bridgeRelayUrl) {
+    if (!bridgeRelayConfigured) {
       setBridges([]);
       setBridgeInventoryStatus("ready");
       if (requiresPairedDeviceScope) {
@@ -1148,11 +1152,20 @@ export default function DashboardClient({
     async function refreshBridges() {
       try {
         const response = await fetch("/api/bridge/devices", { cache: "no-store" });
+        const payload = (await response.json().catch(() => null)) as DevicesResponse | null;
         if (!response.ok) {
+          if (isBridgeRelayConfigurationError(payload?.error)) {
+            if (!cancelled) {
+              setBridgeRelayUnavailableReason(payload?.error ?? null);
+              setBridges([]);
+              setBridgeInventoryStatus("ready");
+            }
+            return;
+          }
           throw new Error(`Failed to fetch bridges: ${response.status}`);
         }
-        const payload = (await response.json().catch(() => null)) as DevicesResponse | null;
         if (!cancelled) {
+          setBridgeRelayUnavailableReason(null);
           setBridges(normalizeBridgeDevices(payload?.devices).map((device) => ({
             bridgeId: device.device_id,
             hostname: device.last_status?.hostname ?? device.hostname,
@@ -1182,7 +1195,7 @@ export default function DashboardClient({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [bridgeRelayUrl, bridgeScopePending, requiresPairedDeviceScope, router]);
+  }, [bridgeRelayConfigured, bridgeScopePending, requiresPairedDeviceScope, router]);
 
   useEffect(() => {
     const nextSelectedBridgeId = resolveSelectedBridgeId({

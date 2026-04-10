@@ -1,5 +1,6 @@
 import { SignJWT } from "jose";
 import { getDashboardAccess, type DashboardAccess } from "@/lib/auth";
+import { BRIDGE_RELAY_SECRET_REQUIRED_ERROR } from "@/lib/bridgeRelayErrors";
 import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 const DEFAULT_LOCAL_BRIDGE_USER_ID = "local-admin";
@@ -45,7 +46,7 @@ export function appendLegacyBridgeRelayAuthHeaders(
 function requireBridgeRelaySecret(): string {
   const secret = process.env.RELAY_JWT_SECRET?.trim();
   if (!secret) {
-    throw new Error("RELAY_JWT_SECRET is required for bridge relay access");
+    throw new Error(BRIDGE_RELAY_SECRET_REQUIRED_ERROR);
   }
   return secret;
 }
