@@ -4672,7 +4672,7 @@ mod tests {
     async fn dispatcher_preferences_store_openclaw_runtime_config() {
         let (root, state) = build_test_state("acp-openclaw-config").await;
         let gateway_token = ["gateway", "-token-", "123"].concat();
-        let session_key = ["paperclip:", "issue", ":123"].concat();
+        let session_key = ["external:", "issue", ":123"].concat();
         let thread = state
             .create_project_dispatcher_thread(
                 "demo",

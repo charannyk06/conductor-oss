@@ -1035,6 +1035,7 @@ export function DispatcherSessionPane({
     deltaReplaceCountRef.current = 0;
     liveUpdatePauseCountRef.current = 0;
     previousEntryIdsRef.current = [];
+    setShowJumpToLatest(false);
     setNewEntryCount(0);
   }, [session.id]);
 

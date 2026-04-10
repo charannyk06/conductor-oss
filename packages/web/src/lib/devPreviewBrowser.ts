@@ -909,7 +909,9 @@ class PreviewBrowserManager {
       case "goBack": {
         const { state, page } = await this.ensurePage(sessionId);
         try {
+          await this.syncRequestInterception(state, page);
           await page.goBack({ waitUntil: "domcontentloaded", timeout: 1_500 });
+          await this.syncRequestInterception(state, page);
           state.selectedElement = null;
           state.lastError = null;
           state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
@@ -922,7 +924,9 @@ class PreviewBrowserManager {
       case "goForward": {
         const { state, page } = await this.ensurePage(sessionId);
         try {
+          await this.syncRequestInterception(state, page);
           await page.goForward({ waitUntil: "domcontentloaded", timeout: 1_500 });
+          await this.syncRequestInterception(state, page);
           state.selectedElement = null;
           state.lastError = null;
           state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
@@ -1156,22 +1160,24 @@ class PreviewBrowserManager {
       return { canGoBack: false, canGoForward: false };
     }
 
+    let cdpSession: Awaited<ReturnType<Page["createCDPSession"]>> | null = null;
     try {
-      const cdpSession = await page.createCDPSession();
+      cdpSession = await page.createCDPSession();
       const history = await cdpSession.send("Page.getNavigationHistory") as {
         currentIndex: number;
         entries: Array<unknown>;
       };
-      await cdpSession.detach().catch(() => null);
       return {
         canGoBack: history.currentIndex > 0,
         canGoForward: history.currentIndex < history.entries.length - 1,
       };
     } catch {
       return {
-        canGoBack: page.url() !== "about:blank",
+        canGoBack: false,
         canGoForward: false,
       };
+    } finally {
+      await cdpSession?.detach().catch(() => null);
     }
   }
 

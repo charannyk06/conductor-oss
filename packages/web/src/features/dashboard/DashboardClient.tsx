@@ -47,7 +47,7 @@ import {
   Search,
   SlidersHorizontal,
   Settings2,
-  Paperclip,
+  Link2,
   type LucideIcon,
   Volume2,
   VolumeX,
@@ -3115,7 +3115,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     disabled={!launchPayloadProjectId || isCreatingSession}
                     className="hidden"
                   />
-                  <Paperclip className="h-[14px] w-[14px]" />
+                  <Link2 className="h-[14px] w-[14px]" />
                 </label>
                 <button
                   type="button"

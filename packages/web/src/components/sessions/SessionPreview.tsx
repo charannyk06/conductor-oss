@@ -1696,9 +1696,13 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 type="button"
                 aria-label="Go back"
                 variant="outline"
-                onClick={() => void runCommand({ command: "goBack" }).catch((error: unknown) => {
-                  setCommandError(error instanceof Error ? error.message : "Failed to go back");
-                })}
+                onClick={() => void runCommand({ command: "goBack" })
+                  .then((nextStatus) => {
+                    setUrlInput(nextStatus.currentUrl ?? "");
+                  })
+                  .catch((error: unknown) => {
+                    setCommandError(error instanceof Error ? error.message : "Failed to go back");
+                  })}
                 disabled={!status?.connected || !status?.canGoBack || busy}
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
@@ -1708,9 +1712,13 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 type="button"
                 aria-label="Go forward"
                 variant="outline"
-                onClick={() => void runCommand({ command: "goForward" }).catch((error: unknown) => {
-                  setCommandError(error instanceof Error ? error.message : "Failed to go forward");
-                })}
+                onClick={() => void runCommand({ command: "goForward" })
+                  .then((nextStatus) => {
+                    setUrlInput(nextStatus.currentUrl ?? "");
+                  })
+                  .catch((error: unknown) => {
+                    setCommandError(error instanceof Error ? error.message : "Failed to go forward");
+                  })}
                 disabled={!status?.connected || !status?.canGoForward || busy}
               >
                 <ArrowRight className="h-3.5 w-3.5" />
