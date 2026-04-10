@@ -1139,6 +1139,11 @@ fn agent_metadata(
             "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
         ),
+        conductor_core::types::AgentKind::Letta => (
+            "Letta Code CLI",
+            "https://docs.letta.com/letta-code",
+            "/agents/letta-light.svg",
+        ),
         conductor_core::types::AgentKind::Custom(_) => ("Custom agent", "", ""),
     }
 }

@@ -232,6 +232,7 @@ fn parse_agent_tag(tag: &str) -> Option<AgentKind> {
         "qwen" | "qwen-code" => Some(AgentKind::QwenCode),
         "ccr" => Some(AgentKind::Ccr),
         "copilot" | "github-copilot" => Some(AgentKind::GithubCopilot),
+        "letta" | "letta-code" => Some(AgentKind::Letta),
         _ => None,
     }
 }
@@ -339,6 +340,7 @@ mod tests {
         assert_eq!(parse_agent_tag("codex"), Some(AgentKind::Codex));
         assert_eq!(parse_agent_tag("hermes"), Some(AgentKind::Hermes));
         assert_eq!(parse_agent_tag("openclaw"), Some(AgentKind::OpenClaw));
+        assert_eq!(parse_agent_tag("letta"), Some(AgentKind::Letta));
         assert_eq!(parse_agent_tag("unknown"), None);
     }
 }

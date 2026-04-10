@@ -34,7 +34,7 @@ export function registerSpawn(program: Command): void {
     )
     .option(
       "--agent <name>",
-      "Override agent plugin (e.g. claude-code, codex, gemini, amp, hermes, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot, openai-codex, google-gemini, open-code)"
+      "Override agent plugin (e.g. claude-code, codex, gemini, amp, hermes, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot, letta, openai-codex, google-gemini, open-code)"
     )
     .option("--model <name>", "Override model (e.g. o4-mini, claude-opus-4-6)")
     .option(

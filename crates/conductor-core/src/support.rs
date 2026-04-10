@@ -27,6 +27,7 @@ const FALLBACK_WATCHER_AGENTS: &[&str] = &[
     "qwen-code",
     "ccr",
     "github-copilot",
+    "letta",
 ];
 
 #[derive(Debug, Clone, Default)]

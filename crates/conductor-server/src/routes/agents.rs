@@ -110,6 +110,16 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
         setup_url: "",
     },
     KnownAgentInfo {
+        name: "letta",
+        label: "Letta Code",
+        description: "Letta Code CLI",
+        homepage: "https://docs.letta.com/letta-code",
+        icon_url: "/agents/letta-light.svg",
+        install_hint: "npm install -g @letta-ai/letta-code",
+        install_url: "https://docs.letta.com/letta-code",
+        setup_url: "https://app.letta.com/",
+    },
+    KnownAgentInfo {
         name: "openclaw",
         label: "OpenClaw",
         description: "OpenClaw gateway-backed chat runtime",
@@ -336,6 +346,11 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
             "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
         ),
+        AgentKind::Letta => (
+            "Letta Code CLI",
+            "https://docs.letta.com/letta-code",
+            "/agents/letta-light.svg",
+        ),
         AgentKind::Custom(_) => ("Custom agent", "", ""),
     }
 }
@@ -403,6 +418,7 @@ async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&P
                 .await
                 .unwrap_or(Value::Null)
         }
+        "letta" => Value::Null,
         _ => Value::Null,
     }
 }
@@ -2182,8 +2198,9 @@ mod tests {
         assert_eq!(known_agent_order("codex"), 0);
         assert_eq!(known_agent_order("claude-code"), 4);
         assert_eq!(known_agent_order("hermes"), 6);
-        assert_eq!(known_agent_order("openclaw"), 8);
-        assert_eq!(known_agent_order("ccr"), 11);
+        assert_eq!(known_agent_order("letta"), 8);
+        assert_eq!(known_agent_order("openclaw"), 9);
+        assert_eq!(known_agent_order("ccr"), 12);
         assert_eq!(known_agent_order("unknown"), usize::MAX);
     }
 

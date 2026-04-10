@@ -14,6 +14,7 @@ type AgentIconKey =
   | "droid"
   | "gemini"
   | "hermes"
+  | "letta"
   | "openclaw"
   | "opencode"
   | "qwen";
@@ -39,6 +40,7 @@ const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
   droid: ["droid", "factory-droid", "factory_droid", "agent-droid"],
   gemini: ["gemini", "gemini-cli", "google-gemini", "googlegemini", "agent-gemini"],
   hermes: ["hermes", "hermes-agent", "nous-hermes", "agent-hermes"],
+  letta: ["letta", "letta-code", "letta_code", "agent-letta", "memgpt"],
   openclaw: ["openclaw", "open-claw", "open_claw", "agent-openclaw"],
   opencode: ["opencode", "open-code", "open_code", "open-code-cli", "agent-opencode"],
   qwen: ["qwen", "qwen-code", "qwen_code", "qwen-code-cli", "agent-qwen-code"],
@@ -54,6 +56,7 @@ const AGENT_LOCAL_ICON_SOURCES: Record<AgentIconKey, string[]> = {
   droid: ["/agents/droid-dark.svg", "/agents/droid-light.svg"],
   gemini: ["/agents/gemini-dark.svg", "/agents/gemini-light.svg"],
   hermes: ["/agents/hermes.png"],
+  letta: ["/agents/letta-dark.svg", "/agents/letta-light.svg"],
   openclaw: ["/agents/openclaw-dark.svg", "/agents/openclaw-light.svg"],
   opencode: ["/agents/opencode-dark.svg", "/agents/opencode-light.svg"],
   qwen: ["/agents/qwen-dark.svg", "/agents/qwen-light.svg"],

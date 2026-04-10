@@ -1,6 +1,7 @@
 use conductor_executors::agents::{
     AmpExecutor, CcrExecutor, ClaudeCodeExecutor, CodexExecutor, CopilotExecutor, CursorExecutor,
-    DroidExecutor, GeminiExecutor, HermesExecutor, OpenCodeExecutor, QwenCodeExecutor,
+    DroidExecutor, GeminiExecutor, HermesExecutor, LettaExecutor, OpenCodeExecutor,
+    QwenCodeExecutor,
 };
 use conductor_executors::executor::{Executor, ExecutorOutput, SpawnOptions};
 use serde_json::Value;
@@ -227,6 +228,10 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     );
     assert_filters_blocked_flags(&opencode);
 
+    let letta = LettaExecutor::new(PathBuf::from("/usr/bin/letta")).build_args(&options("letta"));
+    assert_contains(&letta, &["--model", "gpt-5", "-p", "letta", "--safe-extra"]);
+    assert_filters_blocked_flags(&letta);
+
     let mut qwen_options = options("qwen");
     qwen_options.model = Some("qwen-max".to_string());
     let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
@@ -314,6 +319,10 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     assert_has_pair(&qwen, "--model", "qwen-max");
     assert_no_flag(&qwen, "--effort");
     assert_no_flag(&qwen, "--reasoning-effort");
+
+    let letta = LettaExecutor::new(PathBuf::from("/usr/bin/letta")).build_args(&interactive);
+    assert_has_pair(&letta, "--model", "gpt-5");
+    assert_no_flag(&letta, "-p");
 }
 
 #[test]
@@ -418,6 +427,9 @@ fn parse_output_handles_representative_agent_formats() {
         qwen_events.first(),
         Some(ExecutorOutput::Stdout(text)) if text == "Qwen delta"
     ));
+
+    let letta = LettaExecutor::new(PathBuf::from("/usr/bin/letta")).parse_output("Letta line");
+    assert!(matches!(letta, ExecutorOutput::Stdout(ref text) if text == "Letta line"));
 }
 
 #[test]
