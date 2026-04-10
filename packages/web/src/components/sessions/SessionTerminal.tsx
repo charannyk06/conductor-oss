@@ -20,6 +20,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { Button } from "@/components/ui/Button";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { buildSessionHref } from "@/lib/dashboardHref";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import { extractTerminalAuthToken } from "./terminal/terminalToken";
@@ -1007,7 +1008,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
       : showPromptBar
         ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
         : `Session status is \`${normalizedSessionStatus}\`. Interactive ttyd terminals only run while the agent is active.`);
-  const terminalHref = terminalLinkUrl ?? terminalUrl ?? undefined;
+  const terminalDirectHref = terminalLinkUrl ?? terminalUrl ?? undefined;
+  const terminalSessionHref = buildSessionHref(sessionId, { bridgeId, tab: "terminal" });
 
   return (
     <div
@@ -1045,7 +1047,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
             <FileUp className="h-3.5 w-3.5" />
           )}
         </Button>
-        {terminalHref ? (
+        {terminalDirectHref ? (
           <Button
             asChild
             size="icon"
@@ -1053,10 +1055,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
             className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
           >
             <a
-              href={terminalHref}
+              href={terminalSessionHref}
               target="_blank"
               rel="noreferrer"
-              aria-label="Open terminal in new tab"
+              aria-label="Open full terminal page in new tab"
             >
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
@@ -1160,13 +1162,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[14px] font-medium">{emptyStateTitle}</div>
                   <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">{emptyStateDescription}</div>
-                  {terminalHref ? (
-                    <div className="mt-3">
+                  {terminalDirectHref ? (
+                    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
                       <a
-                        href={terminalHref}
+                        href={terminalSessionHref}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[12px] text-[#d7c6b7] underline underline-offset-4"
+                      >
+                        Open the full terminal page
+                      </a>
+                      <a
+                        href={terminalDirectHref}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[12px] text-[#a79c94] underline underline-offset-4"
                       >
                         Open the ttyd terminal directly
                       </a>
