@@ -12,11 +12,14 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
   Boxes,
   Copy,
   Eye,
   FileJson2,
   Globe,
+  Info,
   Loader2,
   MousePointerClick,
   RefreshCw,
@@ -42,6 +45,7 @@ import type { TerminalInsertRequest } from "./terminalInsert";
 
 const STATUS_POLL_INTERVAL_MS = 4_000;
 const AUTO_CONNECT_RETRY_MS = 5_000;
+const MOBILE_PREVIEW_MEDIA_QUERY = "(max-width: 1023px)";
 const SELECTION_COMPOSER_WIDTH_PX = 340;
 const SELECTION_COMPOSER_HEIGHT_PX = 280;
 const SELECTION_COMPOSER_MARGIN_PX = 12;
@@ -193,6 +197,130 @@ function buildLogInsert(
   };
 }
 
+type PreviewInfoField = {
+  label: string;
+  value: string;
+  copyValue?: string | null;
+  monospace?: boolean;
+};
+
+type PreviewInfoSection = {
+  id: string;
+  title: string;
+  description: string;
+  fields: PreviewInfoField[];
+};
+
+type PreviewCandidateSummary = {
+  url: string;
+  origin: string | null;
+  isLoopback: boolean;
+  isPreferred: boolean;
+  isConnected: boolean;
+  isTunnelOrigin: boolean;
+};
+
+const PREVIEW_LOOPBACK_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
+
+function isLoopbackPreviewUrl(value: string): boolean {
+  try {
+    return PREVIEW_LOOPBACK_HOST_PATTERN.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function readPreviewOrigin(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+}
+
+function formatPreviewBoolean(value: boolean | null | undefined): string {
+  return value ? "Yes" : "No";
+}
+
+function formatPreviewValue(value: string | null | undefined, fallback = "None"): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function PreviewStatCard({
+  label,
+  value,
+  hint,
+  monospace = false,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+  monospace?: boolean;
+}) {
+  return (
+    <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">{label}</div>
+      <div className={cn(
+        "mt-1 text-[13px] font-medium text-[var(--vk-text-normal)]",
+        monospace ? "break-all font-mono text-[11px] leading-5" : null,
+      )}>
+        {value}
+      </div>
+      <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">{hint}</div>
+    </div>
+  );
+}
+
+function PreviewInfoSectionCard({
+  section,
+  onCopy,
+}: {
+  section: PreviewInfoSection;
+  onCopy: (value: string | null | undefined, successMessage: string) => Promise<void>;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+      <div className="border-b border-[var(--vk-border)] px-3 py-3">
+        <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">{section.title}</div>
+        <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">{section.description}</div>
+      </div>
+      <div className="divide-y divide-[var(--vk-border)]">
+        {section.fields.map((field) => (
+          <div key={`${section.id}-${field.label}`} className="flex items-start gap-3 px-3 py-2.5">
+            <div className="w-28 shrink-0 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
+              {field.label}
+            </div>
+            <div className={cn(
+              "min-w-0 flex-1 text-[12px] text-[var(--vk-text-normal)]",
+              field.monospace ? "break-all font-mono text-[11px] leading-5" : "leading-5",
+            )}>
+              {field.value}
+            </div>
+            {field.copyValue ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0"
+                onClick={() => {
+                  void onCopy(field.copyValue, `${field.label} copied to clipboard.`);
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
   const [status, setStatus] = useState<PreviewStatusResponse | null>(null);
   const [domNodes, setDomNodes] = useState<PreviewDomNode[]>([]);
@@ -205,9 +333,11 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
   const [sendingTarget, setSendingTarget] = useState<PreviewSendTarget | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewInteractionMode>("navigate");
-  const [previewInspectorTab, setPreviewInspectorTab] = useState<"elements" | "console" | "network">("elements");
+  const [previewInspectorTab, setPreviewInspectorTab] = useState<"elements" | "console" | "network" | "info" | "proxies">("elements");
   const [selectionComposer, setSelectionComposer] = useState<SelectionComposerState | null>(null);
   const [urlInput, setUrlInput] = useState("");
+  const [mobileViewport, setMobileViewport] = useState(false);
+  const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [imageMetrics, setImageMetrics] = useState({
     naturalWidth: 0,
     naturalHeight: 0,
@@ -235,6 +365,8 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const [pageVisible, setPageVisible] = useState(true);
   const shouldRunPreview = active && pageVisible;
   const autoConnectCandidate = selectPreviewAutoConnectCandidate(status?.candidateUrls ?? []);
+  const showMobileInspector = mobileViewport && mobileInspectorOpen;
+  const showCandidateChips = !mobileViewport || mobileInspectorOpen;
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -244,6 +376,31 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia(MOBILE_PREVIEW_MEDIA_QUERY);
+    const updateViewport = () => {
+      setMobileViewport(mediaQuery.matches);
+    };
+
+    updateViewport();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", updateViewport);
+      return () => {
+        mediaQuery.removeEventListener("change", updateViewport);
+      };
+    }
+
+    mediaQuery.addListener(updateViewport);
+    return () => {
+      mediaQuery.removeListener(updateViewport);
     };
   }, []);
 
@@ -261,7 +418,14 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     domLoadFailureCountRef.current = 0;
     autoConnectAttemptCountRef.current = 0;
     screenshotLoadCountRef.current = 0;
+    setMobileInspectorOpen(false);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!mobileViewport) {
+      setMobileInspectorOpen(false);
+    }
+  }, [mobileViewport]);
 
   const loadStatus = useCallback(async (reason: "initial" | "poll" | "manual" = "manual") => {
     statusLoadCountRef.current += 1;
@@ -534,6 +698,116 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     [status?.frames],
   );
 
+  const currentPreviewOrigin = useMemo(
+    () => readPreviewOrigin(status?.currentUrl),
+    [status?.currentUrl],
+  );
+
+  const previewInfoSections = useMemo<PreviewInfoSection[]>(() => {
+    const selection = status?.selectedElement;
+    return [
+      {
+        id: "page",
+        title: "Page",
+        description: "Current page identity and live preview worker state.",
+        fields: [
+          { label: "Title", value: formatPreviewValue(status?.title, "Untitled") },
+          {
+            label: "Current URL",
+            value: formatPreviewValue(status?.currentUrl),
+            copyValue: status?.currentUrl ?? null,
+            monospace: true,
+          },
+          {
+            label: "Current origin",
+            value: formatPreviewValue(currentPreviewOrigin),
+            copyValue: currentPreviewOrigin,
+            monospace: true,
+          },
+          { label: "Connected", value: formatPreviewBoolean(status?.connected) },
+          { label: "Last error", value: formatPreviewValue(status?.lastError, "None") },
+        ],
+      },
+      {
+        id: "navigation",
+        title: "Navigation",
+        description: "History state and frame orientation for the current page.",
+        fields: [
+          { label: "Can go back", value: formatPreviewBoolean(status?.canGoBack) },
+          { label: "Can go forward", value: formatPreviewBoolean(status?.canGoForward) },
+          { label: "Active frame", value: formatPreviewValue(activeFrame?.name) },
+          { label: "Main frame", value: formatPreviewValue(mainFrame?.name) },
+          { label: "Frame count", value: `${status?.frames.length ?? 0}` },
+        ],
+      },
+      {
+        id: "worker",
+        title: "Worker",
+        description: "Reported candidates, logs, and worker render metadata.",
+        fields: [
+          { label: "Candidate URLs", value: `${status?.candidateUrls.length ?? 0}` },
+          {
+            label: "Auto-connect",
+            value: formatPreviewValue(autoConnectCandidate ?? preferredUrlInputCandidate),
+            copyValue: autoConnectCandidate ?? preferredUrlInputCandidate ?? null,
+            monospace: true,
+          },
+          {
+            label: "Screenshot key",
+            value: formatPreviewValue(status?.screenshotKey, "Unavailable"),
+            monospace: true,
+          },
+          { label: "Console rows", value: `${status?.consoleLogs.length ?? 0}` },
+          { label: "Network rows", value: `${status?.networkLogs.length ?? 0}` },
+        ],
+      },
+      {
+        id: "selection",
+        title: "Selection",
+        description: "Current element context captured from inspect mode.",
+        fields: [
+          {
+            label: "Selector",
+            value: formatPreviewValue(selection?.selector),
+            copyValue: selection?.selector ?? null,
+            monospace: true,
+          },
+          { label: "Tag", value: formatPreviewValue(selection?.tag) },
+          { label: "Role", value: formatPreviewValue(selection?.role) },
+          { label: "Frame", value: formatPreviewValue(selection?.frameName) },
+          { label: "Text", value: formatPreviewValue(selection?.text) },
+        ],
+      },
+    ];
+  }, [activeFrame?.name, autoConnectCandidate, currentPreviewOrigin, mainFrame?.name, preferredUrlInputCandidate, status]);
+
+  const proxyCandidates = useMemo<PreviewCandidateSummary[]>(() => (
+    (status?.candidateUrls ?? []).map((candidate) => {
+      const origin = readPreviewOrigin(candidate);
+      return {
+        url: candidate,
+        origin,
+        isLoopback: isLoopbackPreviewUrl(candidate),
+        isPreferred: candidate === autoConnectCandidate,
+        isConnected: Boolean(
+          status?.currentUrl
+            && (status.currentUrl === candidate || (origin && currentPreviewOrigin === origin)),
+        ),
+        isTunnelOrigin: Boolean(status?.tunnelLocalOrigin && origin === status.tunnelLocalOrigin),
+      };
+    })
+  ), [autoConnectCandidate, currentPreviewOrigin, status?.candidateUrls, status?.currentUrl, status?.tunnelLocalOrigin]);
+
+  const loopbackCandidateCount = useMemo(
+    () => proxyCandidates.filter((candidate) => candidate.isLoopback).length,
+    [proxyCandidates],
+  );
+
+  const connectedProxyCandidate = useMemo(
+    () => proxyCandidates.find((candidate) => candidate.isConnected) ?? null,
+    [proxyCandidates],
+  );
+
   const sending = sendingTarget !== null;
   const canSelectByPoint = Boolean(activeFrame?.isMain);
 
@@ -556,15 +830,39 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     };
   }, [imageMetrics, mainFrame, status?.selectedElement]);
 
-  const handleConnect = useCallback(async () => {
-    const trimmed = urlInput.trim();
-    if (!trimmed) return;
+  const handleCopyText = useCallback(async (
+    value: string | null | undefined,
+    successMessage: string,
+  ) => {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      setSendError("Nothing to copy yet.");
+      return;
+    }
     try {
-      await runCommand({ command: "connect", url: trimmed });
+      await navigator.clipboard.writeText(trimmed);
+      setSendSuccess(successMessage);
+      setSendError(null);
+    } catch {
+      setSendError("Clipboard access is unavailable.");
+    }
+  }, []);
+
+  const connectPreviewCandidate = useCallback(async (candidate: string) => {
+    setUrlInput(candidate);
+    setCommandError(null);
+    try {
+      await runCommand({ command: "connect", url: candidate });
     } catch (error) {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     }
-  }, [runCommand, urlInput]);
+  }, [runCommand]);
+
+  const handleConnect = useCallback(async () => {
+    const trimmed = urlInput.trim();
+    if (!trimmed) return;
+    await connectPreviewCandidate(trimmed);
+  }, [connectPreviewCandidate, urlInput]);
 
   const openSelectionComposer = useCallback((anchorX: number, anchorY: number, pending = false) => {
     setSelectionComposer({ anchorX, anchorY, pending });
@@ -865,228 +1163,10 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     }
   }, [status?.selectedElement?.selector]);
 
-  return (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
-      <div className="shrink-0 border-b border-[var(--vk-border)] px-3 py-3">
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-[var(--vk-text-muted)]" />
-              <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Preview browser</span>
-            </div>
-            {status?.connected
-              ? <Badge variant="success">connected</Badge>
-              : <Badge variant="outline">idle</Badge>}
-            {activeFrame
-              ? <Badge variant="outline">{activeFrame.isMain ? "main frame" : "nested frame"}</Badge>
-              : null}
-            {status?.title
-              ? <Badge variant="outline">{truncate(status.title, 40)}</Badge>
-              : null}
-            {selectionComposer?.pending
-              ? <Badge variant="warning">selecting element…</Badge>
-              : null}
-          </div>
-
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3">
-              <Globe className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-              <input
-                value={urlInput}
-                onChange={(event) => setUrlInput(event.target.value)}
-                placeholder={preferredUrlInputCandidate ?? "http://127.0.0.1:3000"}
-                className="h-10 min-w-0 flex-1 bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-              />
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="primary"
-                onClick={() => void handleConnect()}
-                disabled={busy || !urlInput.trim()}
-              >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MousePointerClick className="h-4 w-4" />}
-                Connect
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => void loadStatus("manual").catch((error: unknown) => {
-                  setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
-                })}
-                disabled={loading || busy}
-              >
-                <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => void runCommand({ command: "reload" }).catch((error: unknown) => {
-                  setCommandError(error instanceof Error ? error.message : "Failed to reload preview");
-                })}
-                disabled={!status?.connected || busy}
-              >
-                <Waypoints className="h-3.5 w-3.5" />
-                Reload
-              </Button>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-center gap-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-1">
-              <Button
-                type="button"
-                size="sm"
-                variant={previewMode === "navigate" ? "primary" : "ghost"}
-                onClick={() => handlePreviewModeChange("navigate")}
-              >
-                <MousePointerClick className="h-3.5 w-3.5" />
-                Navigate
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={previewMode === "inspect" ? "primary" : "ghost"}
-                onClick={() => handlePreviewModeChange("inspect")}
-              >
-                <Eye className="h-3.5 w-3.5" />
-                Inspect
-              </Button>
-            </div>
-            <div className="text-[11px] text-[var(--vk-text-muted)]">
-              {previewMode === "navigate"
-                ? "Navigate mode sends clicks and typing into the running app."
-                : canSelectByPoint
-                  ? "Inspect mode lets you click once to inspect, double-click to queue for terminal input."
-                  : "Inspect mode is limited to the frame DOM list for nested frames."}
-            </div>
-          </div>
-
-          {!status?.connected && status?.candidateUrls.length ? (
-            <div className="flex flex-wrap items-center gap-2">
-              {status.candidateUrls.map((candidate) => (
-                <button
-                  key={candidate}
-                  type="button"
-                  className="inline-flex max-w-full items-center gap-1 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-1.5 text-left text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-                  onClick={() => {
-                    setUrlInput(candidate);
-                    void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
-                      setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
-                    });
-                  }}
-                >
-                  <Globe className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{candidate}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {commandError || status?.lastError ? (
-            <div className="flex items-start gap-2 rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{commandError ?? status?.lastError}</span>
-            </div>
-          ) : null}
-          {sendSuccess ? (
-            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-green)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-green)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-green)]">
-              {sendSuccess}
-            </div>
-          ) : null}
-          {sendError ? (
-            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
-              {sendError}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)] lg:overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-[1.25] flex-col overflow-hidden border-b border-[var(--vk-border)] lg:flex-1 lg:border-b-0 lg:border-r">
-          <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-2 text-[11px] text-[var(--vk-text-muted)]">
-            <div className="min-w-0">
-              <div className="truncate text-[var(--vk-text-normal)]">
-                {status?.currentUrl ?? preferredUrlInputCandidate ?? "No active preview URL yet"}
-              </div>
-            </div>
-            {status?.connected ? (
-              <Badge variant="outline">{status?.frames.length ?? 0} frame{(status?.frames.length ?? 0) === 1 ? "" : "s"}</Badge>
-            ) : null}
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#0f1012] p-3">
-            <div className="flex h-full min-h-[min(200px,45vh)] w-full items-center justify-center lg:min-h-[260px]">
-              {loading ? (
-                <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading preview…
-                </div>
-              ) : screenshotUrl ? (
-                <div
-                  ref={previewSurfaceRef}
-                  tabIndex={status?.connected ? 0 : -1}
-                  onKeyDown={handlePreviewKeyDown}
-                  onPaste={handlePreviewPaste}
-                  className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[10px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1012]"
-                >
-                  <img
-                    ref={imageRef}
-                    src={screenshotUrl}
-                    alt="Session preview"
-                    className={cn(
-                      "max-h-full max-w-full rounded-[8px] object-contain shadow-[0_18px_36px_rgba(0,0,0,0.28)]",
-                      previewMode === "navigate"
-                        ? "cursor-pointer"
-                        : canSelectByPoint
-                          ? "cursor-crosshair"
-                          : "cursor-default",
-                    )}
-                    onClick={(event) => void handleImageClick(event)}
-                    onDoubleClick={(event) => void handleImageDoubleClick(event)}
-                    onLoad={(event) => {
-                      screenshotLoadCountRef.current += 1;
-                      const target = event.currentTarget;
-                      setImageMetrics({
-                        naturalWidth: target.naturalWidth,
-                        naturalHeight: target.naturalHeight,
-                        renderedWidth: target.clientWidth,
-                        renderedHeight: target.clientHeight,
-                      });
-                    }}
-                  />
-                  {previewMode === "inspect" && selectionOverlayStyle ? (
-                    <div
-                      className="pointer-events-none absolute border-2 border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_18%,transparent)] shadow-[0_0_0_1px_rgba(0,0,0,0.5)]"
-                      style={selectionOverlayStyle}
-                    />
-                  ) : null}
-                  {previewMode === "inspect" && selectionComposer && selectionComposerStyle ? (
-                    <div
-                      className="pointer-events-none absolute z-20 rounded-[10px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_94%,black_6%)] px-3 py-2 text-[11px] text-[var(--vk-text-normal)] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
-                      style={selectionComposerStyle}
-                    >
-                      {selectionComposer.pending
-                        ? "Selecting element…"
-                        : status?.selectedElement
-                          ? `${status.selectedElement.tag} · ${truncate(status.selectedElement.selector, 120)}`
-                          : "Selection ready"}
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                  Connect a local dev URL or explicit preview URL to start the preview browser. Navigate mode lets you interact with the running app. Inspect mode lets you capture UI context and queue it into terminal input.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
+  const inspectorPane = (
         <Tabs
           value={previewInspectorTab}
-          onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network")}
+          onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network" | "info" | "proxies")}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:min-h-0"
         >
           <div className="border-b border-[var(--vk-border)] px-2 py-2">
@@ -1104,6 +1184,14 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 <FileJson2 className="h-3.5 w-3.5" />
                 Network
                 <Badge variant="outline">{status?.networkLogs.length ?? 0}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="info">
+                <Info className="h-3.5 w-3.5" />
+                Info
+              </TabsTrigger>
+              <TabsTrigger value="proxies">
+                <Globe className="h-3.5 w-3.5" />
+                Proxies
               </TabsTrigger>
             </TabsList>
           </div>
@@ -1352,8 +1440,513 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               </div>
             </ScrollArea>
           </TabsContent>
+
+          <TabsContent value="info" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Preview info</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">A cleaner snapshot of page, worker, navigation, and element state.</div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void handleCopyText(status?.currentUrl, "Current URL copied to clipboard.");
+                }}
+                disabled={!status?.currentUrl}
+              >
+                <Copy className="h-3.5 w-3.5" />
+                Copy URL
+              </Button>
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <PreviewStatCard
+                    label="Connected"
+                    value={status?.connected ? "Live" : "Idle"}
+                    hint={status?.currentUrl ? truncate(status.currentUrl, 60) : "No active page yet"}
+                  />
+                  <PreviewStatCard
+                    label="Frames"
+                    value={`${status?.frames.length ?? 0}`}
+                    hint={activeFrame?.name ?? "No active frame"}
+                  />
+                  <PreviewStatCard
+                    label="Console"
+                    value={`${status?.consoleLogs.length ?? 0}`}
+                    hint="Captured browser console rows"
+                  />
+                  <PreviewStatCard
+                    label="Network"
+                    value={`${status?.networkLogs.length ?? 0}`}
+                    hint="Recent preview worker requests"
+                  />
+                </div>
+                {previewInfoSections.map((section) => (
+                  <PreviewInfoSectionCard
+                    key={section.id}
+                    section={section}
+                    onCopy={handleCopyText}
+                  />
+                ))}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="proxies" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Proxy and tunnel routing</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">Candidate URLs come from the session. Tunnel metadata shows how bridge-backed previews map remote loopback into the local display origin.</div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void handleCopyText(status?.tunnelLocalOrigin ?? status?.tunnelUrl, "Tunnel mapping copied to clipboard.");
+                }}
+                disabled={!status?.tunnelLocalOrigin && !status?.tunnelUrl}
+              >
+                <Copy className="h-3.5 w-3.5" />
+                Copy route
+              </Button>
+            </div>
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <PreviewStatCard
+                    label="Candidates"
+                    value={`${proxyCandidates.length}`}
+                    hint={proxyCandidates.length ? "Reported by the current session" : "No targets reported yet"}
+                  />
+                  <PreviewStatCard
+                    label="Loopback"
+                    value={`${loopbackCandidateCount}`}
+                    hint={loopbackCandidateCount ? "Local dev URLs available" : "No local loopback URLs"}
+                  />
+                  <PreviewStatCard
+                    label="Tunnel"
+                    value={status?.tunnelUrl ? "Ready" : "None"}
+                    hint={status?.tunnelLocalOrigin ?? "No bridge tunnel mapping"}
+                    monospace={Boolean(status?.tunnelLocalOrigin)}
+                  />
+                  <PreviewStatCard
+                    label="Current origin"
+                    value={currentPreviewOrigin ?? "Idle"}
+                    hint={connectedProxyCandidate ? "Matches the active preview page" : "Not connected to a candidate yet"}
+                    monospace={Boolean(currentPreviewOrigin)}
+                  />
+                </div>
+
+                <PreviewInfoSectionCard
+                  section={{
+                    id: "tunnel-mapping",
+                    title: "Tunnel mapping",
+                    description: "Bridge previews can expose a remote tunnel while still rendering the equivalent local origin in the browser workspace.",
+                    fields: [
+                      {
+                        label: "Local origin",
+                        value: formatPreviewValue(status?.tunnelLocalOrigin, "Not set"),
+                        copyValue: status?.tunnelLocalOrigin ?? null,
+                        monospace: true,
+                      },
+                      {
+                        label: "Tunnel URL",
+                        value: formatPreviewValue(status?.tunnelUrl, "Not set"),
+                        copyValue: status?.tunnelUrl ?? null,
+                        monospace: true,
+                      },
+                      {
+                        label: "Current origin",
+                        value: formatPreviewValue(currentPreviewOrigin),
+                        copyValue: currentPreviewOrigin,
+                        monospace: true,
+                      },
+                    ],
+                  }}
+                  onCopy={handleCopyText}
+                />
+
+                <div className="overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+                  <div className="border-b border-[var(--vk-border)] px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Candidate URLs</div>
+                    <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">Use connect to load a reported target into the preview browser, or copy the URL or origin for terminal context.</div>
+                  </div>
+                  <div className="space-y-2 p-3">
+                    {proxyCandidates.length ? proxyCandidates.map((candidate) => (
+                      <div
+                        key={candidate.url}
+                        className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-3"
+                      >
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className={cn(
+                              "text-[12px] font-medium text-[var(--vk-text-normal)]",
+                              candidate.origin ? "truncate" : "break-all",
+                            )}>
+                              {candidate.origin ?? candidate.url}
+                            </div>
+                            <div className="mt-1 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
+                              {candidate.url}
+                            </div>
+                          </div>
+                          {candidate.isConnected ? <Badge variant="success">current</Badge> : null}
+                          {candidate.isPreferred ? <Badge variant="warning">auto</Badge> : null}
+                          {candidate.isTunnelOrigin ? <Badge variant="outline">tunnel origin</Badge> : null}
+                          <Badge variant="outline">{candidate.isLoopback ? "loopback" : "remote"}</Badge>
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="sm"
+                            onClick={() => {
+                              void connectPreviewCandidate(candidate.url);
+                            }}
+                          >
+                            <Globe className="h-3.5 w-3.5" />
+                            Connect
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              void handleCopyText(candidate.url, "Candidate URL copied to clipboard.");
+                            }}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy URL
+                          </Button>
+                          {candidate.origin ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                void handleCopyText(candidate.origin, "Candidate origin copied to clipboard.");
+                              }}
+                            >
+                              <Waypoints className="h-3.5 w-3.5" />
+                              Copy origin
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                        No candidate URLs detected yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </ScrollArea>
+          </TabsContent>
         </Tabs>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+      <div className="shrink-0 border-b border-[var(--vk-border)] px-3 py-3">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2">
+              <Globe className="h-4 w-4 text-[var(--vk-text-muted)]" />
+              <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">Preview browser</span>
+            </div>
+            {status?.connected
+              ? <Badge variant="success">connected</Badge>
+              : <Badge variant="outline">idle</Badge>}
+            {activeFrame
+              ? <Badge variant="outline">{activeFrame.isMain ? "main frame" : "nested frame"}</Badge>
+              : null}
+            {status?.title
+              ? <Badge variant="outline">{truncate(status.title, 40)}</Badge>
+              : null}
+            {selectionComposer?.pending
+              ? <Badge variant="warning">selecting element…</Badge>
+              : null}
+          </div>
+
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3">
+              <Globe className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+              <input
+                value={urlInput}
+                onChange={(event) => setUrlInput(event.target.value)}
+                placeholder={preferredUrlInputCandidate ?? "http://127.0.0.1:3000"}
+                className="h-10 min-w-0 flex-1 bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                onClick={() => void handleConnect()}
+                disabled={busy || !urlInput.trim()}
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <MousePointerClick className="h-4 w-4" />}
+                Connect
+              </Button>
+              <Button
+                type="button"
+                aria-label="Go back"
+                variant="outline"
+                onClick={() => void runCommand({ command: "goBack" })
+                  .then((nextStatus) => {
+                    setUrlInput(nextStatus.currentUrl ?? "");
+                  })
+                  .catch((error: unknown) => {
+                    setCommandError(error instanceof Error ? error.message : "Failed to go back");
+                  })}
+                disabled={!status?.connected || !status?.canGoBack || busy}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Back</span>
+              </Button>
+              <Button
+                type="button"
+                aria-label="Go forward"
+                variant="outline"
+                onClick={() => void runCommand({ command: "goForward" })
+                  .then((nextStatus) => {
+                    setUrlInput(nextStatus.currentUrl ?? "");
+                  })
+                  .catch((error: unknown) => {
+                    setCommandError(error instanceof Error ? error.message : "Failed to go forward");
+                  })}
+                disabled={!status?.connected || !status?.canGoForward || busy}
+              >
+                <ArrowRight className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Forward</span>
+              </Button>
+              <Button
+                type="button"
+                aria-label="Refresh preview status"
+                variant="outline"
+                onClick={() => void loadStatus("manual").catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
+                })}
+                disabled={loading || busy}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
+                <span className="hidden sm:inline">Refresh</span>
+              </Button>
+              <Button
+                type="button"
+                aria-label="Reload preview page"
+                variant="outline"
+                onClick={() => void runCommand({ command: "reload" }).catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to reload preview");
+                })}
+                disabled={!status?.connected || busy}
+              >
+                <Waypoints className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Reload</span>
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={previewMode === "navigate" ? "primary" : "ghost"}
+                  onClick={() => handlePreviewModeChange("navigate")}
+                >
+                  <MousePointerClick className="h-3.5 w-3.5" />
+                  Navigate
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={previewMode === "inspect" ? "primary" : "ghost"}
+                  onClick={() => handlePreviewModeChange("inspect")}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  Inspect
+                </Button>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant={showMobileInspector ? "primary" : "outline"}
+                className="lg:hidden"
+                onClick={() => setMobileInspectorOpen((current) => !current)}
+              >
+                <Boxes className="h-3.5 w-3.5" />
+                {showMobileInspector ? "Hide tools" : "Browser tools"}
+              </Button>
+            </div>
+            {!mobileViewport ? (
+              <div className="text-[11px] text-[var(--vk-text-muted)]">
+                {previewMode === "navigate"
+                  ? "Navigate mode sends clicks and typing into the running app."
+                  : canSelectByPoint
+                    ? "Inspect mode lets you click once to inspect, double-click to queue for terminal input."
+                    : "Inspect mode is limited to the frame DOM list for nested frames."}
+              </div>
+            ) : null}
+          </div>
+
+          {!status?.connected && status?.candidateUrls.length && showCandidateChips ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {status.candidateUrls.map((candidate) => (
+                <button
+                  key={candidate}
+                  type="button"
+                  className="inline-flex max-w-full items-center gap-1 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-1.5 text-left text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                  onClick={() => {
+                    void connectPreviewCandidate(candidate);
+                  }}
+                >
+                  <Globe className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{candidate}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {commandError || status?.lastError ? (
+            <div className="flex items-start gap-2 rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{commandError ?? status?.lastError}</span>
+            </div>
+          ) : null}
+          {sendSuccess ? (
+            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-green)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-green)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-green)]">
+              {sendSuccess}
+            </div>
+          ) : null}
+          {sendError ? (
+            <div className="rounded-[6px] border border-[color:color-mix(in_srgb,var(--vk-red)_35%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_10%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+              {sendError}
+            </div>
+          ) : null}
+        </div>
       </div>
+
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)] lg:overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-[1.25] flex-col overflow-hidden border-b border-[var(--vk-border)] lg:flex-1 lg:border-b-0 lg:border-r">
+          <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-2 text-[11px] text-[var(--vk-text-muted)]">
+            <div className="min-w-0">
+              <div className="truncate text-[var(--vk-text-normal)]">
+                {status?.currentUrl ?? preferredUrlInputCandidate ?? "No active preview URL yet"}
+              </div>
+            </div>
+            {status?.connected ? (
+              <Badge variant="outline">{status?.frames.length ?? 0} frame{(status?.frames.length ?? 0) === 1 ? "" : "s"}</Badge>
+            ) : null}
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#0f1012] p-3">
+            <div className="flex h-full min-h-[min(200px,45vh)] w-full items-center justify-center lg:min-h-[260px]">
+              {loading ? (
+                <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading preview…
+                </div>
+              ) : screenshotUrl ? (
+                <div
+                  ref={previewSurfaceRef}
+                  tabIndex={status?.connected ? 0 : -1}
+                  onKeyDown={handlePreviewKeyDown}
+                  onPaste={handlePreviewPaste}
+                  className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[10px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1012]"
+                >
+                  <img
+                    ref={imageRef}
+                    src={screenshotUrl}
+                    alt="Session preview"
+                    className={cn(
+                      "max-h-full max-w-full rounded-[8px] object-contain shadow-[0_18px_36px_rgba(0,0,0,0.28)]",
+                      previewMode === "navigate"
+                        ? "cursor-pointer"
+                        : canSelectByPoint
+                          ? "cursor-crosshair"
+                          : "cursor-default",
+                    )}
+                    onClick={(event) => void handleImageClick(event)}
+                    onDoubleClick={(event) => void handleImageDoubleClick(event)}
+                    onLoad={(event) => {
+                      screenshotLoadCountRef.current += 1;
+                      const target = event.currentTarget;
+                      setImageMetrics({
+                        naturalWidth: target.naturalWidth,
+                        naturalHeight: target.naturalHeight,
+                        renderedWidth: target.clientWidth,
+                        renderedHeight: target.clientHeight,
+                      });
+                    }}
+                  />
+                  {previewMode === "inspect" && selectionOverlayStyle ? (
+                    <div
+                      className="pointer-events-none absolute border-2 border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_18%,transparent)] shadow-[0_0_0_1px_rgba(0,0,0,0.5)]"
+                      style={selectionOverlayStyle}
+                    />
+                  ) : null}
+                  {previewMode === "inspect" && selectionComposer && selectionComposerStyle ? (
+                    <div
+                      className="pointer-events-none absolute z-20 rounded-[10px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_94%,black_6%)] px-3 py-2 text-[11px] text-[var(--vk-text-normal)] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
+                      style={selectionComposerStyle}
+                    >
+                      {selectionComposer.pending
+                        ? "Selecting element…"
+                        : status?.selectedElement
+                          ? `${status.selectedElement.tag} · ${truncate(status.selectedElement.selector, 120)}`
+                          : "Selection ready"}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
+                  Connect a local dev URL or explicit preview URL to start the preview browser. Navigate mode lets you interact with the running app. Inspect mode lets you capture UI context and queue it into terminal input.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {!mobileViewport ? inspectorPane : null}
+      </div>
+
+      {mobileViewport && showMobileInspector ? (
+        <>
+          <div
+            className="absolute inset-0 z-10 bg-black/35 lg:hidden"
+            onClick={() => setMobileInspectorOpen(false)}
+            aria-hidden="true"
+          />
+          <div className="absolute inset-x-0 bottom-0 z-20 flex max-h-[min(72vh,36rem)] min-h-[18rem] flex-col overflow-hidden rounded-t-[14px] border border-b-0 border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_96%,black_4%)] shadow-[0_-24px_48px_rgba(0,0,0,0.42)] lg:hidden">
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--vk-border)] px-3 py-2.5">
+              <div className="flex min-w-0 items-center gap-2">
+                <Boxes className="h-4 w-4 shrink-0 text-[var(--vk-text-muted)]" />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Browser tools</div>
+                  <div className="truncate text-[11px] text-[var(--vk-text-muted)]">Hidden by default on mobile so the browser stays front and center.</div>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setMobileInspectorOpen(false)}
+              >
+                Hide
+              </Button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              {inspectorPane}
+            </div>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

@@ -54,6 +54,10 @@ export interface PreviewStatusResponse {
   candidateUrls: string[];
   currentUrl: string | null;
   title: string | null;
+  tunnelUrl: string | null;
+  tunnelLocalOrigin: string | null;
+  canGoBack: boolean;
+  canGoForward: boolean;
   frames: PreviewFrameInfo[];
   activeFrameId: string | null;
   selectedElement: PreviewElementSelection | null;
@@ -73,6 +77,8 @@ export type PreviewCommandRequest =
   | { command: "connect"; url: string }
   | { command: "navigate"; url: string }
   | { command: "reload" }
+  | { command: "goBack" }
+  | { command: "goForward" }
   | { command: "selectFrame"; frameId: string | null }
   | { command: "clickAtPoint"; x: number; y: number }
   | { command: "typeText"; text: string }
@@ -159,6 +165,8 @@ export function parseWorkerCommandRequest(value: unknown): WorkerCommandRequest 
         ? { command: value.command, url: value.url }
         : null;
     case "reload":
+    case "goBack":
+    case "goForward":
     case "screenshot":
       return { command: value.command };
     case "selectFrame":

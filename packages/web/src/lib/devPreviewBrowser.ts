@@ -906,6 +906,36 @@ class PreviewBrowserManager {
         }
         return;
       }
+      case "goBack": {
+        const { state, page } = await this.ensurePage(sessionId);
+        try {
+          await this.syncRequestInterception(state, page);
+          await page.goBack({ waitUntil: "domcontentloaded", timeout: 1_500 });
+          await this.syncRequestInterception(state, page);
+          state.selectedElement = null;
+          state.lastError = null;
+          state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
+        } catch (error) {
+          state.lastError = error instanceof Error ? error.message : "Failed to go back";
+          throw error;
+        }
+        return;
+      }
+      case "goForward": {
+        const { state, page } = await this.ensurePage(sessionId);
+        try {
+          await this.syncRequestInterception(state, page);
+          await page.goForward({ waitUntil: "domcontentloaded", timeout: 1_500 });
+          await this.syncRequestInterception(state, page);
+          state.selectedElement = null;
+          state.lastError = null;
+          state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
+        } catch (error) {
+          state.lastError = error instanceof Error ? error.message : "Failed to go forward";
+          throw error;
+        }
+        return;
+      }
       case "selectFrame": {
         const { state, page } = await this.ensurePage(sessionId);
         const frame = this.resolveFrame(state, page, command.frameId);
@@ -1121,10 +1151,41 @@ class PreviewBrowserManager {
     return page.screenshot({ type: "png" }) as Promise<Uint8Array>;
   }
 
+
+  private async getNavigationCapabilities(page: Page | null): Promise<{
+    canGoBack: boolean;
+    canGoForward: boolean;
+  }> {
+    if (!page || page.isClosed() || page.url() === "about:blank") {
+      return { canGoBack: false, canGoForward: false };
+    }
+
+    let cdpSession: Awaited<ReturnType<Page["createCDPSession"]>> | null = null;
+    try {
+      cdpSession = await page.createCDPSession();
+      const history = await cdpSession.send("Page.getNavigationHistory") as {
+        currentIndex: number;
+        entries: Array<unknown>;
+      };
+      return {
+        canGoBack: history.currentIndex > 0,
+        canGoForward: history.currentIndex < history.entries.length - 1,
+      };
+    } catch {
+      return {
+        canGoBack: false,
+        canGoForward: false,
+      };
+    } finally {
+      await cdpSession?.detach().catch(() => null);
+    }
+  }
+
   async getStatus(sessionId: string, candidateUrls: string[]): Promise<PreviewStatusResponse> {
     const state = this.states.get(sessionId) ?? null;
     const page = state?.page && !state.page.isClosed() ? state.page : null;
     const frames = state && page ? this.collectFrames(state, page) : [];
+    const { canGoBack, canGoForward } = await this.getNavigationCapabilities(page);
 
     let title: string | null = null;
     if (page && page.url() !== "about:blank") {
@@ -1140,6 +1201,10 @@ class PreviewBrowserManager {
       candidateUrls,
       currentUrl: page && page.url() !== "about:blank" ? page.url() : null,
       title,
+      tunnelUrl: null,
+      tunnelLocalOrigin: null,
+      canGoBack,
+      canGoForward,
       frames,
       activeFrameId: state?.activeFrameId ?? null,
       selectedElement: state?.selectedElement ?? null,

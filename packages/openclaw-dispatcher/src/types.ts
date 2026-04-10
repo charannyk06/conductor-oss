@@ -38,7 +38,7 @@ export type DispatcherFeedIntegration = {
     projectPath: string | null;
     sessionPath: string | null;
   };
-  /** Cost/usage tracking from agent runs (Paperclip-style) */
+  /** Cost/usage tracking from agent runs */
   usage?: {
     provider: string | null;
     model: string | null;

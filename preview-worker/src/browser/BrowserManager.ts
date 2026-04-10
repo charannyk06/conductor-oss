@@ -286,13 +286,19 @@ export class BrowserManager {
       }
     }
 
+    const { canGoBack, canGoForward } = await this.getNavigationCapabilities(session);
+
     return {
       connected: session.page.url() !== "about:blank",
       candidateUrls,
       currentUrl: session.page.url() !== "about:blank"
-        ? session.lastRequestedUrl ?? session.page.url()
+        ? this.toDisplayUrl(session, session.page.url())
         : null,
       title,
+      tunnelUrl: session.tunnelUrl,
+      tunnelLocalOrigin: session.tunnelLocalOrigin,
+      canGoBack,
+      canGoForward,
       frames,
       activeFrameId: session.activeFrameId,
       selectedElement: session.selectedElement,
@@ -301,6 +307,39 @@ export class BrowserManager {
       lastError: session.lastError,
       screenshotKey: `${Date.now()}`,
     };
+  }
+
+  private toDisplayUrl(session: PreviewSession, url: string): string {
+    if (session.tunnelUrl && session.tunnelLocalOrigin && url.startsWith(session.tunnelUrl)) {
+      return `${session.tunnelLocalOrigin}${url.slice(session.tunnelUrl.length)}`;
+    }
+    return url;
+  }
+
+  private async getNavigationCapabilities(session: PreviewSession): Promise<{ canGoBack: boolean; canGoForward: boolean }> {
+    if (session.page.url() === "about:blank") {
+      return { canGoBack: false, canGoForward: false };
+    }
+
+    let cdpSession: Awaited<ReturnType<PreviewSession["page"]["createCDPSession"]>> | null = null;
+    try {
+      cdpSession = await session.page.createCDPSession();
+      const history = await cdpSession.send("Page.getNavigationHistory") as {
+        currentIndex: number;
+        entries: Array<unknown>;
+      };
+      return {
+        canGoBack: history.currentIndex > 0,
+        canGoForward: history.currentIndex < history.entries.length - 1,
+      };
+    } catch {
+      return {
+        canGoBack: false,
+        canGoForward: false,
+      };
+    } finally {
+      await cdpSession?.detach().catch(() => null);
+    }
   }
 
   async inspectDom(
