@@ -29,7 +29,7 @@ const CMD_OUTPUT = "0".charCodeAt(0);
 const CMD_RESIZE = "1".charCodeAt(0);
 const CMD_SET_WINDOW_TITLE = "2".charCodeAt(0);
 const RECONNECT_MAX_DELAY_MS = 4_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_RECONNECT_ATTEMPTS = 20;
 type TerminalSyncMode = "resize" | "handshake";
 
 const TERMINAL_THEME = {
@@ -390,7 +390,11 @@ export function RemoteSessionTerminal({
       window.clearTimeout(reconnectTimerRef.current);
     }
     const delay = Math.min(RECONNECT_MAX_DELAY_MS, 500 * 2 ** retryAttemptRef.current);
-    retryAttemptRef.current += 1;
+    const attempt = retryAttemptRef.current + 1;
+    console.debug(
+      `[conductor:terminal] relay reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
+    );
+    retryAttemptRef.current = attempt;
     reconnectTimerRef.current = window.setTimeout(() => {
       setConnectionTick((value) => value + 1);
     }, delay);
@@ -644,9 +648,29 @@ export function RemoteSessionTerminal({
         applyGeometry();
       });
     const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+    let hiddenAt: number | null = null;
     const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = window.Date.now();
+        // Pause reconnect timer while the tab is hidden to avoid unnecessary
+        // reconnection attempts when the user isn't looking at the terminal.
+        if (reconnectTimerRef.current !== null) {
+          window.clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        return;
+      }
       if (document.visibilityState === "visible") {
         refreshTerminalLayout();
+        // If we were previously disconnected, schedule a reconnect now that
+        // the tab is visible again. Use the connection quality to decide:
+        // if the socket is still open, just refresh layout; if offline or
+        // closed, trigger a reconnect attempt.
+        const socket = socketRef.current;
+        if (hiddenAt !== null && (!socket || socket.readyState !== WebSocket.OPEN)) {
+          setConnectionTick((value) => value + 1);
+        }
+        hiddenAt = null;
       }
     };
     const fontSet = typeof document === "undefined" ? null : document.fonts;
