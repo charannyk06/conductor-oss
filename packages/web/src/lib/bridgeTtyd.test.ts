@@ -5,6 +5,7 @@ import {
   BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
   buildBridgeTtydProxyUrl,
   injectBridgeTtydRelayShim,
+  injectTtydResizeShim,
 } from "./bridgeTtyd";
 
 test("buildBridgeTtydProxyUrl preserves session scope and relay ttyd ws", () => {
@@ -45,5 +46,17 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
   assert.ok(
     injected.indexOf("conductor-bridge-ttyd-relay-shim") < injected.indexOf("<script src=\"/refresh.js\">"),
     "relay shim should be injected before ttyd bootstrap scripts",
+  );
+});
+
+test("injectTtydResizeShim matches backend ttyd scroll-preservation resize behavior", () => {
+  const html = "<html><body></body></html>";
+  const injected = injectTtydResizeShim(html);
+  assert.match(injected, /findXtermScrollHost/);
+  assert.match(injected, /conductor-terminal-resize/);
+  assert.match(
+    injected,
+    /syncViewportSizeEmbedded\(\);\s*\/\/ Match TTYD_RESIZE_SHIM boot/,
+    "initial sync should be followed by a resize burst like terminal.rs",
   );
 });
