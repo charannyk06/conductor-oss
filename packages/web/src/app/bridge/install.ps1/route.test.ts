@@ -20,6 +20,8 @@ test("GET includes concrete reconnect guidance for the PowerShell installer", as
     /Bridge service installed\. Future reconnects can use: conductor-bridge connect --dashboard-url \$DashboardUrl/,
   );
   assert.match(body, /Installing conductor-oss CLI via npm/);
+  assert.match(body, /Configure-UserPath/);
+  assert.match(body, /SetEnvironmentVariable\("Path", \(\$updatedEntries -join ";"\), "User"\)/);
   assert.match(body, /Conductor CLI installed for local backend/);
   assert.match(body, /conductor-bridge\.exe/);
 });

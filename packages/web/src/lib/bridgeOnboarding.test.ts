@@ -64,10 +64,28 @@ test("buildBridgeConnectCommand includes dashboard and relay arguments", () => {
   );
 });
 
+test("buildBridgeConnectCommand uses the installed bridge path on windows", () => {
+  assert.equal(
+    buildBridgeConnectCommand(
+      "https://preview.conductross.com",
+      "https://relay.conductross.com",
+      "windows",
+    ),
+    "& (Join-Path $HOME '.conductor\\bin\\conductor-bridge.exe') connect --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
+  );
+});
+
 test("buildBridgeManualPairCommand includes relay arguments for both steps", () => {
   assert.equal(
     buildBridgeManualPairCommand("ABC123", "https://relay.conductross.com"),
     "conductor-bridge pair --code ABC123 --relay-url https://relay.conductross.com\nconductor-bridge daemon --relay-url https://relay.conductross.com",
+  );
+});
+
+test("buildBridgeManualPairCommand uses the installed bridge path on windows", () => {
+  assert.equal(
+    buildBridgeManualPairCommand("ABC123", "https://relay.conductross.com", "windows"),
+    "& (Join-Path $HOME '.conductor\\bin\\conductor-bridge.exe') pair --code ABC123 --relay-url https://relay.conductross.com\n& (Join-Path $HOME '.conductor\\bin\\conductor-bridge.exe') daemon --relay-url https://relay.conductross.com",
   );
 });
 

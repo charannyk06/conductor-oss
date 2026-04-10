@@ -238,12 +238,12 @@ export default function BridgeConnectClient({
     [setupInstallUrl, setupPlatform],
   );
   const connectCommand = useMemo(
-    () => buildBridgeConnectCommand(dashboardUrl, relayUrl),
-    [dashboardUrl, relayUrl],
+    () => buildBridgeConnectCommand(dashboardUrl, relayUrl, setupPlatform),
+    [dashboardUrl, relayUrl, setupPlatform],
   );
   const manualCommand = useMemo(
-    () => buildBridgeManualPairCommand(pairingCode, relayUrl),
-    [pairingCode, relayUrl],
+    () => buildBridgeManualPairCommand(pairingCode, relayUrl, setupPlatform),
+    [pairingCode, relayUrl, setupPlatform],
   );
   const connectedDevices = devices.filter((device) => device.connected);
   const claimedDeviceRecord = useMemo(
@@ -282,6 +282,10 @@ export default function BridgeConnectClient({
       selectedDeviceInstallPlatform,
     ),
     [dashboardUrl, installPowerShellUrl, installScriptUrl, relayUrl, selectedDeviceInstallPlatform, selectedDeviceSetupInstallUrl],
+  );
+  const selectedDeviceConnectCommand = useMemo(
+    () => buildBridgeConnectCommand(dashboardUrl, relayUrl, selectedDeviceInstallPlatform),
+    [dashboardUrl, relayUrl, selectedDeviceInstallPlatform],
   );
   const readyDevice = useMemo(
     () => (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
@@ -1240,7 +1244,7 @@ export default function BridgeConnectClient({
                           Open the same laptop and run the reconnect command below. If Conductor Bridge is missing or broken on that machine, use the full setup command instead.
                         </p>
                         <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
-                          {connectCommand}
+                          {selectedDeviceConnectCommand}
                         </pre>
                         <div className="mt-3 flex flex-wrap gap-2">
                           <Button
@@ -1248,7 +1252,7 @@ export default function BridgeConnectClient({
                             variant="primary"
                             size="md"
                             onClick={() => {
-                              void handleCopyCommand(connectCommand, "connect");
+                              void handleCopyCommand(selectedDeviceConnectCommand, "connect");
                             }}
                           >
                             {copiedCommand === "connect" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}

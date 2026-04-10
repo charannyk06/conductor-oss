@@ -29,6 +29,7 @@ $SourceArchiveUrl = "${sourceArchiveUrl}"
 $ConductorHome = Join-Path $HOME ".conductor"
 $InstallBinDir = Join-Path $ConductorHome "bin"
 $ConductorNpmPrefix = Join-Path $ConductorHome "npm"
+$ConductorNpmBinDir = Join-Path $ConductorNpmPrefix "bin"
 $BridgeBin = Join-Path $InstallBinDir "conductor-bridge.exe"
 $LocalGoRoot = Join-Path $ConductorHome "go"
 
@@ -68,6 +69,55 @@ function Ensure-Go {
       Remove-Item -Recurse -Force $tempRoot
     }
   }
+}
+
+function Test-PathEntryPresent([string[]]$Entries, [string]$Candidate) {
+  $normalizedCandidate = $Candidate.Trim().TrimEnd("\\")
+  foreach ($entry in $Entries) {
+    if ($null -eq $entry) {
+      continue
+    }
+    $normalizedEntry = $entry.Trim().TrimEnd("\\")
+    if ($normalizedEntry -and $normalizedEntry.Equals($normalizedCandidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Ensure-UserPathEntry([string]$PathEntry) {
+  if (-not $PathEntry) {
+    return
+  }
+
+  New-Item -ItemType Directory -Force -Path $PathEntry | Out-Null
+
+  $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $userEntries = @()
+  if ($currentUserPath) {
+    $userEntries = $currentUserPath -split ";" | Where-Object { $_ -and $_.Trim() }
+  }
+  if (-not (Test-PathEntryPresent $userEntries $PathEntry)) {
+    $updatedEntries = @($userEntries + $PathEntry) | Where-Object { $_ -and $_.Trim() }
+    [Environment]::SetEnvironmentVariable("Path", ($updatedEntries -join ";"), "User")
+  }
+
+  $sessionEntries = @()
+  if ($env:PATH) {
+    $sessionEntries = $env:PATH -split ";" | Where-Object { $_ -and $_.Trim() }
+  }
+  if (-not (Test-PathEntryPresent $sessionEntries $PathEntry)) {
+    $env:PATH = if ([string]::IsNullOrWhiteSpace($env:PATH)) {
+      $PathEntry
+    } else {
+      "$PathEntry;$env:PATH"
+    }
+  }
+}
+
+function Configure-UserPath {
+  Ensure-UserPathEntry $InstallBinDir
+  Ensure-UserPathEntry $ConductorNpmBinDir
 }
 
 function Build-Bridge($goExe) {
@@ -196,6 +246,7 @@ function Run-Connect {
 $goExe = Ensure-Go
 Build-Bridge $goExe
 Ensure-ConductorCli
+Configure-UserPath
 Write-Host "Installing bridge background service..."
 & $BridgeBin install
 if ($LASTEXITCODE -ne 0) {
