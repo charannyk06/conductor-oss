@@ -48,7 +48,7 @@ conductor kill {session-id}
 **Option 2: Force Kill (Last Resort)**
 ```bash
 # Find process ID
-ps aux | grep ttyd | grep {session-id}
+ps aux | grep conductor | grep {session-id}
 
 # Kill process
 kill -9 {pid}
@@ -213,8 +213,8 @@ df -h /tmp           # Temp space for worktrees
 
 **Diagnosis:**
 ```bash
-# Check if ttyd process is running
-ps aux | grep ttyd | grep -v grep
+# Check if the terminal runtime is running
+ps aux | grep conductor | grep -v grep
 
 # Check server logs
 journalctl -u conductor -f

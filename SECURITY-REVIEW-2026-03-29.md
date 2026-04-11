@@ -88,7 +88,7 @@ Recommendation: Document this as accepted risk for now. Split into separate brow
 Severity: Medium
 Status: Documented in existing threat model
 
-Terminal tokens are transported in WebSocket URL query parameters (`packages/web/src/app/api/sessions/[id]/terminal/ttyd/ws/route.ts`). This means tokens appear in browser history, proxy logs, and server logs.
+Terminal tokens are transported in WebSocket URL query parameters on the live terminal route. This means tokens appear in browser history, proxy logs, and server logs.
 
 Recommendation: Move to a one-time token exchange model where the browser exchanges the token for a header-based auth before opening the WebSocket. This is a known item from the existing threat model (TM-004).
 

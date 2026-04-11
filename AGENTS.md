@@ -84,7 +84,7 @@ packages/
 ## Architecture Constraints
 
 - **Local-first:** The core workflow must run fully local; optional remote helpers must not become hosted source-of-truth state or credential proxies
-- **native-pty-first:** Runtime defaults to the native PTY session pipeline; tmux and ttyd are legacy compatibility aliases only
+- **native-pty-first:** Runtime defaults to the native PTY session pipeline; old runtime aliases are compatibility-only
 - **SQLite-only:** No external database dependencies
 - **Agent-agnostic:** Conductor orchestrates; agents do their own auth and billing
 - **Markdown-native:** Board state lives in `CONDUCTOR.md`, readable by humans and Obsidian

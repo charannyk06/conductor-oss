@@ -67,7 +67,7 @@ It is:
 - a dashboard for linked workspaces and running sessions
 - a launcher for supported coding agent CLIs
 - a git worktree manager so concurrent sessions do not stomp on each other
-- a session runtime with real ttyd-backed PTYs
+- a session runtime with real first-party PTYs
 - a local state layer backed by SQLite
 - an optional paired-device bridge for remote access to your own machine
 

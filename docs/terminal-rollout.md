@@ -26,7 +26,7 @@ Use a live session id while the dashboard is running locally.
 bun run bench:terminal -- <session-id>
 ```
 
-The script hits token, live snapshot, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, and `Server-Timing`. Live terminal streaming stays on the backend ttyd facade and its authenticated `/api/sessions/:id/terminal/ttyd/ws` websocket.
+The script hits token, live snapshot, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, and `Server-Timing`. Live terminal streaming stays on the backend terminal facade and its authenticated `/api/sessions/:id/terminal/ws` websocket.
 
 If dashboard auth is enabled, run the benchmark from a local operator environment or reproduce the same requests with equivalent auth headers or cookies.
 
@@ -40,10 +40,10 @@ If dashboard auth is enabled, run the benchmark from a local operator environmen
   - total snapshot request time
   - whether the active prompt and recent scrollback survive refresh
 - Resize control latency
-  - browser-observed ttyd resize round-trip timing
+  - browser-observed terminal resize round-trip timing
   - visible prompt stability after viewport or orientation changes
 - Reconnect success
-  - whether token refresh and ttyd reconnect succeed during nominal flows
+  - whether token refresh and terminal reconnect succeed during nominal flows
   - whether the terminal returns to live streaming quickly without entering full snapshot mode
   - time from disconnect notice to usable prompt
 - Mobile input reliability
@@ -51,7 +51,7 @@ If dashboard auth is enabled, run the benchmark from a local operator environmen
 
 ## Recommended Acceptance Targets
 
-- Local desktop token + ttyd websocket path: typically under 150 ms on a warm backend
+- Local desktop token + terminal websocket path: typically under 150 ms on a warm backend
 - Local desktop live snapshot: typically under 200 ms on a warm backend
 - Private-remote live snapshot: typically under 500 ms on a healthy network path
 - Reconnect notice to usable prompt: under 2 seconds on local or private-remote paths
@@ -78,6 +78,6 @@ When a run fails, capture:
 - response headers from the failing terminal endpoint
 - terminal token payload (`required`, `expiresInSeconds`)
 - terminal snapshot payload (`source`, `live`, `restored`, `format`, `sequence`)
-- ttyd websocket close code, open timing, and reconnect timing
+- terminal websocket close code, open timing, and reconnect timing
 - browser console and network errors
 - whether reopening the session terminal still reaches the same live runtime

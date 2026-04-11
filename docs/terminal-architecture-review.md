@@ -8,8 +8,8 @@ No, the pre-Apr 9 implementation was not yet robust enough.
 
 The right move is:
 - keep the iframe surface
-- keep ttyd as the PTY web runtime
-- keep the backend ttyd facade and bridge relay model
+- keep the native PTY runtime as the terminal transport
+- keep the backend terminal facade and bridge relay model
 - change the ownership and identity rules around terminal lifecycle
 
 That means the architecture wins or loses on **identity preservation**, not on whether the iframe exists.
@@ -17,10 +17,10 @@ That means the architecture wins or loses on **identity preservation**, not on w
 ## What should remain
 
 ### 1. Browser iframe shell
-- ttyd already owns xterm, fit, keyboard, clipboard, and PTY rendering well enough
+- the terminal stack already owns xterm, fit, keyboard, clipboard, and PTY rendering well enough
 - replacing it would create a large new surface area with little immediate product value
 
-### 2. Backend ttyd facade
+### 2. Backend terminal facade
 - the backend already provides auth, HTML injection hooks, websocket facade, snapshots, and policy control
 - this is the right place to own token minting, headers, cookies, and terminal access checks
 
@@ -40,10 +40,10 @@ Fixes already landed:
 - `fa3ebf6` keep session terminals stable while inactive
 
 ### Problem 2. Token refresh and reconnect looked like terminal replacement
-The browser and ttyd auth path could re-resolve connection state too aggressively.
+The browser and terminal auth path could re-resolve connection state too aggressively.
 
 Fix already landed:
-- `6638ee9` preserve ttyd identity across reconnects
+- `6638ee9` preserve terminal identity across reconnects
 
 ### Problem 3. Bridge relay ownership was wrong
 The relay treated browser disconnect like terminal death. Passive lifecycle events could also mint a fresh relay terminal too eagerly.

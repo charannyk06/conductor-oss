@@ -137,9 +137,9 @@ Connected.
 
 ## Terminal Behavior
 
-- ttyd runs on laptop (already implemented)
-- Bridge proxies ttyd WebSocket through relay to dashboard
-- No middle WebSocket — bridge terminates at laptop's local ttyd
+- the terminal runtime runs on the laptop (already implemented)
+- Bridge proxies the terminal WebSocket through relay to dashboard
+- No middle WebSocket — bridge terminates at the laptop's local terminal runtime
 - Terminal feels like a direct connection
 
 ## Security
@@ -183,7 +183,7 @@ Connected.
    - "Add new device" shows pairing code/instructions
 
 6. **Terminal via bridge**
-   - Replace direct ttyd with bridge-proxied ttyd
+   - Replace the direct terminal with the bridge-proxied terminal runtime
    - User selects which laptop to use for a session
 
 ## Out of Scope (v1)

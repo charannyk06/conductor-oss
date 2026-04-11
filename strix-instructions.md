@@ -18,7 +18,7 @@ Conductor is an open-source multi-agent orchestrator. It runs a Rust backend and
 1. **Dashboard API routes** - `/api/sessions/*`, `/api/projects/*`, `/api/dispatcher/*`, `/api/filesystem/*`, `/api/attachments/*`
 2. **Preview browser** - server-side Puppeteer that auto-connects to discovered URLs. Can be abused for SSRF if non-local origins are reachable.
 3. **SSE streaming** - `/api/sessions/:id/feed/stream`, `/api/projects/:id/dispatcher/feed/stream` - check for auth bypass and data leakage.
-4. **Terminal/ttyd** - `/api/sessions/:id/terminal/ttyd/ws` - check for auth bypass on live shell sessions.
+4. **Terminal** - `/api/sessions/:id/terminal/ws` - check for auth bypass on live shell sessions.
 5. **Relay claim endpoint** - if reachable, check for rate limiting, queue exhaustion, and unauthorized pairing.
 6. **Filesystem browser** - `/api/filesystem/*` - check for path traversal beyond workspace boundaries.
 7. **Attachments** - `/api/attachments/*` - check for unauthorized upload/download.

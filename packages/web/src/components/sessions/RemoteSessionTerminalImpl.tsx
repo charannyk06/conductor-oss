@@ -26,7 +26,7 @@ import {
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 // Server→client command bytes for the legacy one-byte relay frame protocol.
-// See crates/conductor-server/src/routes/ttyd_protocol.rs for the authoritative list.
+// See the backend relay frame protocol constants for the authoritative list.
 const CMD_OUTPUT = "0".charCodeAt(0);            // 0x30 – terminal output
 const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);  // 0x31 – server-set window title
 const CMD_SET_PREFERENCES = "2".charCodeAt(0);   // 0x32 – server-set preferences
