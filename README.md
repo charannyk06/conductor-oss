@@ -2,9 +2,9 @@
 
 # Conductor OSS
 
-### The local-first control plane for AI coding agents
+### Run real AI coding agents across your repos, from one dashboard
 
-**One command. Markdown-native. Real terminals.**
+**Real terminals. Git worktrees. Local-first control.**
 
 [![npm version](https://img.shields.io/npm/v/conductor-oss?style=flat-square&color=0ea5e9)](https://www.npmjs.com/package/conductor-oss)
 [![CI](https://img.shields.io/github/actions/workflow/status/charannyk06/conductor-oss/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml)
@@ -16,91 +16,144 @@
 
 ---
 
-Conductor OSS is a local-first orchestration layer for AI coding agents. It turns Markdown kanban boards into dispatchable work, launches installed coding CLIs in isolated git worktrees, and gives you a browser dashboard for live terminal sessions, diffs, previews, recovery workflows, and multi-agent skills management.
+Conductor OSS is a local-first orchestration layer for AI coding agents.
 
-By default, everything runs on your machine. Conductor keeps board state in Markdown, stores runtime metadata in SQLite, and leaves authentication and billing to the upstream agent CLIs.
+It helps you:
+- connect a repo or local folder as a workspace
+- launch Claude Code, Codex, Gemini, and other coding CLIs in isolated git worktrees
+- watch the agent inside a real terminal, not a fake chat shell
+- review diffs, previews, retries, restores, and reviewer feedback from one dashboard
+- keep project state in normal local files like `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db`
 
-## Why Conductor
+## Read this first, there are two ways to use Conductor
 
-Running one agent in one terminal works for one task. Conductor is for the next step: multiple tasks, multiple repos, multiple agents, shared queues, session recovery, live review, and one dashboard to coordinate all of it.
+A lot of confusion comes from mixing the local app and the hosted bridge flow.
 
-Conductor adds:
-
-- **Markdown-native planning** with `CONDUCTOR.md` boards that stay readable in Obsidian or any editor
-- **Dispatch orchestration** that turns tagged cards into queued agent work
-- **Worktree isolation** so concurrent sessions do not trample the same branch
-- **Native terminal sessions** over ttyd-backed PTYs instead of synthetic chat shells
-- **Operational visibility** through session feeds, diffs, previews, health views, and cleanup tools
-- **Recovery loops** with retry, restore, reviewer feedback, and session health tracking
-
-## Quick Start
-
-### Requirements
-
-- Node.js `>= 18`
-- `git`
-- At least one supported coding agent CLI installed and authenticated
-
-### Launch
+### 1. Local dashboard on the same machine
+Use this when Conductor and your repos live on the same laptop or desktop.
 
 ```bash
 npx --yes --registry=https://registry.npmjs.org conductor-oss@latest
 ```
 
-Running the package with no arguments defaults to `start --open`.
+That defaults to `co start --open`.
 
-- Primary launcher URL: `http://127.0.0.1:4747`
-- Launcher-managed Rust backend: `http://127.0.0.1:4748` by default
-- The native Rust `conductor start` binary uses `4747` unless you override `--port`
-- When launched through `co start`, the dashboard inherits the Rust backend URL automatically so the web app can proxy skills, preview, and session routes without extra setup.
+If you do **not** pass a workspace, the launcher boots a default workspace at:
 
-### Initialize an existing repo
-
-```bash
-npx --yes --registry=https://registry.npmjs.org conductor-oss@latest init
-npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace .
+```text
+~/.openclaw/workspace
 ```
 
-`init` scaffolds `conductor.yaml` and `CONDUCTOR.md`. The SQLite database at `.conductor/conductor.db` is created the first time the backend starts.
+### 2. Hosted dashboard plus paired device bridge
+Use this when you want to open Conductor from another browser, another computer, or your phone while the actual work still runs on your own machine.
 
-### Global install
+```bash
+curl -fsSL https://app.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://app.conductross.com --relay-url https://relay.conductross.com/
+```
+
+On Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://app.conductross.com/bridge/install.ps1'))) -Connect -DashboardUrl 'https://app.conductross.com' -RelayUrl 'https://relay.conductross.com/'
+```
+
+The hosted dashboard is **not** a cloud IDE. Your repos, terminals, and agents stay on the paired machine.
+
+## What Conductor actually is
+
+Conductor sits between your repos and the coding CLIs you already use.
+
+It is:
+- a dashboard for linked workspaces and running sessions
+- a launcher for supported coding agent CLIs
+- a git worktree manager so concurrent sessions do not stomp on each other
+- a session runtime with real ttyd-backed PTYs
+- a local state layer backed by SQLite
+- an optional paired-device bridge for remote access to your own machine
+
+It is **not**:
+- a replacement model provider
+- a hosted cloud IDE that stores your code by default
+- a fake browser chat wrapper around terminal output
+- dependent on one agent vendor
+
+## The main user flow
+
+This is the flow the current app is built around.
+
+1. Open Conductor.
+2. Add a workspace.
+3. Choose either:
+   - a GitHub repository you already have access to, or
+   - a local folder that already exists on disk
+4. Conductor links that workspace and scaffolds local state as needed.
+5. Start or resume agent sessions for that workspace.
+6. Monitor the live terminal, inspect diffs, open previews, send feedback, retry, restore, or clean up.
+7. If you like planning in Markdown, keep tasks in `CONDUCTOR.md`. If you prefer direct launches, use the dashboard or `co spawn`.
+
+## Quick start
+
+### Option A, point Conductor at an existing repo
+
+```bash
+cd /path/to/repo
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest init
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace . --open
+```
+
+What this does:
+- scaffolds `conductor.yaml`
+- scaffolds `CONDUCTOR.md`
+- starts the dashboard and Rust backend for that repo
+
+### Option B, install globally
 
 ```bash
 npm install -g conductor-oss
-co start
+co start --open
 ```
 
-The launcher registers three aliases: `conductor-oss`, `conductor`, and `co`.
+Installed aliases:
+- `conductor-oss`
+- `conductor`
+- `co`
 
-## Supported Agents
+### Option C, guided setup
 
-Conductor ships adapters for the major coding CLIs it knows how to discover, launch, and monitor today.
+```bash
+co setup
+```
 
-| Agent | CLI |
-|-------|-----|
-| Claude Code | `claude` |
-| Codex | `codex` |
-| Gemini | `gemini` |
-| Qwen Code | `qwen` |
-| Amp | `amp` |
-| Hermes | `hermes` |
-| Cursor CLI | `cursor-agent` |
-| OpenCode | `opencode` |
-| Droid | `droid` |
-| GitHub Copilot | `gh copilot` / `copilot` |
-| CCR | `ccr` |
+Use this if you want a more guided first-run flow.
 
-## Skills
+## What you will see in the app
 
-The dashboard includes a Skills tab for each session. It can install curated official skill bundles for Claude Code, Codex, Gemini, Amp, Hermes, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot.
+### Workspace entry
+The dashboard starts with a workspace-first flow. You link repos first, then manage sessions from there.
 
-Skills are mapped to each agent's native folder layout, so user-scoped and workspace-scoped installs land in the right place automatically. The backend also detects custom skill folders already present on the machine and lets you activate or deactivate skills for the current session.
+### Session detail
+Each session page is built around four core surfaces:
+- **Terminal**, the live interactive PTY session
+- **Overview**, normalized state, metadata, and recovery actions
+- **Preview**, project dev server URLs when available
+- **Diff**, file changes and workspace inspection
 
-If you run the dashboard outside `co start`, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web app can reach the Rust backend. If that backend is reachable off-host and dashboard auth is enabled, also set the same `CONDUCTOR_PROXY_AUTH_SECRET` in both processes so forwarded dashboard auth headers can be verified safely.
+<div align="center">
 
-## Native Terminal Experience
+| Dashboard Overview | Session Detail |
+|:---:|:---:|
+| ![Dashboard](docs/screenshots/01-dashboard-overview.png) | ![Session](docs/screenshots/07-session-detail.png) |
 
-Conductor launches agents into their real terminal UIs. Claude Code runs as Claude Code. Codex runs as Codex. Interactive sessions are ttyd-backed PTYs, so reconnects, resize events, and terminal restore behave like a real terminal session rather than a browser chat imitation.
+</div>
+
+### Native terminal experience
+Agents run in their real terminal UI.
+
+- Claude Code runs as Claude Code
+- Codex runs as Codex
+- Gemini runs as Gemini
+
+Conductor uses ttyd-backed PTYs so reconnects, resize events, restore, and mobile terminal behavior act like a real terminal session.
 
 <div align="center">
 
@@ -114,155 +167,148 @@ Conductor launches agents into their real terminal UIs. Claude Code runs as Clau
 
 </div>
 
-## How It Works
+## Markdown board support
 
-### Task Lifecycle
+`CONDUCTOR.md` is still a first-class part of the product.
+
+The default scaffold gives you a simple task lifecycle:
 
 ```text
 Inbox -> Ready to Dispatch -> Dispatching -> In Progress -> Review -> Done
 ```
 
-1. Create tasks in `CONDUCTOR.md`.
-2. Move work into `Ready to Dispatch`.
-3. Conductor selects an agent, prepares the workspace, and launches a session.
-4. The agent runs in an isolated git worktree with a compiled task prompt and any context attachments.
-5. You monitor progress from the dashboard and the live terminal.
-6. You review diffs, preview local apps, send feedback, retry, restore, or clean up.
+Use the board when you want Markdown-native planning that still maps cleanly onto session history and dispatch context.
 
-### Dashboard Surfaces
+If you want to skip the board for a quick run, you can still launch sessions directly with the CLI.
 
-Each session page includes:
+## CLI commands most users need
 
-- **Terminal** for the live interactive PTY session
-- **Overview** for normalized session state, metadata, and recovery actions
-- **Preview** for project dev-server URLs
-- **Diff** for file changes and workspace inspection
-
-<div align="center">
-
-| Dashboard Overview | Session Detail |
-|:---:|:---:|
-| ![Dashboard](docs/screenshots/01-dashboard-overview.png) | ![Session](docs/screenshots/07-session-detail.png) |
-
-</div>
-
-## CLI Reference
-
-The npm launcher (`co`) is the primary user-facing CLI.
-
-| Command | Description |
-|---------|-------------|
+| Command | What it does |
+|---------|---------------|
 | `co start` | Start the dashboard and Rust backend |
-| `co init` | Scaffold `conductor.yaml` and `CONDUCTOR.md` |
-| `co setup` | Guided first-run setup for agents, editors, and local tooling |
-| `co spawn` | Create a new session |
+| `co init` | Scaffold `conductor.yaml` and `CONDUCTOR.md` in a repo |
+| `co setup` | Guided first-run setup |
+| `co spawn <project> [prompt]` | Start a new agent session for a project |
 | `co list` | List sessions |
-| `co status` | Show the current attention-oriented status board |
-| `co send` | Send a message to a running session |
-| `co feedback` | Send reviewer feedback and requeue a session |
-| `co retry` | Create a new attempt from an existing task or session |
-| `co restore` | Restore an exited session |
-| `co kill` | Terminate a session |
+| `co status` | Show the current attention-oriented session view |
+| `co send <session> <message...>` | Send a message to a running session |
+| `co feedback <sessionId> <message...>` | Send reviewer feedback and requeue the session |
+| `co retry <sessionOrTask>` | Start a new attempt from an existing task or session |
+| `co restore <session>` | Restore an exited session |
+| `co kill <session>` | Kill a session |
 | `co cleanup` | Reclaim resources from completed sessions |
-| `co doctor` | Inspect backend and session health |
+| `co doctor` | Check backend and runtime health |
 | `co dashboard` | Open the dashboard in a browser |
-| `co task show <taskId>` | Inspect task attempts, parent, and child tasks |
+| `co bridge setup` | Install and pair Conductor Bridge for remote access |
 | `co mcp-server` | Run Conductor as an MCP server over stdio |
+| `co acp-server` | Run Conductor as an ACP server over stdio |
 
-A lower-level Rust CLI also exists for development and internal flows. That native binary is where the current `bridge` subcommands live.
+## Supported agents
 
-## Access Control and Bridge
+Conductor ships adapters for the coding CLIs it can discover and launch today.
 
-Conductor is local-first, but the current codebase includes several access-control and paired-device paths:
+| Agent | CLI |
+|-------|-----|
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Gemini | `gemini` |
+| Qwen Code | `qwen` |
+| Amp | `amp` |
+| Hermes | `hermes` |
+| Cursor CLI | `cursor-agent` |
+| OpenCode | `opencode` |
+| Droid | `droid` |
+| GitHub Copilot | `gh copilot` or `copilot` |
+| CCR | `ccr` |
 
-- **Verified edge auth** via Cloudflare Access JWT validation and role bindings
-- **Optional Clerk integration** for hosted sign-in flows in the web app
-- **Bridge and relay components** for paired-device flows and relay-backed terminals
+The dashboard only offers agents it can discover on your machine.
 
-Relay deployment matters separately from web deployment. See `docs/relay-deployment.md` for the production rollout workflow and required secrets.
+## Local files Conductor creates
 
-What is no longer supported:
+| File or directory | Purpose |
+|-------------------|---------|
+| `conductor.yaml` | Workspace config, project metadata, defaults, and server settings |
+| `CONDUCTOR.md` | Markdown board for planning and dispatch |
+| `.conductor/conductor.db` | SQLite runtime state for sessions, attempts, metadata, and coordination |
+| `.conductor/rust-backend/detached/` | Detached PTY state for restore flows |
+| `attachments/` | Uploaded files and generated session artifacts |
+| `~/.conductor/` | Launcher runtime state and optional bridge state |
 
-- Public share-link remote control without an identity layer
-- The old tmux-first terminal model
+## Ports
 
-The user-facing paired-device flow is built around the companion `conductor-bridge` binary and the dashboard bridge pages. The repo also contains `bridge-cmd/`, `crates/conductor-relay/`, and native Rust `conductor bridge ...` commands for lower-level bridge and relay development.
+### Launcher defaults
+When you run `co start` from the published package:
 
-For first-time bridge pairing, prefer the hosted installer instead of routing through `npx`:
+- dashboard: `http://127.0.0.1:4747`
+- Rust backend: `http://127.0.0.1:4748`
 
-```bash
-curl -fsSL https://app.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://app.conductross.com --relay-url https://relay.conductross.com/
-```
+### Source checkout defaults
+When you run the repo in development mode:
 
-On Windows PowerShell:
+- dashboard: `http://127.0.0.1:3000`
+- Rust backend: `http://127.0.0.1:4749`
 
-```powershell
-& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://app.conductross.com/bridge/install.ps1'))) -Connect -DashboardUrl 'https://app.conductross.com' -RelayUrl 'https://relay.conductross.com/'
-```
+## Access control, sign-in, and bridge
 
-## Local Files and Runtime Artifacts
+Conductor is local-first, but the codebase already includes hosted and paired-device paths.
 
-Conductor uses a small set of local files:
+Current pieces in the repo:
+- verified Cloudflare Access JWT validation and role bindings
+- optional Clerk-backed sign-in flows in the web app
+- bridge and relay components for paired-device terminals and remote access
 
-| File | Purpose |
-|------|---------|
-| `conductor.yaml` | Workspace config, project definitions, access rules, and preferences |
-| `CONDUCTOR.md` | Markdown kanban board for planning and dispatch |
-| `.conductor/conductor.db` | SQLite state for sessions, attempts, metadata, and runtime coordination |
+If you run the dashboard outside `co start`, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web app can reach the Rust backend.
 
-Common runtime artifacts:
+If that backend is reachable off-host and dashboard auth is enabled, also set the same `CONDUCTOR_PROXY_AUTH_SECRET` in both processes so forwarded dashboard auth headers can be verified safely.
 
-- `.conductor/rust-backend/detached/` for restore data and detached PTY runtime state
-- `attachments/` for uploaded files and generated session artifacts
-- `~/.conductor/` for launcher runtime state and optional bridge token/state files
+Relay deployment is separate from dashboard deployment. See `docs/relay-deployment.md` if you are rolling out the paired-device stack.
 
-## Develop From Source
+## Develop from source
 
 ### Prerequisites
-
 - Rust stable toolchain
 - Bun `>= 1.2`
 - Node.js `>= 18`
 - `git`
 
-### Setup
+### Install
 
 ```bash
 bun install
 ```
 
-### Commands
+### Run
 
 ```bash
-bun run dev:full     # Dashboard on 3000 + Rust backend on 4749
-bun run dev          # Dashboard only
-bun run dev:backend  # Backend only through the launcher path
-bun run build        # Production build
+bun run dev:full
+```
+
+Useful scripts:
+
+```bash
+bun run dev          # dashboard only
+bun run dev:backend  # backend only through the launcher path
+bun run build        # production build
 bun run typecheck    # TypeScript type checking
-
-export CONDUCTOR_DEV_DASHBOARD_PORT=3000  # optional
-export CONDUCTOR_DEV_BACKEND_PORT=4749    # optional
-
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-### Port Reference
+Optional development ports:
 
-| Scenario | Dashboard | Rust backend |
-|----------|-----------|--------------|
-| `co start` launcher defaults | `4747` | `4748` |
-| Source dev scripts in this repo | `3000` | `4749` |
-| Native `cargo run --bin conductor -- start` | n/a | `4747` |
+```bash
+export CONDUCTOR_DEV_DASHBOARD_PORT=3000
+export CONDUCTOR_DEV_BACKEND_PORT=4749
+```
 
-## Project Structure
+## Project structure
 
 ```text
 conductor-oss/
 ├── bridge-cmd/               # Companion bridge binary used by the pairing flow
 ├── crates/
 │   ├── conductor-cli/        # Native Rust CLI
-│   ├── conductor-core/       # Config, board parsing, task/session models, scaffolding
+│   ├── conductor-core/       # Config, board parsing, task and session models, scaffolding
 │   ├── conductor-db/         # SQLite persistence
 │   ├── conductor-executors/  # Agent adapters and process management
 │   ├── conductor-git/        # Git and worktree operations
@@ -276,22 +322,21 @@ conductor-oss/
 │   ├── core/                 # Shared TypeScript types and schemas
 │   └── web/                  # Next.js dashboard
 ├── docs/
-│   ├── demo/                 # Workflow demos
-│   ├── screenshots/          # Dashboard and terminal screenshots
-│   └── terminal-*.md         # Terminal protocol and QA docs
+│   ├── screenshots/          # Product screenshots
+│   └── *.md                  # Deployment notes, QA docs, and product docs
 ├── Cargo.toml                # Rust workspace
 ├── package.json              # Bun workspace
-├── conductor.yaml            # Workspace config (user-created)
-└── CONDUCTOR.md              # Board file (user-created)
+├── conductor.yaml            # User-created workspace config
+└── CONDUCTOR.md              # User-created board file
 ```
 
-## Known Constraints
+## Known constraints
 
-- Output quality depends on the upstream agent CLI you install; Conductor orchestrates it, not its model behavior
-- GitHub-heavy flows work best with `gh` installed and authenticated
-- Preview tooling depends on a project exposing a local dev server or explicit preview URL
-- Public remote admin links were removed; use a verified identity layer instead
-- Legacy tmux and legacy direct sessions are compatibility data that should be archived rather than resumed
+- Output quality depends on the upstream agent CLI you install. Conductor orchestrates sessions, it does not change the underlying model quality.
+- GitHub-heavy flows work best with `gh` installed and authenticated.
+- Preview tooling depends on a project exposing a local dev server or explicit preview URL.
+- Public share-link remote control without an identity layer is not supported.
+- Legacy tmux and old direct-session data should be archived, not treated as the preferred runtime path.
 
 ## Links
 
