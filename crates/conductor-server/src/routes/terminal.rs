@@ -65,6 +65,18 @@ enum TerminalClientMessage {
     Ping,
 }
 
+#[derive(Debug, Deserialize)]
+struct LegacyTtydResizeMessage {
+    columns: u16,
+    rows: u16,
+}
+
+enum ParsedTerminalClientMessage {
+    Message(TerminalClientMessage),
+    Ignore,
+    Unsupported,
+}
+
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
     (status, Json(json!({ "error": message.into() })))
 }
@@ -125,6 +137,31 @@ fn terminal_ws_proxy_path(session_id: &str, token: Option<&str>) -> String {
     }
 }
 
+fn build_terminal_token_payload(
+    session_id: &str,
+    interactive: bool,
+    token_required: bool,
+    token: Option<&str>,
+) -> Value {
+    let ws_url = if interactive {
+        Some(terminal_ws_proxy_path(session_id, token))
+    } else {
+        None
+    };
+
+    json!({
+        "token": token,
+        "required": token_required,
+        "expiresInSeconds": if interactive && token_required { Some(TERMINAL_TOKEN_TTL_SECONDS) } else { None },
+        "interactive": interactive,
+        "reason": if interactive { Value::Null } else { Value::String("Session is not running".to_string()) },
+        "wsUrl": ws_url,
+        "ttydWsUrl": ws_url,
+        "snapshotUrl": terminal_snapshot_path(session_id),
+        "outputUrl": terminal_output_path(session_id),
+    })
+}
+
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
@@ -134,27 +171,22 @@ async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     let token_required = should_issue_terminal_token(&access);
     let interactive = state.ensure_session_live(&id).await.unwrap_or(false);
     let token = if interactive && token_required {
-        create_scoped_terminal_token(&id, TerminalTokenScope::Control).ok()
+        match create_scoped_terminal_token(&id, TerminalTokenScope::Control) {
+            Ok(token) => Some(token),
+            Err(err) => {
+                return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            }
+        }
     } else {
         None
     };
 
-    let ws_url = if interactive {
-        Some(terminal_ws_proxy_path(&id, token.as_deref()))
-    } else {
-        None
-    };
-
-    Json(json!({
-        "token": token,
-        "required": token_required,
-        "expiresInSeconds": if interactive && token_required { Some(TERMINAL_TOKEN_TTL_SECONDS) } else { None },
-        "interactive": interactive,
-        "reason": if interactive { Value::Null } else { Value::String("Session is not running".to_string()) },
-        "wsUrl": ws_url,
-        "snapshotUrl": terminal_snapshot_path(&id),
-        "outputUrl": terminal_output_path(&id),
-    }))
+    Json(build_terminal_token_payload(
+        &id,
+        interactive,
+        token_required,
+        token.as_deref(),
+    ))
     .into_response()
 }
 
@@ -192,6 +224,74 @@ async fn terminal_native_websocket(
     ws.on_upgrade(move |socket| handle_native_terminal_socket(state, id, socket))
 }
 
+fn legacy_resize_message_to_client_message(
+    resize: LegacyTtydResizeMessage,
+    client_ready: bool,
+) -> TerminalClientMessage {
+    if client_ready {
+        TerminalClientMessage::Resize {
+            cols: resize.columns,
+            rows: resize.rows,
+        }
+    } else {
+        TerminalClientMessage::Hello {
+            cols: resize.columns,
+            rows: resize.rows,
+        }
+    }
+}
+
+fn parse_terminal_client_text_message(
+    text: &str,
+    client_ready: bool,
+) -> ParsedTerminalClientMessage {
+    if let Ok(message) = serde_json::from_str::<TerminalClientMessage>(text) {
+        return ParsedTerminalClientMessage::Message(message);
+    }
+
+    if let Ok(resize) = serde_json::from_str::<LegacyTtydResizeMessage>(text) {
+        return ParsedTerminalClientMessage::Message(legacy_resize_message_to_client_message(
+            resize,
+            client_ready,
+        ));
+    }
+
+    ParsedTerminalClientMessage::Unsupported
+}
+
+fn parse_terminal_client_binary_message(
+    data: &[u8],
+    client_ready: bool,
+) -> ParsedTerminalClientMessage {
+    if data.is_empty() {
+        return ParsedTerminalClientMessage::Ignore;
+    }
+
+    match data[0] {
+        b'0' => match std::str::from_utf8(&data[1..]) {
+            Ok(payload) => ParsedTerminalClientMessage::Message(TerminalClientMessage::Input {
+                data: payload.to_string(),
+            }),
+            Err(_) => ParsedTerminalClientMessage::Unsupported,
+        },
+        b'1' => match serde_json::from_slice::<LegacyTtydResizeMessage>(&data[1..]) {
+            Ok(resize) => ParsedTerminalClientMessage::Message(
+                legacy_resize_message_to_client_message(resize, client_ready),
+            ),
+            Err(_) => ParsedTerminalClientMessage::Unsupported,
+        },
+        b'2' | b'3' => ParsedTerminalClientMessage::Ignore,
+        b'{' => match std::str::from_utf8(data) {
+            Ok(text) => parse_terminal_client_text_message(text, client_ready),
+            Err(_) => ParsedTerminalClientMessage::Unsupported,
+        },
+        _ => match std::str::from_utf8(data) {
+            Ok(text) => parse_terminal_client_text_message(text, client_ready),
+            Err(_) => ParsedTerminalClientMessage::Unsupported,
+        },
+    }
+}
+
 async fn handle_native_terminal_socket(
     state: Arc<AppState>,
     session_id: String,
@@ -210,33 +310,64 @@ async fn handle_native_terminal_socket(
                         if text.len() > MAX_TERMINAL_CLIENT_MESSAGE_BYTES {
                             break;
                         }
-                        if handle_native_terminal_client_message(
-                            &state,
-                            &session_id,
-                            &mut client_socket,
-                            &mut client_ready,
-                            &mut last_sequence_sent,
-                            serde_json::from_str::<TerminalClientMessage>(&text).ok(),
-                        ).await.is_err() {
-                            break;
+                        match parse_terminal_client_text_message(&text, client_ready) {
+                            ParsedTerminalClientMessage::Message(message) => {
+                                if handle_native_terminal_client_message(
+                                    &state,
+                                    &session_id,
+                                    &mut client_socket,
+                                    &mut client_ready,
+                                    &mut last_sequence_sent,
+                                    Some(message),
+                                ).await.is_err() {
+                                    break;
+                                }
+                            }
+                            ParsedTerminalClientMessage::Ignore => {}
+                            ParsedTerminalClientMessage::Unsupported => {
+                                if handle_native_terminal_client_message(
+                                    &state,
+                                    &session_id,
+                                    &mut client_socket,
+                                    &mut client_ready,
+                                    &mut last_sequence_sent,
+                                    None,
+                                ).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         if data.len() > MAX_TERMINAL_CLIENT_MESSAGE_BYTES {
                             break;
                         }
-                        let parsed = std::str::from_utf8(&data)
-                            .ok()
-                            .and_then(|text| serde_json::from_str::<TerminalClientMessage>(text).ok());
-                        if handle_native_terminal_client_message(
-                            &state,
-                            &session_id,
-                            &mut client_socket,
-                            &mut client_ready,
-                            &mut last_sequence_sent,
-                            parsed,
-                        ).await.is_err() {
-                            break;
+                        match parse_terminal_client_binary_message(&data, client_ready) {
+                            ParsedTerminalClientMessage::Message(message) => {
+                                if handle_native_terminal_client_message(
+                                    &state,
+                                    &session_id,
+                                    &mut client_socket,
+                                    &mut client_ready,
+                                    &mut last_sequence_sent,
+                                    Some(message),
+                                ).await.is_err() {
+                                    break;
+                                }
+                            }
+                            ParsedTerminalClientMessage::Ignore => {}
+                            ParsedTerminalClientMessage::Unsupported => {
+                                if handle_native_terminal_client_message(
+                                    &state,
+                                    &session_id,
+                                    &mut client_socket,
+                                    &mut client_ready,
+                                    &mut last_sequence_sent,
+                                    None,
+                                ).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
@@ -727,5 +858,40 @@ mod tests {
         let token = create_scoped_terminal_token("session-123", TerminalTokenScope::Control)
             .expect("token should be created");
         assert!(!verify_terminal_token("session-456", &token).expect("verification should run"));
+    }
+
+    #[test]
+    fn build_terminal_token_payload_keeps_legacy_ttyd_alias() {
+        let payload = build_terminal_token_payload("session-123", true, true, Some("token-123"));
+        assert_eq!(
+            payload.get("wsUrl").and_then(Value::as_str),
+            Some("/api/sessions/session-123/terminal/ws?token=token-123")
+        );
+        assert_eq!(
+            payload.get("ttydWsUrl").and_then(Value::as_str),
+            Some("/api/sessions/session-123/terminal/ws?token=token-123")
+        );
+    }
+
+    #[test]
+    fn legacy_ttyd_resize_maps_to_hello_before_ready() {
+        let parsed = parse_terminal_client_binary_message(b"1{\"columns\":120,\"rows\":40}", false);
+        match parsed {
+            ParsedTerminalClientMessage::Message(TerminalClientMessage::Hello { cols, rows }) => {
+                assert_eq!((cols, rows), (120, 40));
+            }
+            _ => panic!("expected legacy ttyd resize to map to hello"),
+        }
+    }
+
+    #[test]
+    fn legacy_ttyd_input_maps_to_native_input_message() {
+        let parsed = parse_terminal_client_binary_message(b"0ls -la", true);
+        match parsed {
+            ParsedTerminalClientMessage::Message(TerminalClientMessage::Input { data }) => {
+                assert_eq!(data, "ls -la");
+            }
+            _ => panic!("expected legacy ttyd input to map to native input"),
+        }
     }
 }
