@@ -42,6 +42,8 @@ type CliUpdateContext = {
   installMode: CliInstallMode;
 };
 
+type DashboardPackageManager = "bun" | "pnpm";
+
 export function quoteWindowsCliArg(value: string): string {
   let escaped = "";
   let backslashCount = 0;
@@ -115,6 +117,74 @@ function resolveBunGlobalNodeModulesDir(): string {
   return join(bunInstallRoot, "install", "global", "node_modules");
 }
 
+function hasWorkspaceLockfile(packageRoot: string): boolean {
+  const workspaceRoot = join(packageRoot, "..", "..");
+  return existsSync(join(workspaceRoot, "bun.lock"))
+    || existsSync(join(workspaceRoot, "pnpm-lock.yaml"));
+}
+
+export function resolveDashboardPackageManager(startDir: string): DashboardPackageManager {
+  const candidates = [
+    startDir,
+    join(startDir, ".."),
+    join(startDir, "..", ".."),
+  ];
+
+  for (const candidate of candidates) {
+    const packageJsonPath = join(candidate, "package.json");
+    if (!existsSync(packageJsonPath)) {
+      continue;
+    }
+
+    try {
+      const payload = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { packageManager?: string };
+      const declaredPackageManager = payload.packageManager?.trim().toLowerCase() ?? "";
+      if (declaredPackageManager.startsWith("bun@")) {
+        return "bun";
+      }
+      if (declaredPackageManager.startsWith("pnpm@")) {
+        return "pnpm";
+      }
+    } catch {
+      // Ignore invalid package metadata and fall back to lockfile detection.
+    }
+
+    if (existsSync(join(candidate, "bun.lock"))) {
+      return "bun";
+    }
+    if (existsSync(join(candidate, "pnpm-lock.yaml"))) {
+      return "pnpm";
+    }
+  }
+
+  return "bun";
+}
+
+function buildDashboardPackageManagerCommand(
+  packageManager: DashboardPackageManager,
+  script: "dev" | "start",
+  bindHost: string,
+  dashboardPort: number,
+): { cmd: string; args: string[] } {
+  if (packageManager === "pnpm") {
+    return {
+      cmd: "pnpm",
+      args: ["run", script, "--hostname", bindHost, "--port", String(dashboardPort)],
+    };
+  }
+
+  return {
+    cmd: "bun",
+    args: ["run", script, "--", "--hostname", bindHost, "--port", String(dashboardPort)],
+  };
+}
+
+function dashboardBuildHint(packageManager: DashboardPackageManager): string {
+  return packageManager === "pnpm"
+    ? "pnpm --filter @conductor-oss/web build"
+    : "bun run --cwd packages/web build";
+}
+
 function resolveCliUpdateContext(): CliUpdateContext {
   const packageJsonUrl = new URL("../../package.json", import.meta.url);
   const packageRoot = dirname(fileURLToPath(packageJsonUrl));
@@ -137,8 +207,7 @@ function resolveCliUpdateContext(): CliUpdateContext {
   }
 
   const normalizedRoot = normalizeFsPath(packageRoot);
-  const parentWorkspaceLockfile = join(packageRoot, "..", "..", "pnpm-lock.yaml");
-  if (normalizedRoot.endsWith("/packages/cli") && existsSync(parentWorkspaceLockfile)) {
+  if (normalizedRoot.endsWith("/packages/cli") && hasWorkspaceLockfile(packageRoot)) {
     return { packageName, version, installMode: "source" };
   }
 
@@ -1025,8 +1094,11 @@ export function registerStart(program: Command): void {
               }
             }
 
+            const packageManager = resolveDashboardPackageManager(webDir ?? dirname(configPath));
+            const buildHint = dashboardBuildHint(packageManager);
+
             if (!webDir) {
-              dashSpinner.warn("Dashboard not found. Run: pnpm --filter @conductor-oss/web build");
+              dashSpinner.warn(`Dashboard not found. Run: ${buildHint}`);
               return;
             }
 
@@ -1068,11 +1140,9 @@ export function registerStart(program: Command): void {
             let dashboardCwd = webDir;
 
             if (preferDevServer) {
-              cmd = "pnpm";
-              args = ["run", "dev", "--hostname", bindHost, "--port", String(dashboardPort)];
+              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "dev", bindHost, dashboardPort));
             } else if (webMode === "production" && hasNextBuild) {
-              cmd = "pnpm";
-              args = ["run", "start", "--hostname", bindHost, "--port", String(dashboardPort)];
+              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "start", bindHost, dashboardPort));
             } else if (standaloneServer) {
               const standaloneAppDir = dirname(standaloneServer);
               const standaloneStaticDir = join(standaloneAppDir, ".next", "static");
@@ -1090,11 +1160,9 @@ export function registerStart(program: Command): void {
               args = [standaloneServer];
               dashboardCwd = standaloneDir;
             } else if (hasNextBuild) {
-              cmd = "pnpm";
-              args = ["run", "start", "--hostname", bindHost, "--port", String(dashboardPort)];
+              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "start", bindHost, dashboardPort));
             } else {
-              cmd = "pnpm";
-              args = ["run", "dev", "--hostname", bindHost, "--port", String(dashboardPort)];
+              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "dev", bindHost, dashboardPort));
             }
 
             dashboardProcess = spawn(cmd, args, {
@@ -1146,7 +1214,7 @@ export function registerStart(program: Command): void {
             });
 
             dashboardProcess.on("error", () => {
-              dashSpinner.warn("Dashboard failed to start. Try: cd packages/web && pnpm build");
+              dashSpinner.warn(`Dashboard failed to start. Try: ${buildHint}`);
             });
 
             const dashboardInternalUrl = `http://127.0.0.1:${dashboardPort}`;
