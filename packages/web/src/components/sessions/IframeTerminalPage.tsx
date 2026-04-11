@@ -43,6 +43,8 @@ const CMD_OUTPUT = "0".charCodeAt(0);
 const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);
 const CMD_SET_PREFERENCES = "2".charCodeAt(0);
 const CMD_RESIZE = "1".charCodeAt(0);
+const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
+const TTYD_READY_MESSAGE_TYPE = "conductor-ttyd-ready";
 
 const TERMINAL_THEME = {
   background: "#060404",
@@ -69,7 +71,7 @@ const TERMINAL_THEME = {
 } as const;
 
 const IFRAME_TERMINAL_PAGE_CLASSNAME =
-  "flex h-[100dvh] min-h-[100dvh] w-full min-w-0 flex-col overflow-hidden bg-[#060404] text-[#efe8e1]";
+  "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[#060404] text-[#efe8e1]";
 const IFRAME_TERMINAL_HOST_CLASSNAME =
   "h-full w-full overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]";
 
@@ -182,6 +184,17 @@ export function IframeTerminalPage({
     fitAddon.fit();
     return { cols: terminal.cols, rows: terminal.rows };
   }, [applyKeyboardAwareTerminalHeight, applyTerminalViewport]);
+
+  const postParentReady = useCallback(() => {
+    if (typeof window === "undefined" || window.parent === window) {
+      return;
+    }
+    try {
+      window.parent.postMessage({ type: TTYD_READY_MESSAGE_TYPE }, window.location.origin);
+    } catch {
+      // Ignore parent message failures.
+    }
+  }, []);
 
   const loadStoredOutput = useCallback(async (outputUrl?: string | null): Promise<boolean> => {
     if (!outputUrl) {
@@ -522,14 +535,27 @@ export function IframeTerminalPage({
         applyGeometry();
       }
     };
+    const handleParentMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent || event.origin !== window.location.origin) {
+        return;
+      }
+      if ((event.data as { type?: string } | null)?.type !== TERMINAL_RESIZE_MESSAGE_TYPE) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        applyGeometry();
+      });
+    };
 
     window.addEventListener("resize", applyGeometry);
     visualViewport?.addEventListener("resize", applyGeometry);
     visualViewport?.addEventListener("scroll", applyGeometry);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("message", handleParentMessage);
 
     window.requestAnimationFrame(() => {
       applyGeometry();
+      postParentReady();
       connectInvokerRef.current?.();
     });
 
@@ -541,6 +567,7 @@ export function IframeTerminalPage({
       visualViewport?.removeEventListener("resize", applyGeometry);
       visualViewport?.removeEventListener("scroll", applyGeometry);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("message", handleParentMessage);
       cleanupTouchRef.current?.();
       cleanupTouchRef.current = null;
       clearReconnectTimer();
@@ -555,6 +582,7 @@ export function IframeTerminalPage({
     closeSocket,
     connect,
     encodeInputFrame,
+    postParentReady,
     usesRelayTerminal,
   ]);
 
