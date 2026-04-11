@@ -2156,7 +2156,9 @@ impl RelayState {
         };
 
         if let Some(response) = claim.paired_response.clone() {
-            inner.device_claims.remove(&claim_key);
+            if let Some(stored_claim) = inner.device_claims.get_mut(&claim_key) {
+                stored_claim.poll_token.clear();
+            }
             return Ok(DeviceClaimPollResponse {
                 status: "paired".to_string(),
                 expires_in: response.expires_in,
@@ -2862,6 +2864,18 @@ mod tests {
         assert_eq!(paired.device_id.as_deref(), Some("device-123"));
         assert_eq!(paired.device_name.as_deref(), Some("My Laptop"));
         assert!(paired.refresh_token.is_some());
+
+        let already_paired = state
+            .complete_device_claim(
+                "user@example.com",
+                DeviceClaimCompleteRequest {
+                    claim_token: created.claim_token.clone(),
+                },
+            )
+            .await
+            .expect("claim should stay resumable for the browser after polling");
+        assert!(already_paired.already_paired);
+        assert_eq!(already_paired.device_id, "device-123");
 
         let missing = state.poll_device_claim(&created.poll_token).await;
         assert!(matches!(missing, Err((StatusCode::NOT_FOUND, _))));
