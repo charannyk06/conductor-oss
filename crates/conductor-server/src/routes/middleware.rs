@@ -182,11 +182,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     }
 
     if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ws") {
-        return Some(if *method == Method::GET {
-            AccessRole::Viewer
-        } else {
-            AccessRole::Operator
-        });
+        return Some(AccessRole::Operator);
     }
 
     if path.starts_with("/api/access") {
@@ -317,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ws"),
-            Some(AccessRole::Viewer)
+            Some(AccessRole::Operator)
         );
     }
 

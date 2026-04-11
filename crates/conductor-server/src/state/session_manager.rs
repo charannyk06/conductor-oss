@@ -2708,23 +2708,25 @@ mod tests {
         async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
             let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
             let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+            let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(8);
+            let (resize_tx, mut resize_rx) =
+                mpsc::channel::<conductor_executors::process::PtyDimensions>(8);
             // Drain input in background. Hold output_tx open briefly so
             // tests that use the native runtime path have time to
             // call send_to_session before the output consumer marks the
             // session as completed.
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                drop(terminal_tx);
                 drop(output_tx);
+                while resize_rx.recv().await.is_some() {}
                 while input_rx.recv().await.is_some() {}
             });
             let (kill_tx, _kill_rx) = oneshot::channel();
-            Ok(ExecutorHandle::new(
-                1,
-                self.kind.clone(),
-                output_rx,
-                input_tx,
-                kill_tx,
-            ))
+            Ok(
+                ExecutorHandle::new(1, self.kind.clone(), output_rx, input_tx, kill_tx)
+                    .with_terminal_io(Some(terminal_rx), Some(resize_tx)),
+            )
         }
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
@@ -2733,6 +2735,10 @@ mod tests {
 
         fn parse_output(&self, line: &str) -> ExecutorOutput {
             ExecutorOutput::Stdout(line.to_string())
+        }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
         }
     }
 
@@ -2771,6 +2777,10 @@ mod tests {
         fn parse_output(&self, line: &str) -> ExecutorOutput {
             ExecutorOutput::Stdout(format!("parsed::{line}"))
         }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
+        }
     }
 
     struct ResumeExecutor;
@@ -2807,7 +2817,8 @@ mod tests {
                 handle.output_rx,
                 handle.input_tx,
                 handle.kill_tx,
-            ))
+            )
+            .with_terminal_io(handle.terminal_rx, handle.resize_tx))
         }
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
@@ -2820,6 +2831,10 @@ mod tests {
 
         fn parse_output(&self, line: &str) -> ExecutorOutput {
             ExecutorOutput::Stdout(line.to_string())
+        }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
         }
     }
 
@@ -2884,10 +2899,7 @@ mod tests {
     ) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime =
-                Some(runtime_override.map(str::to_string).unwrap_or_else(|| {
-                    crate::state::detached::types::TTYD_RUNTIME_MODE.to_string()
-                }));
+            project.runtime = runtime_override.map(str::to_string);
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),

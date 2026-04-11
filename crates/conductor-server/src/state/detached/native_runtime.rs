@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use conductor_executors::executor::{Executor, SpawnOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,11 +14,17 @@ pub(crate) async fn spawn_native_runtime(
     _session_id: &str,
     mut options: SpawnOptions,
 ) -> Result<RuntimeLaunch> {
-    options.interactive = executor.supports_direct_terminal_ui();
+    if !executor.supports_direct_terminal_ui() {
+        bail!("executor does not support native PTY sessions");
+    }
+    options.interactive = true;
     options.structured_output = false;
 
     let handle = executor.spawn(options).await?;
     let streams_terminal_bytes = handle.terminal_rx.is_some();
+    if !streams_terminal_bytes {
+        bail!("executor started native runtime without a terminal byte stream");
+    }
 
     let mut metadata = HashMap::new();
     metadata.insert(

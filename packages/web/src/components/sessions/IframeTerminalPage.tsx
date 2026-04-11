@@ -8,8 +8,8 @@ import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
 
 type ConnectionInfo = {
-  interactive: boolean;
-  reason: string | null;
+  interactive?: boolean;
+  reason?: string | null;
   wsUrl?: string | null;
   outputUrl?: string | null;
 };
@@ -74,6 +74,7 @@ export function IframeTerminalPage({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const allowReconnectRef = useRef(true);
   const reconnectTimerRef = useRef<number | null>(null);
   const cleanupTouchRef = useRef<(() => void) | null>(null);
   const retryAttemptRef = useRef(0);
@@ -97,6 +98,7 @@ export function IframeTerminalPage({
   const closeSocket = useCallback(() => {
     const socket = socketRef.current;
     socketRef.current = null;
+    allowReconnectRef.current = false;
     if (!socket) {
       return;
     }
@@ -141,17 +143,23 @@ export function IframeTerminalPage({
   }, []);
 
   const connect = useCallback(async () => {
+    if (!allowReconnectRef.current) {
+      return;
+    }
     setLoading(true);
     setError(null);
     setStatus(retryAttemptRef.current > 0 ? "Reconnecting terminal…" : "Connecting terminal…");
 
     const response = await fetch(tokenUrl, { cache: "no-store" });
+    if (!allowReconnectRef.current) {
+      return;
+    }
     const info = (await response.json().catch(() => null)) as ConnectionInfo | null;
     if (!response.ok) {
       throw new Error((info as { error?: string } | null)?.error ?? `Failed to resolve terminal (${response.status})`);
     }
 
-    if (!info?.interactive || !info.wsUrl) {
+    if (!info?.wsUrl) {
       await loadStoredOutput(info?.outputUrl, info?.reason ?? "Session is not running.");
       return;
     }
@@ -209,6 +217,12 @@ export function IframeTerminalPage({
     };
 
     ws.onclose = async () => {
+      if (socketRef.current === ws) {
+        socketRef.current = null;
+      }
+      if (!allowReconnectRef.current) {
+        return;
+      }
       if (retryAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
         setLoading(false);
         setStatus("Terminal disconnected.");
@@ -251,6 +265,7 @@ export function IframeTerminalPage({
 
     terminal.open(host);
     fitAddon.fit();
+    allowReconnectRef.current = true;
     cleanupTouchRef.current = attachMobileTouchScrollShim(terminal, host);
 
     terminal.onData((data) => {
@@ -281,6 +296,7 @@ export function IframeTerminalPage({
     });
 
     return () => {
+      allowReconnectRef.current = false;
       resizeObserver.disconnect();
       cleanupTouchRef.current?.();
       cleanupTouchRef.current = null;

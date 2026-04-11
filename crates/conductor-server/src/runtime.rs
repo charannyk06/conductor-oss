@@ -447,14 +447,15 @@ mod tests {
             let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
             drop(output_tx);
             let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(8);
+            let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(8);
+            drop(terminal_tx);
+            let (resize_tx, _resize_rx) =
+                mpsc::channel::<conductor_executors::process::PtyDimensions>(8);
             let (kill_tx, _kill_rx) = oneshot::channel();
-            Ok(ExecutorHandle::new(
-                1,
-                self.kind(),
-                output_rx,
-                input_tx,
-                kill_tx,
-            ))
+            Ok(
+                ExecutorHandle::new(1, self.kind(), output_rx, input_tx, kill_tx)
+                    .with_terminal_io(Some(terminal_rx), Some(resize_tx)),
+            )
         }
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
@@ -463,6 +464,10 @@ mod tests {
 
         fn parse_output(&self, line: &str) -> ExecutorOutput {
             ExecutorOutput::Stdout(line.to_string())
+        }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
         }
     }
 

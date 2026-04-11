@@ -44,4 +44,11 @@ async fn spawn_session_runs_from_queue_to_live_native_state() {
         session.metadata.get("runtimeMode").map(String::as_str),
         Some("direct")
     );
+    assert_eq!(
+        session
+            .metadata
+            .get("terminalTransport")
+            .map(String::as_str),
+        Some("native-pty")
+    );
 }

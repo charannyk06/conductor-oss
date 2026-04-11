@@ -12,7 +12,8 @@ use crate::state::AppState;
 pub(crate) use types::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use types::DETACHED_PID_METADATA_KEY;
 pub(crate) use types::{
-    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_PORT_METADATA_KEY,
+    TTYD_WS_URL_METADATA_KEY,
 };
 
 pub(crate) struct RuntimeLaunch {
@@ -63,6 +64,10 @@ impl AppState {
                         .metadata
                         .insert("archivedAt".to_string(), now.clone());
                     session.pid = None;
+                    session.metadata.remove(DETACHED_PID_METADATA_KEY);
+                    session.metadata.remove(TTYD_PID_METADATA_KEY);
+                    session.metadata.remove(TTYD_WS_URL_METADATA_KEY);
+                    session.metadata.remove(TTYD_PORT_METADATA_KEY);
                     Some(session.clone())
                 } else {
                     None

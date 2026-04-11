@@ -80,7 +80,8 @@ impl Executor for TestExecutor {
             handle.output_rx,
             handle.input_tx,
             handle.kill_tx,
-        ))
+        )
+        .with_terminal_io(handle.terminal_rx, handle.resize_tx))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
@@ -136,7 +137,8 @@ impl Executor for ResumeExecutor {
             handle.output_rx,
             handle.input_tx,
             handle.kill_tx,
-        ))
+        )
+        .with_terminal_io(handle.terminal_rx, handle.resize_tx))
     }
 
     fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
