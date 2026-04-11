@@ -81,7 +81,7 @@ async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
                 "name": project.name.clone().unwrap_or_else(|| id.to_string()),
                 "repo": project.repo.clone(),
                 "workspace": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),
-                "runtime": project.runtime.clone().unwrap_or_else(|| "ttyd".to_string()),
+                "runtime": project.runtime.clone().unwrap_or_else(|| "direct".to_string()),
                 "path": resolve_path(&state.workspace_path, &project.path).to_string_lossy().to_string(),
                 "defaultBranch": project.default_branch.clone(),
                 "agent": project.agent.clone().unwrap_or_else(|| config.preferences.coding_agent.clone()),

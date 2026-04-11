@@ -7,25 +7,24 @@ import {
   shouldUseRemoteSessionTerminal,
 } from "./sessionTerminalRouting";
 
-test("dashboard terminal contract is ttyd iframe (embeds e.g. Polyscope rely on this)", () => {
-  assert.equal(SESSION_TERMINAL_IMPLEMENTATION, "ttyd-iframe");
+test("dashboard terminal contract is the native iframe terminal", () => {
+  assert.equal(SESSION_TERMINAL_IMPLEMENTATION, "native-iframe");
 });
 
 test("loadSessionTerminalComponent resolves to a component", async () => {
   const SessionTerminal = await loadSessionTerminalComponent();
-  // `memo()` wraps a function component; host may report typeof as "object".
   assert.ok(
     typeof SessionTerminal === "function"
     || (typeof SessionTerminal === "object" && SessionTerminal !== null),
   );
 });
 
-test("bridge-scoped sessions keep using the ttyd terminal surface", () => {
+test("bridge-scoped sessions keep the iframe-hosted terminal surface", () => {
   assert.equal(shouldUseRemoteSessionTerminal("bridge-mac"), false);
   assert.equal(shouldUseRemoteSessionTerminal("  bridge-mac  "), false);
 });
 
-test("local sessions also keep the direct ttyd iframe path", () => {
+test("local sessions also keep the iframe-hosted terminal surface", () => {
   assert.equal(shouldUseRemoteSessionTerminal(undefined), false);
   assert.equal(shouldUseRemoteSessionTerminal(null), false);
   assert.equal(shouldUseRemoteSessionTerminal(""), false);

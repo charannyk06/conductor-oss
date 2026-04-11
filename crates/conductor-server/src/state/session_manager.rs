@@ -1963,6 +1963,7 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn mark_session_runtime_restored(&self, session_id: &str) -> Result<()> {
         let mut updated = None;
         {
@@ -2883,11 +2884,10 @@ mod tests {
     ) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(
-                runtime_override
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::state::detached::TTYD_RUNTIME_MODE.to_string()),
-            );
+            project.runtime =
+                Some(runtime_override.map(str::to_string).unwrap_or_else(|| {
+                    crate::state::detached::types::TTYD_RUNTIME_MODE.to_string()
+                }));
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -2943,7 +2943,7 @@ mod tests {
         );
         session.metadata.insert(
             "runtimeMode".to_string(),
-            crate::state::detached::TTYD_RUNTIME_MODE.to_string(),
+            crate::state::detached::types::TTYD_RUNTIME_MODE.to_string(),
         );
         session
             .metadata
@@ -3332,7 +3332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
+    async fn native_runtime_keeps_terminal_alive_after_agent_command_exits() {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
@@ -3381,15 +3381,15 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(700)).await;
 
-        let ttyd_pid = session
-            .metadata
-            .get(crate::state::detached::types::TTYD_PID_METADATA_KEY)
-            .and_then(|value| value.parse::<u32>().ok())
-            .expect("spawned session should record ttyd pid");
+        let live_pid = state
+            .get_session(&session.id)
+            .await
+            .and_then(|current| current.pid)
+            .expect("spawned session should record a live runtime pid");
 
         assert!(
-            is_process_alive(ttyd_pid),
-            "ttyd should stay alive even after the initial agent command exits"
+            is_process_alive(live_pid),
+            "native runtime should stay alive even after the initial agent command exits"
         );
 
         state.archive_session(&session.id).await.unwrap();
@@ -3811,10 +3811,7 @@ mod tests {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
                 if current.metadata.get("runtimeMode").map(String::as_str)
-                    == Some(crate::state::detached::TTYD_RUNTIME_MODE)
-                    && current
-                        .metadata
-                        .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY)
+                    == Some(crate::state::detached::types::DIRECT_RUNTIME_MODE)
                     && current.pid.is_some()
                 {
                     return current;
@@ -3823,15 +3820,12 @@ mod tests {
             }
         })
         .await
-        .expect("resume should relaunch the session on the ttyd runtime");
+        .expect("resume should relaunch the session on the native runtime");
 
         assert_eq!(
             updated.metadata.get("runtimeMode").map(String::as_str),
-            Some(crate::state::detached::TTYD_RUNTIME_MODE)
+            Some(crate::state::detached::types::DIRECT_RUNTIME_MODE)
         );
-        assert!(updated
-            .metadata
-            .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY));
         let _ = fs::remove_dir_all(&root);
     }
 

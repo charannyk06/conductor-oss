@@ -144,10 +144,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 }
 
 #[tokio::test]
-async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux() {
-    if !ttyd_available() {
-        return;
-    }
+async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tmux() {
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;
     harness
         .state
@@ -157,7 +154,7 @@ async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux
         .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
 
     let session = SessionRecord::new(
-        "resume-ttyd-session".to_string(),
+        "resume-native-session".to_string(),
         "demo".to_string(),
         None,
         None,
@@ -178,7 +175,7 @@ async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux
     harness
         .state
         .resume_session_with_prompt(
-            "resume-ttyd-session",
+            "resume-native-session",
             "Continue after reconnect".to_string(),
             Vec::new(),
             None,
@@ -188,14 +185,14 @@ async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux
         .await
         .unwrap();
 
-    let updated = wait_for_condition("resumed ttyd session", || {
+    let updated = wait_for_condition("resumed native session", || {
         let state = harness.state.clone();
         async move {
             state
-                .get_session("resume-ttyd-session")
+                .get_session("resume-native-session")
                 .await
                 .and_then(|session| {
-                    (session.metadata.get("runtimeMode").map(String::as_str) == Some("ttyd")
+                    (session.metadata.get("runtimeMode").map(String::as_str) == Some("direct")
                         && session.pid.is_some())
                     .then_some(session)
                 })
@@ -205,12 +202,12 @@ async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux
 
     assert_eq!(
         updated.metadata.get("runtimeMode").map(String::as_str),
-        Some("ttyd")
+        Some("direct")
     );
 
     harness
         .state
-        .kill_session("resume-ttyd-session")
+        .kill_session("resume-native-session")
         .await
         .unwrap();
 }
