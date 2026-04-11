@@ -217,6 +217,30 @@ test("resolveTerminalConnection keeps the embedded iframe on the proxied ttyd pa
   );
 });
 
+test("resolveTerminalConnection keeps direct terminal links on the proxy origin when auth is cookie-scoped", async () => {
+  setWindowLocation("https://dashboard.example.com/sessions/session-cookie");
+  setBackendOriginMeta("https://api.example.com/internal");
+  setFetchResponse({
+    required: true,
+    ttydHttpUrl: "/api/sessions/session-cookie/terminal/ttyd",
+    ttydWsUrl: "/api/sessions/session-cookie/terminal/ttyd/ws",
+    tunnelUrl: "https://violet-waterfall.trycloudflare.com",
+    expiresInSeconds: 3600,
+  });
+
+  const connection = await resolveTerminalConnection("session-cookie");
+
+  assert.equal(connection.interactive, true);
+  assert.equal(
+    connection.terminalUrl,
+    "https://dashboard.example.com/api/sessions/session-cookie/terminal/ttyd",
+  );
+  assert.equal(
+    connection.terminalLinkUrl,
+    "https://dashboard.example.com/api/sessions/session-cookie/terminal/ttyd",
+  );
+});
+
 test("resolveTerminalConnection keeps bridge iframe urls stable and exposes relay websocket refresh metadata", async () => {
   setWindowLocation("https://app.conductross.com/sessions/bridge-session");
   setBackendOriginMeta("https://api.conductross.com");

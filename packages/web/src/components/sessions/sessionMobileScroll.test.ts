@@ -13,6 +13,13 @@ test("non-immersive session detail keeps tab panes as the only mobile scroll con
   assert.doesNotMatch(className, /overflow-y-auto/);
 });
 
+test("immersive session detail keeps overflow clipped while applying the terminal backdrop", () => {
+  const className = getSessionDetailRootClassName(true);
+
+  assert.match(className, /overflow-hidden/);
+  assert.match(className, /bg-\[#060404\]/);
+});
+
 test("mobile momentum scroll helper opts into touch-friendly vertical scrolling", () => {
   assert.match(MOBILE_MOMENTUM_SCROLL_CLASS_NAME, /overscroll-contain/);
   assert.match(MOBILE_MOMENTUM_SCROLL_CLASS_NAME, /touch-pan-y/);

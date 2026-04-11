@@ -31,10 +31,28 @@ async function readTtydHtmlResponse(proxied: Response): Promise<string | null> {
     throw new Error("ttyd frontend response is too large");
   }
 
-  const html = await proxied.text();
-  if (html.length > MAX_TTYD_HTML_RESPONSE_BYTES) {
-    throw new Error("ttyd frontend response is too large");
+  const reader = proxied.body?.getReader();
+  if (!reader) {
+    return null;
   }
+
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let html = "";
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    totalBytes += value.byteLength;
+    if (totalBytes > MAX_TTYD_HTML_RESPONSE_BYTES) {
+      throw new Error("ttyd frontend response is too large");
+    }
+    html += decoder.decode(value, { stream: true });
+  }
+
+  html += decoder.decode();
   return html;
 }
 

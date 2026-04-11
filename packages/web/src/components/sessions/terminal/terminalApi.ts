@@ -279,9 +279,10 @@ function buildDirectTerminalLinkUrl(
   try {
     const directUrl = new URL(auth.tunnelUrl);
     const token = extractResolvedTerminalToken(embeddedTerminalUrl);
-    if (token) {
-      directUrl.searchParams.set("token", token);
+    if (!token) {
+      return embeddedTerminalUrl;
     }
+    directUrl.searchParams.set("token", token);
     return directUrl.toString();
   } catch {
     return embeddedTerminalUrl;

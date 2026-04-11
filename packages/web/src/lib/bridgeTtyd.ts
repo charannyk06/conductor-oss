@@ -35,24 +35,32 @@ export function resolveBridgeSessionTarget(
   return { bridgeId, sessionId };
 }
 
+function buildBridgeTtydProxyPath(
+  routeSessionId: string,
+  bridgeId: string,
+  relayTtydWsUrl?: string,
+): string {
+  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
+  url.searchParams.set("bridgeId", bridgeId);
+  if (relayTtydWsUrl) {
+    url.searchParams.set(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM, relayTtydWsUrl);
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 export function buildBridgeTtydProxyUrl(
   routeSessionId: string,
   bridgeId: string,
   relayTtydWsUrl: string,
 ): string {
-  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
-  url.searchParams.set("bridgeId", bridgeId);
-  url.searchParams.set(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM, relayTtydWsUrl);
-  return `${url.pathname}${url.search}`;
+  return buildBridgeTtydProxyPath(routeSessionId, bridgeId, relayTtydWsUrl);
 }
 
 export function buildStableBridgeTtydProxyUrl(
   routeSessionId: string,
   bridgeId: string,
 ): string {
-  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
-  url.searchParams.set("bridgeId", bridgeId);
-  return `${url.pathname}${url.search}`;
+  return buildBridgeTtydProxyPath(routeSessionId, bridgeId);
 }
 
 const PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP = [
@@ -71,6 +79,9 @@ export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): R
   if (!headers.has("content-type")) {
     headers.set("content-type", "text/html; charset=utf-8");
   }
+  headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
+  headers.set("pragma", "no-cache");
+  headers.set("expires", "0");
 
   const body = new TextEncoder().encode(html);
   return new Response(body, {
@@ -538,8 +549,10 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   patchedWebSocket.prototype = previousWebSocket.prototype;
   window.WebSocket = patchedWebSocket;
 
+  const trustedParentOrigin = window.location.origin;
+
   function handleMessage(event) {
-    if (event.source !== window.parent) {
+    if (event.source !== window.parent || event.origin !== trustedParentOrigin) {
       return;
     }
     const data = event.data;

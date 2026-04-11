@@ -60,6 +60,8 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
   assert.match(injected, /READY_MESSAGE_TYPE = 'conductor-ttyd-ready'/);
   assert.match(injected, /RELAY_UPDATE_MESSAGE_TYPE = 'conductor-ttyd-relay-url'/);
   assert.match(injected, /window\.parent\.postMessage\(\{ type: READY_MESSAGE_TYPE \}, '\*'\)/);
+  assert.match(injected, /const trustedParentOrigin = window\.location\.origin/);
+  assert.match(injected, /event\.origin !== trustedParentOrigin/);
   assert.match(injected, /currentRelayTtydWsUrl = nextRelayUrl/);
   assert.ok(
     injected.indexOf("conductor-bridge-ttyd-relay-shim") < injected.indexOf("<script src=\"/refresh.js\">"),
@@ -97,6 +99,11 @@ test("buildPatchedTtydHtmlResponse drops stale body headers after html injection
   assert.equal(patched.headers.get("content-length"), null);
   assert.equal(patched.headers.get("content-encoding"), null);
   assert.equal(patched.headers.get("etag"), null);
-  assert.equal(patched.headers.get("cache-control"), "no-store");
+  assert.equal(
+    patched.headers.get("cache-control"),
+    "no-store, no-cache, must-revalidate, max-age=0",
+  );
+  assert.equal(patched.headers.get("pragma"), "no-cache");
+  assert.equal(patched.headers.get("expires"), "0");
   assert.equal(await patched.text(), "<html><body>new</body></html>");
 });
