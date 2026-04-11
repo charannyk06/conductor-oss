@@ -33,7 +33,11 @@ import { ScrollArea } from "@/components/ui/ScrollArea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { cn } from "@/lib/cn";
 import { selectPreviewAutoConnectCandidate } from "@/lib/previewAutoConnect";
-import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
+import {
+  MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
+  SESSION_PREVIEW_SCROLL_SHELL_CLASS_NAME,
+  SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME,
+} from "./sessionMobileScroll";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,
@@ -1291,7 +1295,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               ) : null}
             </div>
 
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName={SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME}>
               <div className="space-y-1 p-3">
                 {domLoading ? (
                   <div className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
@@ -1377,7 +1381,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 Queue for terminal
               </Button>
             </div>
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName={SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME}>
               <div className="space-y-1 p-3">
                 {status?.consoleLogs.length ? status.consoleLogs.map((entry) => (
                   <div
@@ -1418,7 +1422,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 Queue for terminal
               </Button>
             </div>
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName={SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME}>
               <div className="space-y-1 p-3">
                 {status?.networkLogs.length ? status.networkLogs.map((entry) => (
                   <div
@@ -1461,7 +1465,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 Copy URL
               </Button>
             </div>
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName={SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME}>
               <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
                 <div className="grid gap-2 sm:grid-cols-2">
                   <PreviewStatCard
@@ -1515,7 +1519,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 Copy route
               </Button>
             </div>
-            <ScrollArea className="min-h-0 flex-1">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName={SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME}>
               <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
                 <div className="grid gap-2 sm:grid-cols-2">
                   <PreviewStatCard
@@ -1846,7 +1850,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             ) : null}
           </div>
 
-          <div className={`min-h-0 flex-1 overflow-auto bg-[#0f1012] p-3 ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
+          <div className={SESSION_PREVIEW_SCROLL_SHELL_CLASS_NAME}>
             <div className="flex h-full min-h-[min(200px,45vh)] w-full items-center justify-center lg:min-h-[260px]">
               {loading ? (
                 <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">

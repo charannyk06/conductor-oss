@@ -107,3 +107,19 @@ test("buildPatchedTtydHtmlResponse drops stale body headers after html injection
   assert.equal(patched.headers.get("expires"), "0");
   assert.equal(await patched.text(), "<html><body>new</body></html>");
 });
+
+test("buildPatchedTtydHtmlResponse forces html rendering headers for patched ttyd pages", async () => {
+  const proxied = new Response("<html><body>old</body></html>", {
+    status: 200,
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-disposition": 'attachment; filename="ttyd"',
+    },
+  });
+
+  const patched = buildPatchedTtydHtmlResponse(proxied, "<html><body>new</body></html>");
+
+  assert.equal(patched.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.equal(patched.headers.get("content-disposition"), null);
+  assert.equal(await patched.text(), "<html><body>new</body></html>");
+});

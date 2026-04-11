@@ -66,6 +66,7 @@ export function buildStableBridgeTtydProxyUrl(
 const PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP = [
   "content-length",
   "content-encoding",
+  "content-disposition",
   "etag",
   "last-modified",
   "transfer-encoding",
@@ -76,9 +77,7 @@ export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): R
   for (const headerName of PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP) {
     headers.delete(headerName);
   }
-  if (!headers.has("content-type")) {
-    headers.set("content-type", "text/html; charset=utf-8");
-  }
+  headers.set("content-type", "text/html; charset=utf-8");
   headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
   headers.set("pragma", "no-cache");
   headers.set("expires", "0");
