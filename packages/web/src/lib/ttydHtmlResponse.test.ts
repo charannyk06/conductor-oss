@@ -4,10 +4,11 @@ import test from "node:test";
 import { readTtydHtmlResponse } from "./ttydHtmlResponse";
 
 test("readTtydHtmlResponse returns null when the proxied HTML stream errors", async () => {
+  let failRead: (error: Error) => void = () => {};
   const proxied = new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.error(new Error("bridge stream failed"));
+        failRead = (error) => controller.error(error);
       },
     }),
     {
@@ -17,7 +18,10 @@ test("readTtydHtmlResponse returns null when the proxied HTML stream errors", as
     },
   );
 
-  const html = await readTtydHtmlResponse(proxied);
+  const readPromise = readTtydHtmlResponse(proxied);
+  failRead(new Error("bridge stream failed"));
+
+  const html = await readPromise;
   assert.equal(html, null);
 });
 

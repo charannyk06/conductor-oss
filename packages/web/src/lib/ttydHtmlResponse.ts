@@ -2,18 +2,19 @@ const MAX_TTYD_HTML_RESPONSE_BYTES = 512 * 1024;
 const TTYD_HTML_TOO_LARGE_ERROR = "ttyd frontend response is too large";
 
 export async function readTtydHtmlResponse(proxied: Response): Promise<string | null> {
-  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
+  const candidate = proxied.clone();
+  const contentType = candidate.headers.get("content-type")?.toLowerCase() ?? "";
   if (!contentType.startsWith("text/html")) {
     return null;
   }
 
-  const contentLength = Number.parseInt(proxied.headers.get("content-length") ?? "", 10);
+  const contentLength = Number.parseInt(candidate.headers.get("content-length") ?? "", 10);
   if (Number.isFinite(contentLength) && contentLength > MAX_TTYD_HTML_RESPONSE_BYTES) {
     throw new Error(TTYD_HTML_TOO_LARGE_ERROR);
   }
 
   try {
-    const reader = proxied.body?.getReader();
+    const reader = candidate.body?.getReader();
     if (!reader) {
       return null;
     }
