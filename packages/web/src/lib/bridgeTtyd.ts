@@ -72,7 +72,8 @@ export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): R
     headers.set("content-type", "text/html; charset=utf-8");
   }
 
-  return new Response(html, {
+  const body = new TextEncoder().encode(html);
+  return new Response(body, {
     status: proxied.status,
     statusText: proxied.statusText,
     headers,
