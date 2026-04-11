@@ -39,7 +39,7 @@ import type {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
+import { APP_SURFACE_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
 
 type SessionSkillsProps = {
   session: DashboardSession;
@@ -355,7 +355,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-      <div className={`min-h-0 min-w-0 flex-1 overflow-y-auto pb-4 lg:overflow-hidden lg:pb-0 ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
+      <div className={`min-h-0 min-w-0 flex-1 pb-4 lg:pb-0 ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
         <div className="flex min-h-full min-w-0 flex-col gap-3">
           <Card className="min-w-0">
             <CardHeader className="flex flex-col items-stretch gap-3">

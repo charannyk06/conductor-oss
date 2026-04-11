@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  APP_SURFACE_SCROLL_CLASS_NAME,
   MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
   SESSION_PREVIEW_SCROLL_SHELL_CLASS_NAME,
   SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME,
@@ -26,6 +27,12 @@ test("mobile momentum scroll helper opts into touch-friendly vertical scrolling"
   assert.match(MOBILE_MOMENTUM_SCROLL_CLASS_NAME, /overscroll-contain/);
   assert.match(MOBILE_MOMENTUM_SCROLL_CLASS_NAME, /touch-pan-y/);
   assert.match(MOBILE_MOMENTUM_SCROLL_CLASS_NAME, /-webkit-overflow-scrolling:touch/);
+});
+
+test("app surface scroll helper keeps scrolling enabled across desktop and mobile", () => {
+  assert.match(APP_SURFACE_SCROLL_CLASS_NAME, /overflow-y-auto/);
+  assert.match(APP_SURFACE_SCROLL_CLASS_NAME, /overscroll-contain/);
+  assert.doesNotMatch(APP_SURFACE_SCROLL_CLASS_NAME, /lg:overflow-hidden/);
 });
 
 test("preview shell stays passive so the screenshot surface keeps mobile scroll ownership", () => {
