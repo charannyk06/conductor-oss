@@ -27,6 +27,12 @@ const defaultDashboardURL = "https://conductross.com"
 
 var errInvalidSavedPairing = errors.New("saved device pairing is invalid")
 
+var restartBridgeService = install.RestartServiceIfInstalled
+var installBridgeService = func() error {
+	return install.Install("")
+}
+var runBridgeDaemon = daemon.Run
+
 type savedPairingSource string
 
 const (
@@ -169,17 +175,7 @@ func Run(ctx context.Context, opts Options) error {
 			announceSavedPairingReuse(stdout, candidate, dashboardURL, savedDashboardURL)
 			announceBrowser(openTarget, opts.OpenBrowser, stdout, stderr)
 			if opts.StartupDaemon {
-				if err := install.RestartServiceIfInstalled(); err == nil {
-					fmt.Fprintln(stdout, "Bridge background service restarted.")
-					return nil
-				} else {
-					fmt.Fprintf(stderr, "bridge service restart unavailable, continuing in the current terminal: %v\n", err)
-				}
-				return daemon.Run(ctx, daemon.Options{
-					RelayURL: opts.RelayURL,
-					Store:    store,
-					Stderr:   stderr,
-				})
+				return ensureStartupDaemon(ctx, opts.RelayURL, store, stdout, stderr)
 			}
 			return nil
 		case errors.Is(resolveErr, errInvalidSavedPairing):
@@ -226,20 +222,37 @@ func Run(ctx context.Context, opts Options) error {
 	fmt.Fprintf(stdout, "Active refresh token saved to %s\n", store.Path())
 
 	if opts.StartupDaemon {
-		if err := install.RestartServiceIfInstalled(); err == nil {
-			fmt.Fprintln(stdout, "Bridge background service restarted.")
-			return nil
-		} else {
-			fmt.Fprintf(stderr, "bridge service restart unavailable, continuing in the current terminal: %v\n", err)
-		}
-		return daemon.Run(ctx, daemon.Options{
-			RelayURL: opts.RelayURL,
-			Store:    store,
-			Stderr:   stderr,
-		})
+		return ensureStartupDaemon(ctx, opts.RelayURL, store, stdout, stderr)
 	}
 
 	return nil
+}
+
+func ensureStartupDaemon(ctx context.Context, relayURL string, store *token.Store, stdout io.Writer, stderr io.Writer) error {
+	if err := restartBridgeService(); err == nil {
+		fmt.Fprintln(stdout, "Bridge background service restarted.")
+		return nil
+	} else {
+		fmt.Fprintf(stderr, "bridge service restart unavailable, attempting automatic service install: %v\n", err)
+	}
+
+	if err := installBridgeService(); err == nil {
+		fmt.Fprintln(stdout, "Bridge background service installed.")
+		if err := restartBridgeService(); err == nil {
+			fmt.Fprintln(stdout, "Bridge background service restarted.")
+			return nil
+		}
+		fmt.Fprintln(stderr, "bridge service install completed, but automatic restart still failed. Continuing in the current terminal.")
+	} else {
+		fmt.Fprintf(stderr, "bridge service install failed, continuing in the current terminal: %v\n", err)
+	}
+
+	fmt.Fprintln(stderr, "Keep this terminal open until the dashboard shows the laptop online.")
+	return runBridgeDaemon(ctx, daemon.Options{
+		RelayURL: relayURL,
+		Store:    store,
+		Stderr:   stderr,
+	})
 }
 
 func loadSavedDashboardURL(store *dashboardurl.Store) (string, error) {
