@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
@@ -83,9 +83,6 @@ export function IframeTerminalPage({
   const bridgeScopedSession = useMemo(() => decodeBridgeSessionId(sessionId), [sessionId]);
   const usesRelayTerminal = Boolean(bridgeId?.trim() || bridgeScopedSession);
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const tokenUrl = useMemo(
     () => withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, bridgeId),
     [bridgeId, sessionId],
@@ -122,8 +119,15 @@ export function IframeTerminalPage({
     return { cols: terminal.cols, rows: terminal.rows };
   }, []);
 
+  const writeTerminalNotice = useCallback((message: string) => {
+    const trimmed = message.trim();
+    if (!trimmed) {
+      return;
+    }
+    terminalRef.current?.writeln(`\r\n[Conductor] ${trimmed}`);
+  }, []);
+
   const loadStoredOutput = useCallback(async (outputUrl?: string | null, reason?: string | null) => {
-    setLoading(false);
     if (!outputUrl) {
       if (reason) {
         terminalRef.current?.writeln(`\r\n[Conductor] ${reason}`);
@@ -142,10 +146,9 @@ export function IframeTerminalPage({
       }
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : "Failed to load stored output.";
-      setError(message);
-      terminalRef.current?.writeln(`\r\n[Conductor] ${message}`);
+      writeTerminalNotice(message);
     }
-  }, []);
+  }, [writeTerminalNotice]);
 
   const fetchRelayTerminalUrl = useCallback(async (): Promise<RelayConnectionInfo> => {
     const response = await fetch(
@@ -184,8 +187,6 @@ export function IframeTerminalPage({
     if (!allowReconnectRef.current) {
       return;
     }
-    setLoading(true);
-    setError(null);
 
     const response = await fetch(tokenUrl, { cache: "no-store" });
     if (!allowReconnectRef.current) {
@@ -264,18 +265,14 @@ export function IframeTerminalPage({
         const payload = JSON.parse(text) as ControlMessage;
         switch (payload.type) {
           case "ready":
-            setLoading(false);
             return;
           case "cwd":
             return;
           case "exit":
-            setLoading(false);
-            terminalRef.current?.writeln(`\r\n[Conductor] Terminal exited (${payload.exitCode ?? 0}).`);
+            writeTerminalNotice(`Terminal exited (${payload.exitCode ?? 0}).`);
             return;
           case "error":
-            setLoading(false);
-            setError(payload.message ?? "Terminal connection failed.");
-            terminalRef.current?.writeln(`\r\n[Conductor] ${payload.message ?? "Terminal connection failed."}`);
+            writeTerminalNotice(payload.message ?? "Terminal connection failed.");
             return;
           case "pong":
             return;
@@ -286,7 +283,9 @@ export function IframeTerminalPage({
     };
 
     ws.onerror = () => {
-      setError(relayConnection ? "Relay terminal connection failed." : "Terminal websocket failed.");
+      writeTerminalNotice(
+        relayConnection ? "Relay terminal connection failed." : "Terminal websocket failed.",
+      );
     };
 
     ws.onclose = async () => {
@@ -297,8 +296,7 @@ export function IframeTerminalPage({
         return;
       }
       if (retryAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
-        setLoading(false);
-        terminalRef.current?.writeln("\r\n[Conductor] Terminal disconnected.");
+        writeTerminalNotice("Terminal disconnected.");
         return;
       }
       retryAttemptRef.current += 1;
@@ -306,12 +304,22 @@ export function IframeTerminalPage({
       clearReconnectTimer();
       reconnectTimerRef.current = window.setTimeout(() => {
         void connect().catch((nextError) => {
-          setLoading(false);
-          setError(nextError instanceof Error ? nextError.message : "Failed to reconnect terminal.");
+          writeTerminalNotice(
+            nextError instanceof Error ? nextError.message : "Failed to reconnect terminal.",
+          );
         });
       }, delay);
     };
-  }, [clearReconnectTimer, fitTerminal, loadStoredOutput, tokenUrl, usesRelayTerminal, fetchRelayTerminalUrl, encodeResizeFrame]);
+  }, [
+    clearReconnectTimer,
+    fitTerminal,
+    loadStoredOutput,
+    tokenUrl,
+    usesRelayTerminal,
+    fetchRelayTerminalUrl,
+    encodeResizeFrame,
+    writeTerminalNotice,
+  ]);
 
   useEffect(() => {
     const terminal = new Terminal({
@@ -319,7 +327,7 @@ export function IframeTerminalPage({
       fontFamily: "var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
       fontSize: 13,
       lineHeight: 1.2,
-      convertEol: false,
+      convertEol: true,
       scrollback: 5000,
       allowTransparency: false,
       theme: TERMINAL_THEME,
@@ -372,8 +380,7 @@ export function IframeTerminalPage({
     resizeObserver.observe(host);
 
     void connect().catch((nextError) => {
-      setLoading(false);
-      setError(nextError instanceof Error ? nextError.message : "Failed to connect terminal.");
+      writeTerminalNotice(nextError instanceof Error ? nextError.message : "Failed to connect terminal.");
     });
 
     return () => {
@@ -387,21 +394,20 @@ export function IframeTerminalPage({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [clearReconnectTimer, closeSocket, connect, encodeInputFrame, encodeResizeFrame, fitTerminal, usesRelayTerminal]);
+  }, [
+    clearReconnectTimer,
+    closeSocket,
+    connect,
+    encodeInputFrame,
+    encodeResizeFrame,
+    fitTerminal,
+    usesRelayTerminal,
+    writeTerminalNotice,
+  ]);
 
   return (
     <div className="flex h-screen min-h-0 w-full min-w-0 flex-col bg-[#060404] text-[#efe8e1]">
       <div className="relative min-h-0 flex-1">
-        {loading ? (
-          <div className="absolute inset-x-0 top-3 z-10 mx-auto w-fit rounded-full border border-white/10 bg-[#141010]/92 px-3 py-1 text-[12px] text-[#c9c0b7]">
-            Connecting…
-          </div>
-        ) : null}
-        {error ? (
-          <div className="absolute inset-x-0 top-3 z-10 mx-auto w-fit rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 text-[12px] text-red-200">
-            {error}
-          </div>
-        ) : null}
         <div ref={hostRef} className="h-full w-full overflow-hidden" />
       </div>
     </div>
