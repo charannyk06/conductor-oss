@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/cn";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
+import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
 import {
   type ChangedFileSummary,
   type DiffCategory,
@@ -647,7 +648,7 @@ function DiffFileDetail({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+      <div className={`min-h-0 flex-1 overflow-auto px-4 py-4 ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
         {selectedState.loading ? (
           <div className="flex h-full min-h-[240px] items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
             <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -1032,7 +1033,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
   }, [isMobileViewport]);
 
   const listPane = (
-    <div className="flex min-h-0 h-full max-h-full flex-col overflow-y-auto overscroll-contain lg:border-r lg:border-[var(--vk-border)]">
+    <div className={`flex min-h-0 h-full max-h-full flex-col overflow-y-auto lg:border-r lg:border-[var(--vk-border)] ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
       <div className="py-1">
         {visibleEntries.map((entry) => {
           const isSelected = entry.fileKey === selectedFileKey;

@@ -59,6 +59,23 @@ struct TtydSessionOwnerChannels {
     ready_tx: Option<oneshot::Sender<Result<()>>>,
 }
 
+#[derive(Debug)]
+struct SessionExceededMaxDurationError {
+    max_duration_secs: u64,
+}
+
+impl std::fmt::Display for SessionExceededMaxDurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "session exceeded maximum duration of {} seconds",
+            self.max_duration_secs
+        )
+    }
+}
+
+impl std::error::Error for SessionExceededMaxDurationError {}
+
 fn candidate_ttyd_paths(workspace_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
@@ -780,6 +797,25 @@ async fn run_ttyd_session_owner_with_retry(
         match &result {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if session_exceeded_max_duration(err) {
+                    tracing::info!(
+                        session_id = %sid,
+                        error = %err,
+                        "ttyd session reached maximum duration, shutting down without reconnect"
+                    );
+                    state
+                        .emit_terminal_stream_event(
+                            sid,
+                            crate::state::types::TerminalStreamEvent::Error(
+                                "Terminal session reached its maximum lifetime and was closed."
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    state.detach_terminal_runtime(sid).await;
+                    return Ok(());
+                }
+
                 // Check if the ttyd process is still alive before reconnecting.
                 // We verify not just that the PID exists but that it is actually a ttyd process.
                 let session = state.get_session(sid).await;
@@ -1075,10 +1111,10 @@ async fn run_ttyd_session_owner(
                 max_duration_secs = TTYD_MAX_SESSION_DURATION.as_secs(),
                 "session exceeded maximum duration during active connection"
             );
-            return Err(anyhow!(
-                "session exceeded maximum duration of {} seconds",
-                TTYD_MAX_SESSION_DURATION.as_secs()
-            ));
+            return Err(SessionExceededMaxDurationError {
+                max_duration_secs: TTYD_MAX_SESSION_DURATION.as_secs(),
+            }
+            .into());
         }
     }
     // Flush any remaining batched output before disconnecting.
@@ -1090,6 +1126,14 @@ async fn run_ttyd_session_owner(
         let _ = channels.output_tx.send(ExecutorOutput::Stdout(buf)).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
+}
+
+fn session_exceeded_max_duration(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<SessionExceededMaxDurationError>()
+            .is_some()
+    })
 }
 
 fn owner_reconnect_delay(attempt: u32) -> std::time::Duration {

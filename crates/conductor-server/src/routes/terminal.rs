@@ -635,6 +635,7 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
     const LEGACY_STORAGE_KEY = 'conductor.ttyd.token';
     const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
     const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';
+    const READY_MESSAGE_TYPE = 'conductor-ttyd-ready';
     const TOKEN_REQUEST_THROTTLE_MS = 1500;
     const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
@@ -704,6 +705,17 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         }
     };
 
+    const notifyReady = () => {
+        if (unloading || !window.parent || window.parent === window) {
+            return;
+        }
+
+        try {
+            window.parent.postMessage({ type: READY_MESSAGE_TYPE }, '*');
+        } catch {
+        }
+    };
+
     const requestFreshToken = (reason) => {
         if (unloading || !window.parent || window.parent === window) {
             return;
@@ -754,6 +766,9 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         }
 
         socket.__conductorTokenRefreshHookAttached = true;
+        socket.addEventListener('open', () => {
+            notifyReady();
+        });
         socket.addEventListener('close', () => {
             requestFreshToken('websocket-close');
         });
@@ -2609,6 +2624,7 @@ mod tests {
         assert!(
             injected.contains("const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';")
         );
+        assert!(injected.contains("const READY_MESSAGE_TYPE = 'conductor-ttyd-ready';"));
         assert!(injected.contains("const TOKEN_REQUEST_THROTTLE_MS = 1500;"));
         assert!(
             injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
@@ -2617,8 +2633,12 @@ mod tests {
         assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
+        assert!(injected.contains("const notifyReady = () => {"));
+        assert!(injected.contains("window.parent.postMessage({ type: READY_MESSAGE_TYPE }, '*');"));
         assert!(injected.contains("const requestFreshToken = (reason) => {"));
         assert!(injected.contains("const attachSocketListeners = (socket) => {"));
+        assert!(injected.contains("socket.addEventListener('open', () => {"));
+        assert!(injected.contains("notifyReady();"));
         assert!(injected.contains("requestFreshToken('websocket-close');"));
         assert!(injected.contains("requestFreshToken('websocket-error');"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));

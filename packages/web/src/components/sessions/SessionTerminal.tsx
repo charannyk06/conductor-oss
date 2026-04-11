@@ -8,7 +8,6 @@
 import {
   AlertCircle,
   Clipboard,
-  ExternalLink,
   FileUp,
   Loader2,
   RefreshCw,
@@ -32,6 +31,8 @@ const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "r
 const TOKEN_REFRESH_LEAD_SECONDS = 30;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
 const TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE = "conductor-ttyd-auth-token-request";
+const TTYD_READY_MESSAGE_TYPE = "conductor-ttyd-ready";
+const TTYD_RELAY_URL_MESSAGE_TYPE = "conductor-ttyd-relay-url";
 const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 /** Staggered fits so xterm catches up after ttyd boot, layout, and fonts. */
@@ -152,6 +153,34 @@ function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined)
   }
 }
 
+function postBridgeRelayUrl(
+  iframe: HTMLIFrameElement | null | undefined,
+  relayTtydWsUrl: string | null,
+): void {
+  if (!iframe?.contentWindow || !relayTtydWsUrl) {
+    return;
+  }
+
+  let targetOrigin: string;
+  try {
+    targetOrigin = new URL(iframe.src).origin;
+  } catch {
+    targetOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  }
+  if (!targetOrigin || targetOrigin === "null") {
+    return;
+  }
+
+  try {
+    iframe.contentWindow.postMessage(
+      { type: TTYD_RELAY_URL_MESSAGE_TYPE, relayTtydWsUrl },
+      targetOrigin,
+    );
+  } catch {
+    // Iframe may have navigated or origin may be opaque.
+  }
+}
+
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
@@ -205,6 +234,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
   const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
   const [terminalLinkUrl, setTerminalLinkUrl] = useState<string | null>(null);
+  const [terminalRelayWsUrl, setTerminalRelayWsUrl] = useState<string | null>(null);
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [frameLoaded, setFrameLoaded] = useState(false);
@@ -217,6 +247,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
+  const terminalRelayWsUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
   /** Last host box we told the ttyd iframe to fit to — avoids spamming resize (xterm refit jumps scroll). */
@@ -280,6 +311,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
     postTerminalAuthToken(iframe, token);
   }, [terminalLinkUrl]);
 
+  const syncBridgeRelayUrl = useCallback(() => {
+    const iframe = ttydIframeRef.current;
+    postBridgeRelayUrl(iframe, terminalRelayWsUrl);
+  }, [terminalRelayWsUrl]);
+
   const requestSilentConnectionRefresh = useCallback((options?: {
     force?: boolean;
     resetResizeCache?: boolean;
@@ -305,6 +341,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     if (options?.syncCurrentToken !== false) {
       syncTerminalAuthToken();
+      syncBridgeRelayUrl();
       scheduleTerminalResizeBurst();
     }
 
@@ -314,11 +351,15 @@ function SessionTerminalView(props: SessionTerminalProps) {
     } else {
       silentRefreshCountRef.current += 1;
     }
-  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
+  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncBridgeRelayUrl, syncTerminalAuthToken]);
 
   useEffect(() => {
     terminalUrlRef.current = terminalUrl;
   }, [terminalUrl]);
+
+  useEffect(() => {
+    terminalRelayWsUrlRef.current = terminalRelayWsUrl;
+  }, [terminalRelayWsUrl]);
 
   useEffect(() => {
     frameLoadedRef.current = frameLoaded;
@@ -332,6 +373,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     retryAttemptRef.current = 0;
     setTerminalUrl(null);
     setTerminalLinkUrl(null);
+    setTerminalRelayWsUrl(null);
     setResolvingConnection(expectsLiveTerminal);
     setConnectionError(null);
     setFrameLoaded(false);
@@ -365,6 +407,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
     setTerminalUrl(null);
     setTerminalLinkUrl(null);
+    setTerminalRelayWsUrl(null);
     setFrameLoaded(false);
     setConnectionError(null);
     forceTerminalReloadRef.current = false;
@@ -427,39 +470,45 @@ function SessionTerminalView(props: SessionTerminalProps) {
         if (cancelled || !expectsLiveTerminalRef.current) return;
         retryAttemptRef.current = 0;
         if (connection.interactive && connection.terminalUrl) {
+          const nextTerminalLinkUrl = connection.terminalLinkUrl ?? connection.terminalUrl;
+          const nextRelayTtydWsUrl = connection.relayTtydWsUrl ?? null;
+          const relayUrlChanged = terminalRelayWsUrlRef.current !== nextRelayTtydWsUrl;
           const shouldReloadTerminal =
             forceTerminalReloadRef.current ||
             terminalUrlNeedsReload(terminalUrlRef.current, connection.terminalUrl);
           forceTerminalReloadRef.current = false;
 
-          // Always update the external link URL
-          setTerminalLinkUrl(connection.terminalUrl);
+          // Always update the external link URL and relay metadata.
+          setTerminalLinkUrl(nextTerminalLinkUrl);
+          setTerminalRelayWsUrl(nextRelayTtydWsUrl);
 
-          // Check if only the token changed - we can sync without iframe reload
+          // Check if only the token changed - we can sync without iframe reload.
           const onlyTokenChanged = !shouldReloadTerminal &&
             terminalUrlRef.current &&
             isOnlyTokenChanged(terminalUrlRef.current, connection.terminalUrl);
 
           if (shouldReloadTerminal || !terminalUrlRef.current) {
-            // Full reload needed - either first load, forced reload, or structural URL change
+            // Full reload needed - either first load, forced reload, or structural URL change.
             if (!terminalUrlRef.current) {
               setFrameLoaded(false);
             }
             setTerminalUrl(connection.terminalUrl);
-          } else if (onlyTokenChanged) {
-            // Token-only refresh: sync via postMessage without reloading iframe
-            const newToken = (() => {
-              try {
-                return new URL(connection.terminalUrl).searchParams.get("token");
-              } catch {
-                return null;
-              }
-            })();
-            if (newToken) {
-              const iframe = ttydIframeRef.current;
-              if (iframe) {
+          } else {
+            const iframe = ttydIframeRef.current;
+            if (onlyTokenChanged && iframe) {
+              const newToken = (() => {
+                try {
+                  return new URL(connection.terminalUrl).searchParams.get("token");
+                } catch {
+                  return null;
+                }
+              })();
+              if (newToken) {
                 postTerminalAuthToken(iframe, newToken);
               }
+            }
+            if (relayUrlChanged && iframe) {
+              postBridgeRelayUrl(iframe, nextRelayTtydWsUrl);
             }
           }
           setConnectionError(null);
@@ -479,6 +528,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         if (!terminalUrlRef.current) {
           setTerminalUrl(null);
           setTerminalLinkUrl(null);
+          setTerminalRelayWsUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(connection.reason ?? "Live ttyd terminal is unavailable.");
@@ -492,6 +542,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         if (!hasTerminal) {
           setTerminalUrl(null);
           setTerminalLinkUrl(null);
+          setTerminalRelayWsUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(
@@ -663,10 +714,19 @@ function SessionTerminalView(props: SessionTerminalProps) {
       if (!event.data || typeof event.data !== "object") {
         return;
       }
-      if ((event.data as { type?: string }).type !== TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE) {
+      if (event.source !== ttydIframeRef.current?.contentWindow) {
         return;
       }
-      if (event.source !== ttydIframeRef.current?.contentWindow) {
+
+      const type = (event.data as { type?: string }).type;
+      if (type === TTYD_READY_MESSAGE_TYPE) {
+        setFrameLoaded(true);
+        setConnectionError(null);
+        scheduleTerminalResizeBurst();
+        maybePostTerminalResize();
+        return;
+      }
+      if (type !== TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE) {
         return;
       }
 
@@ -678,7 +738,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => {
       window.removeEventListener("message", handleMessage);
     };
-  }, [requestSilentConnectionRefresh]);
+  }, [maybePostTerminalResize, requestSilentConnectionRefresh, scheduleTerminalResizeBurst]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -718,7 +778,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     syncTerminalAuthToken();
-  }, [frameLoaded, syncTerminalAuthToken]);
+    syncBridgeRelayUrl();
+  }, [frameLoaded, syncBridgeRelayUrl, syncTerminalAuthToken]);
 
   useEffect(() => {
     if (!expectsLiveTerminal || !terminalUrl || frameLoaded) {
@@ -944,6 +1005,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         ttydBacked,
         terminalUrl,
         terminalLinkUrl,
+        terminalRelayWsUrl,
         frameLoaded,
         resolvingConnection,
         connectionError,
@@ -983,6 +1045,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     sessionId,
     terminalUrl,
     terminalLinkUrl,
+    terminalRelayWsUrl,
     ttydBacked,
   ]);
 
@@ -1047,23 +1110,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
             <FileUp className="h-3.5 w-3.5" />
           )}
         </Button>
-        {terminalDirectHref ? (
-          <Button
-            asChild
-            size="icon"
-            variant="ghost"
-            className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
-          >
-            <a
-              href={terminalSessionHref}
-              target="_blank"
-              rel="noreferrer"
-              aria-label="Open full terminal page in new tab"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          </Button>
-        ) : null}
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
           <Button
             type="button"
@@ -1140,10 +1186,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 if (firstFrameLoadedAtRef.current === null) {
                   firstFrameLoadedAtRef.current = now;
                 }
-                setFrameLoaded(true);
+                setFrameLoaded(false);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
                 syncTerminalAuthToken();
+                syncBridgeRelayUrl();
                 scheduleTerminalResizeBurst();
               }}
             />
