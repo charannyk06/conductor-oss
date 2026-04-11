@@ -4540,12 +4540,12 @@ mod tests {
             AgentKind::Codex,
             Arc::new(DelayedHeadlessExecutor {
                 assistant_text: "headless assistant reply".to_string(),
-                delay: Duration::from_millis(250),
+                delay: Duration::from_millis(1_500),
             }),
         );
 
         timeout(
-            Duration::from_millis(100),
+            Duration::from_millis(750),
             state.send_to_dispatcher_thread(
                 &thread.id,
                 DispatcherTurnRequest::plain(
@@ -4561,17 +4561,24 @@ mod tests {
         .expect("headless send should not block on runtime completion")
         .expect("dispatcher send should succeed");
 
-        tokio::time::sleep(Duration::from_millis(350)).await;
-
-        let updated = state
-            .get_dispatcher_thread(&thread.id)
-            .await
-            .expect("dispatcher thread should still exist");
-        assert!(updated
-            .conversation
-            .iter()
-            .any(|entry| entry.kind == "assistant_message"
-                && entry.text.contains("headless assistant reply")));
+        let updated = timeout(Duration::from_secs(3), async {
+            loop {
+                let updated = state
+                    .get_dispatcher_thread(&thread.id)
+                    .await
+                    .expect("dispatcher thread should still exist");
+                let has_reply = updated.conversation.iter().any(|entry| {
+                    entry.kind == "assistant_message"
+                        && entry.text.contains("headless assistant reply")
+                });
+                if has_reply && updated.status == SessionStatus::NeedsInput {
+                    break updated;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("headless runtime should eventually emit the assistant reply and reach NeedsInput");
         assert_eq!(updated.status, SessionStatus::NeedsInput);
 
         let _ = fs::remove_dir_all(root);
