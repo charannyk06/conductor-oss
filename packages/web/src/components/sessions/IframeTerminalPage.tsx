@@ -68,6 +68,11 @@ const TERMINAL_THEME = {
   brightWhite: "#fff8f2",
 } as const;
 
+const IFRAME_TERMINAL_PAGE_CLASSNAME =
+  "flex h-[100dvh] min-h-[100dvh] w-full min-w-0 flex-col overflow-hidden bg-[#060404] text-[#efe8e1]";
+const IFRAME_TERMINAL_HOST_CLASSNAME =
+  "h-full w-full overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]";
+
 export function IframeTerminalPage({
   sessionId,
   bridgeId,
@@ -431,6 +436,40 @@ export function IframeTerminalPage({
   }, [connect, scheduleReconnect]);
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const htmlStyle = document.documentElement.style;
+    const bodyStyle = document.body.style;
+    const previousHtmlHeight = htmlStyle.height;
+    const previousHtmlOverflow = htmlStyle.overflow;
+    const previousBodyHeight = bodyStyle.height;
+    const previousBodyMargin = bodyStyle.margin;
+    const previousBodyOverflow = bodyStyle.overflow;
+    const previousBodyBackground = bodyStyle.background;
+    const previousBodyColor = bodyStyle.color;
+
+    htmlStyle.height = "100%";
+    htmlStyle.overflow = "hidden";
+    bodyStyle.height = "100%";
+    bodyStyle.margin = "0";
+    bodyStyle.overflow = "hidden";
+    bodyStyle.background = TERMINAL_THEME.background;
+    bodyStyle.color = TERMINAL_THEME.foreground;
+
+    return () => {
+      htmlStyle.height = previousHtmlHeight;
+      htmlStyle.overflow = previousHtmlOverflow;
+      bodyStyle.height = previousBodyHeight;
+      bodyStyle.margin = previousBodyMargin;
+      bodyStyle.overflow = previousBodyOverflow;
+      bodyStyle.background = previousBodyBackground;
+      bodyStyle.color = previousBodyColor;
+    };
+  }, []);
+
+  useEffect(() => {
     const initialViewport = resolveSessionTerminalViewportOptions(
       typeof window === "undefined" ? undefined : window.innerWidth,
     );
@@ -439,9 +478,10 @@ export function IframeTerminalPage({
       fontFamily: initialViewport.fontFamily,
       fontSize: initialViewport.fontSize,
       lineHeight: initialViewport.lineHeight,
+      letterSpacing: 0.2,
       convertEol: true,
-      scrollback: 5000,
-      allowTransparency: false,
+      scrollback: 4_000,
+      allowTransparency: true,
       theme: TERMINAL_THEME,
     });
     const fitAddon = new FitAddon();
@@ -519,9 +559,9 @@ export function IframeTerminalPage({
   ]);
 
   return (
-    <div className="flex h-screen min-h-0 w-full min-w-0 flex-col bg-[#060404] text-[#efe8e1]">
-      <div className="relative min-h-0 flex-1">
-        <div ref={hostRef} className="h-full w-full overflow-hidden" />
+    <div className={IFRAME_TERMINAL_PAGE_CLASSNAME}>
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#060404]">
+        <div ref={hostRef} className={IFRAME_TERMINAL_HOST_CLASSNAME} />
       </div>
     </div>
   );
