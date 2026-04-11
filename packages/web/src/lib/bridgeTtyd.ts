@@ -46,6 +46,39 @@ export function buildBridgeTtydProxyUrl(
   return `${url.pathname}${url.search}`;
 }
 
+export function buildStableBridgeTtydProxyUrl(
+  routeSessionId: string,
+  bridgeId: string,
+): string {
+  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
+  url.searchParams.set("bridgeId", bridgeId);
+  return `${url.pathname}${url.search}`;
+}
+
+const PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP = [
+  "content-length",
+  "content-encoding",
+  "etag",
+  "last-modified",
+  "transfer-encoding",
+] as const;
+
+export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): Response {
+  const headers = new Headers(proxied.headers);
+  for (const headerName of PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP) {
+    headers.delete(headerName);
+  }
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "text/html; charset=utf-8");
+  }
+
+  return new Response(html, {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers,
+  });
+}
+
 function injectBridgeTtydHtmlFragmentEarly(html: string, marker: string, fragment: string): string {
   if (html.includes(marker)) {
     return html;
@@ -421,17 +454,27 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   if (window.__conductorBridgeTtydRelayPatched) return;
   window.__conductorBridgeTtydRelayPatched = true;
 
-  const RELAY_TTYD_WS_URL = ${relayWsLiteral};
-  if (!RELAY_TTYD_WS_URL) return;
-
   const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';
+  const READY_MESSAGE_TYPE = 'conductor-ttyd-ready';
+  const RELAY_UPDATE_MESSAGE_TYPE = 'conductor-ttyd-relay-url';
   const TOKEN_REQUEST_THROTTLE_MS = 1500;
   const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
   const previousWebSocket = window.WebSocket;
   if (typeof previousWebSocket !== 'function') return;
 
+  let currentRelayTtydWsUrl = ${relayWsLiteral};
+  if (!currentRelayTtydWsUrl) return;
+
   let lastTokenRequestAt = 0;
   let unloading = false;
+
+  function notifyReady() {
+    if (unloading || !window.parent || window.parent === window) return;
+    try {
+      window.parent.postMessage({ type: READY_MESSAGE_TYPE }, '*');
+    } catch {
+    }
+  }
 
   function requestFreshRelay(reason) {
     if (unloading || !window.parent || window.parent === window) return;
@@ -453,6 +496,9 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
     if (!socket || socket.__conductorTokenRefreshHookAttached) return socket;
 
     socket.__conductorTokenRefreshHookAttached = true;
+    socket.addEventListener('open', function() {
+      notifyReady();
+    });
     socket.addEventListener('close', function() {
       requestFreshRelay('bridge-websocket-close');
     });
@@ -462,7 +508,7 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
     return socket;
   }
 
-  const patchedWebSocket = function(url, protocols) {
+  function normalizedRelayUrl(url) {
     let normalizedUrl = String(url);
     try {
       const candidate = new URL(normalizedUrl, window.location.href);
@@ -472,11 +518,15 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
         candidate.pathname === '/ws' ||
         candidate.pathname.endsWith('/ws')
       ) {
-        normalizedUrl = RELAY_TTYD_WS_URL;
+        normalizedUrl = currentRelayTtydWsUrl;
       }
     } catch {
     }
+    return normalizedUrl;
+  }
 
+  const patchedWebSocket = function(url, protocols) {
+    const normalizedUrl = normalizedRelayUrl(url);
     if (arguments.length > 1) {
       return attachSocketListeners(new previousWebSocket(normalizedUrl, protocols));
     }
@@ -487,8 +537,25 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   patchedWebSocket.prototype = previousWebSocket.prototype;
   window.WebSocket = patchedWebSocket;
 
+  function handleMessage(event) {
+    if (event.source !== window.parent) {
+      return;
+    }
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data.type !== RELAY_UPDATE_MESSAGE_TYPE) {
+      return;
+    }
+    const nextRelayUrl = typeof data.relayTtydWsUrl === 'string' ? data.relayTtydWsUrl.trim() : '';
+    if (!nextRelayUrl) {
+      return;
+    }
+    currentRelayTtydWsUrl = nextRelayUrl;
+  }
+
+  window.addEventListener('message', handleMessage);
   window.addEventListener('beforeunload', function() {
     unloading = true;
+    window.removeEventListener('message', handleMessage);
   }, { once: true });
 })();
 </script>`;

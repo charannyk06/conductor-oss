@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { guardAndProxy } from "@/lib/guardedRustProxy";
-import { buildBridgeTtydProxyUrl, ensureBridgeTtydSession, resolveBridgeSessionTarget } from "@/lib/bridgeTtyd";
+import {
+  buildStableBridgeTtydProxyUrl,
+  ensureBridgeTtydSession,
+  resolveBridgeSessionTarget,
+} from "@/lib/bridgeTtyd";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -35,12 +39,12 @@ export async function GET(
   return NextResponse.json({
     required: false,
     expiresInSeconds: null,
-    ttydHttpUrl: buildBridgeTtydProxyUrl(
+    ttydHttpUrl: buildStableBridgeTtydProxyUrl(
       ensured.routeSessionId,
       ensured.bridgeId,
-      ensured.relayTtydWsUrl,
     ),
     ttydWsUrl: ensured.relayTtydWsUrl,
+    relayTtydWsUrl: ensured.relayTtydWsUrl,
     tunnelUrl,
   });
 }

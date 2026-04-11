@@ -780,6 +780,25 @@ async fn run_ttyd_session_owner_with_retry(
         match &result {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if session_exceeded_max_duration(err) {
+                    tracing::info!(
+                        session_id = %sid,
+                        error = %err,
+                        "ttyd session reached maximum duration, shutting down without reconnect"
+                    );
+                    state
+                        .emit_terminal_stream_event(
+                            sid,
+                            crate::state::types::TerminalStreamEvent::Error(
+                                "Terminal session reached its maximum lifetime and was closed."
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    state.detach_terminal_runtime(sid).await;
+                    return Ok(());
+                }
+
                 // Check if the ttyd process is still alive before reconnecting.
                 // We verify not just that the PID exists but that it is actually a ttyd process.
                 let session = state.get_session(sid).await;
@@ -1090,6 +1109,11 @@ async fn run_ttyd_session_owner(
         let _ = channels.output_tx.send(ExecutorOutput::Stdout(buf)).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
+}
+
+fn session_exceeded_max_duration(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("session exceeded maximum duration")
 }
 
 fn owner_reconnect_delay(attempt: u32) -> std::time::Duration {
