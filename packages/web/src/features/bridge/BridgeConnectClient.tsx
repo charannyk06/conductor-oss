@@ -868,7 +868,7 @@ export default function BridgeConnectClient({
                       <div className="mt-1">
                         {claimedDeviceRecord?.connected
                           ? "This laptop is online and ready to use."
-                          : "The bridge service is restarting for this laptop now. This page will refresh until it reports online."}
+                          : "Conductor is still waiting for this laptop to come online. If you closed the setup terminal, rerun the hosted installer or `conductor-bridge connect` and keep that terminal open until the device reports online."}
                       </div>
                       {pairingAutoUpdate.message ? (
                         <div className={cn(

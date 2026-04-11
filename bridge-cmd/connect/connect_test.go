@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/charannyk06/conductor-oss/bridge/daemon"
 	"github.com/charannyk06/conductor-oss/bridge/dashboardurl"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
@@ -247,6 +249,84 @@ func TestRunCreatesNewPairingWhenSavedPairingsAreInvalidAndWarnsAboutRotation(t 
 	assertStringContains(t, stdout.String(), `Device paired: "Preview Mac"`)
 	assertStringContains(t, stderr.String(), "Saved pairing cached for https://preview.conductross.com is invalid or expired.")
 	assertStringContains(t, stderr.String(), "The active pairing saved for https://conductross.com is invalid or expired.")
+}
+
+func TestRunInstallsAndRestartsBackgroundServiceWhenRestartIsUnavailable(t *testing.T) {
+	tokenStore, dashboardStore := newBridgeTestStores(t)
+
+	if err := tokenStore.Save("refresh-active"); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	if err := dashboardStore.Save("https://conductross.com"); err != nil {
+		t.Fatalf("dashboard Save returned error: %v", err)
+	}
+
+	withDefaultHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/devices/auth" {
+			t.Fatalf("unexpected relay path %q", r.URL.Path)
+		}
+
+		return jsonHTTPResponse(http.StatusOK, map[string]string{
+			"device_id":   "device-123",
+			"device_name": "Preview Mac",
+		}), nil
+	})
+
+	originalRestart := restartBridgeService
+	originalInstall := installBridgeService
+	originalRunDaemon := runBridgeDaemon
+	t.Cleanup(func() {
+		restartBridgeService = originalRestart
+		installBridgeService = originalInstall
+		runBridgeDaemon = originalRunDaemon
+	})
+
+	restartCalls := 0
+	installCalls := 0
+	daemonCalls := 0
+	restartBridgeService = func() error {
+		restartCalls += 1
+		if restartCalls == 1 {
+			return errors.New("service missing")
+		}
+		return nil
+	}
+	installBridgeService = func() error {
+		installCalls += 1
+		return nil
+	}
+	runBridgeDaemon = func(ctx context.Context, opts daemon.Options) error {
+		daemonCalls += 1
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := Run(context.Background(), Options{
+		RelayURL:      "https://relay.example.com",
+		DashboardURL:  "https://preview.conductross.com",
+		Store:         tokenStore,
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+		OpenBrowser:   false,
+		StartupDaemon: true,
+	}); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if restartCalls != 2 {
+		t.Fatalf("restartBridgeService called %d times, want 2", restartCalls)
+	}
+	if installCalls != 1 {
+		t.Fatalf("installBridgeService called %d times, want 1", installCalls)
+	}
+	if daemonCalls != 0 {
+		t.Fatalf("runBridgeDaemon called %d times, want 0", daemonCalls)
+	}
+
+	assertStringContains(t, stdout.String(), "Bridge background service installed.")
+	assertStringContains(t, stdout.String(), "Bridge background service restarted.")
+	assertStringContains(t, stderr.String(), "bridge service restart unavailable, attempting automatic service install: service missing")
 }
 
 func newBridgeTestStores(t *testing.T) (*token.Store, *dashboardurl.Store) {
