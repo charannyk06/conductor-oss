@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
 
 type SessionData = DashboardSession & {
   agent?: string;
@@ -526,7 +527,7 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
           File truncated{fileSize > 0 ? ` (${formatBytes(fileSize)} total)` : ""}
         </div>
       ) : null}
-      <div className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain touch-pan-x touch-pan-y py-2">
+      <div className={`min-h-0 min-w-0 flex-1 overflow-auto py-2 touch-pan-x ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
         <HighlightedCode code={textContent} lang={lang} />
       </div>
     </div>
@@ -657,7 +658,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
   ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain lg:overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Mobile: if a file is selected, show preview full-width instead of tree */}
       {mobileFilePreview}
 
@@ -693,7 +694,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
       {/* Desktop: side-by-side tree + preview.  Mobile: tree only (preview shown above) */}
       <div className={`min-h-0 flex-1 lg:flex lg:flex-row ${selectedPath ? "hidden lg:flex" : "flex flex-col"}`}>
         {/* File tree */}
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1 lg:max-w-[320px] lg:border-r lg:border-white/8">
+        <div className={`min-h-0 flex-1 overflow-y-auto py-1 lg:max-w-[320px] lg:border-r lg:border-white/8 ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
           {filtered.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-[var(--vk-text-muted)]">
               {search ? "No files match your search." : "No files in workspace."}
@@ -782,7 +783,7 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
   }, [queueDepth, queuePosition, recoveryState, session.status]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain lg:overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Recovery / queue banner */}
       {recoveryBanner ? (
         <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-2">

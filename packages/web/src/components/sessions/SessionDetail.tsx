@@ -23,6 +23,7 @@ import { SessionOverview } from "./SessionOverview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 import type { TerminalInsertRequest } from "./terminalInsert";
 import { shouldAutoOpenPreviewTab } from "./sessionDetailBehavior";
+import { getSessionDetailRootClassName } from "./sessionMobileScroll";
 import {
   loadSessionTerminalComponent,
   SESSION_TERMINAL_IMPLEMENTATION,
@@ -329,11 +330,7 @@ export function SessionDetail({
 
   return (
     <div
-      className={`flex h-full min-h-0 min-w-0 w-full flex-col ${
-        immersiveTerminalActive
-          ? "overflow-hidden bg-[#060404]"
-          : "overflow-y-auto overscroll-contain lg:overflow-hidden"
-      }`}
+      className={getSessionDetailRootClassName(immersiveTerminalActive)}
       data-conductor-session-terminal={SESSION_TERMINAL_IMPLEMENTATION}
     >
       <Tabs

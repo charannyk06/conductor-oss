@@ -33,6 +33,7 @@ import { ScrollArea } from "@/components/ui/ScrollArea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { cn } from "@/lib/cn";
 import { selectPreviewAutoConnectCandidate } from "@/lib/previewAutoConnect";
+import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,
@@ -1845,7 +1846,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             ) : null}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#0f1012] p-3">
+          <div className={`min-h-0 flex-1 overflow-auto bg-[#0f1012] p-3 ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
             <div className="flex h-full min-h-[min(200px,45vh)] w-full items-center justify-center lg:min-h-[260px]">
               {loading ? (
                 <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
@@ -1858,7 +1859,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                   tabIndex={status?.connected ? 0 : -1}
                   onKeyDown={handlePreviewKeyDown}
                   onPaste={handlePreviewPaste}
-                  className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[10px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1012]"
+                  className={`relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[10px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0f1012] ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}
                 >
                   <img
                     ref={imageRef}

@@ -8,7 +8,6 @@
 import {
   AlertCircle,
   Clipboard,
-  ExternalLink,
   FileUp,
   Loader2,
   RefreshCw,
@@ -1111,23 +1110,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
             <FileUp className="h-3.5 w-3.5" />
           )}
         </Button>
-        {terminalDirectHref ? (
-          <Button
-            asChild
-            size="icon"
-            variant="ghost"
-            className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
-          >
-            <a
-              href={terminalSessionHref}
-              target="_blank"
-              rel="noreferrer"
-              aria-label="Open full terminal page in new tab"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          </Button>
-        ) : null}
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
           <Button
             type="button"
