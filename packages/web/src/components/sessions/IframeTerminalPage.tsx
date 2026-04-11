@@ -6,6 +6,7 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
+import { resolveNativeTerminalWebSocketUrl } from "@/components/sessions/terminal/terminalClientUrls";
 
 type ConnectionInfo = {
   interactive?: boolean;
@@ -52,16 +53,6 @@ const TERMINAL_THEME = {
   brightCyan: "#9fe8e2",
   brightWhite: "#fff8f2",
 } as const;
-
-function resolveWebSocketUrl(pathOrUrl: string): string {
-  if (pathOrUrl.startsWith("ws://") || pathOrUrl.startsWith("wss://")) {
-    return pathOrUrl;
-  }
-  const origin = window.location.protocol === "https:"
-    ? `wss://${window.location.host}`
-    : `ws://${window.location.host}`;
-  return `${origin}${pathOrUrl.startsWith("/") ? pathOrUrl : `/${pathOrUrl}`}`;
-}
 
 export function IframeTerminalPage({
   sessionId,
@@ -164,7 +155,7 @@ export function IframeTerminalPage({
       return;
     }
 
-    const ws = new WebSocket(resolveWebSocketUrl(info.wsUrl));
+    const ws = new WebSocket(resolveNativeTerminalWebSocketUrl(info.wsUrl, window.location.origin));
     ws.binaryType = "arraybuffer";
     socketRef.current = ws;
 
