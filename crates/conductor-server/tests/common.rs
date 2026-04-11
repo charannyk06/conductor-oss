@@ -339,7 +339,9 @@ pub fn ttyd_available() -> bool {
         "/bin/ttyd",
     ];
 
-    candidates.iter().any(|candidate| Path::new(candidate).is_file())
+    candidates
+        .iter()
+        .any(|candidate| Path::new(candidate).is_file())
         || which::which("ttyd").is_ok()
 }
 
