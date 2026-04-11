@@ -6,6 +6,10 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
+import {
+  calculateMobileTerminalViewportMetrics,
+  resolveSessionTerminalViewportOptions,
+} from "@/components/sessions/sessionTerminalUtils";
 import { resolveNativeTerminalWebSocketUrl } from "@/components/sessions/terminal/terminalClientUrls";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 
@@ -80,6 +84,9 @@ export function IframeTerminalPage({
   const cleanupTouchRef = useRef<(() => void) | null>(null);
   const retryAttemptRef = useRef(0);
   const decoderRef = useRef(new TextDecoder());
+  const connectInvokerRef = useRef<(() => void) | null>(null);
+  const waitingForTerminalRef = useRef(false);
+  const loadedOutputRef = useRef<string | null>(null);
   const bridgeScopedSession = useMemo(() => decodeBridgeSessionId(sessionId), [sessionId]);
   const usesRelayTerminal = Boolean(bridgeId?.trim() || bridgeScopedSession);
 
@@ -109,16 +116,6 @@ export function IframeTerminalPage({
     }
   }, []);
 
-  const fitTerminal = useCallback(() => {
-    const terminal = terminalRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) {
-      return null;
-    }
-    fitAddon.fit();
-    return { cols: terminal.cols, rows: terminal.rows };
-  }, []);
-
   const writeTerminalNotice = useCallback((message: string) => {
     const trimmed = message.trim();
     if (!trimmed) {
@@ -127,12 +124,62 @@ export function IframeTerminalPage({
     terminalRef.current?.writeln(`\r\n[Conductor] ${trimmed}`);
   }, []);
 
-  const loadStoredOutput = useCallback(async (outputUrl?: string | null, reason?: string | null) => {
-    if (!outputUrl) {
-      if (reason) {
-        terminalRef.current?.writeln(`\r\n[Conductor] ${reason}`);
-      }
+  const applyTerminalViewport = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
       return;
+    }
+
+    const viewport = resolveSessionTerminalViewportOptions(
+      hostRef.current?.clientWidth
+      ?? (typeof window === "undefined" ? undefined : window.innerWidth),
+    );
+    terminal.options.fontFamily = viewport.fontFamily;
+    terminal.options.fontSize = viewport.fontSize;
+    terminal.options.lineHeight = viewport.lineHeight;
+  }, []);
+
+  const applyKeyboardAwareTerminalHeight = useCallback(() => {
+    const host = hostRef.current;
+    if (typeof window === "undefined" || !host) {
+      return;
+    }
+
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) {
+      return;
+    }
+
+    const { usableHeight, keyboardVisible } = calculateMobileTerminalViewportMetrics(
+      window.innerHeight,
+      visualViewport.height,
+      visualViewport.offsetTop,
+      host.getBoundingClientRect().top,
+    );
+
+    if (!keyboardVisible || usableHeight <= 0) {
+      host.style.removeProperty("height");
+      return;
+    }
+
+    host.style.height = `${Math.max(0, Math.round(usableHeight))}px`;
+  }, []);
+
+  const fitTerminal = useCallback(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) {
+      return null;
+    }
+    applyKeyboardAwareTerminalHeight();
+    applyTerminalViewport();
+    fitAddon.fit();
+    return { cols: terminal.cols, rows: terminal.rows };
+  }, [applyKeyboardAwareTerminalHeight, applyTerminalViewport]);
+
+  const loadStoredOutput = useCallback(async (outputUrl?: string | null): Promise<boolean> => {
+    if (!outputUrl) {
+      return false;
     }
     try {
       const response = await fetch(outputUrl, { cache: "no-store" });
@@ -141,14 +188,40 @@ export function IframeTerminalPage({
         throw new Error(payload?.error ?? `Failed to load terminal output (${response.status})`);
       }
       const output = typeof payload?.output === "string" ? payload.output : "";
-      if (output.length > 0) {
-        terminalRef.current?.write(output);
+      if (output.length === 0) {
+        return false;
       }
+      if (loadedOutputRef.current === output) {
+        return true;
+      }
+      loadedOutputRef.current = output;
+      terminalRef.current?.reset();
+      terminalRef.current?.write(output);
+      return true;
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : "Failed to load stored output.";
       writeTerminalNotice(message);
+      return false;
     }
   }, [writeTerminalNotice]);
+
+  const scheduleReconnect = useCallback((message?: string) => {
+    if (!allowReconnectRef.current) {
+      return;
+    }
+    if (message) {
+      writeTerminalNotice(message);
+    }
+    if (retryAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      return;
+    }
+    retryAttemptRef.current += 1;
+    const delay = Math.min(RECONNECT_MAX_DELAY_MS, 500 * retryAttemptRef.current);
+    clearReconnectTimer();
+    reconnectTimerRef.current = window.setTimeout(() => {
+      connectInvokerRef.current?.();
+    }, delay);
+  }, [clearReconnectTimer, writeTerminalNotice]);
 
   const fetchRelayTerminalUrl = useCallback(async (): Promise<RelayConnectionInfo> => {
     const response = await fetch(
@@ -198,7 +271,16 @@ export function IframeTerminalPage({
     }
 
     if (!info?.wsUrl) {
-      await loadStoredOutput(info?.outputUrl, info?.reason ?? "Session is not running.");
+      const hasOutput = await loadStoredOutput(info?.outputUrl);
+      if (hasOutput) {
+        waitingForTerminalRef.current = false;
+        return;
+      }
+      if (!waitingForTerminalRef.current) {
+        waitingForTerminalRef.current = true;
+        writeTerminalNotice("Waiting for the live terminal to attach.");
+      }
+      scheduleReconnect();
       return;
     }
 
@@ -211,6 +293,8 @@ export function IframeTerminalPage({
 
     ws.onopen = () => {
       retryAttemptRef.current = 0;
+      waitingForTerminalRef.current = false;
+      loadedOutputRef.current = null;
       decoderRef.current = new TextDecoder();
       const geometry = fitTerminal();
       if (relayConnection) {
@@ -265,6 +349,7 @@ export function IframeTerminalPage({
         const payload = JSON.parse(text) as ControlMessage;
         switch (payload.type) {
           case "ready":
+            waitingForTerminalRef.current = false;
             return;
           case "cwd":
             return;
@@ -288,7 +373,7 @@ export function IframeTerminalPage({
       );
     };
 
-    ws.onclose = async () => {
+    ws.onclose = () => {
       if (socketRef.current === ws) {
         socketRef.current = null;
       }
@@ -299,34 +384,55 @@ export function IframeTerminalPage({
         writeTerminalNotice("Terminal disconnected.");
         return;
       }
-      retryAttemptRef.current += 1;
-      const delay = Math.min(RECONNECT_MAX_DELAY_MS, 500 * retryAttemptRef.current);
-      clearReconnectTimer();
-      reconnectTimerRef.current = window.setTimeout(() => {
-        void connect().catch((nextError) => {
-          writeTerminalNotice(
-            nextError instanceof Error ? nextError.message : "Failed to reconnect terminal.",
-          );
-        });
-      }, delay);
+      scheduleReconnect();
     };
   }, [
-    clearReconnectTimer,
-    fitTerminal,
-    loadStoredOutput,
     tokenUrl,
+    loadStoredOutput,
+    scheduleReconnect,
     usesRelayTerminal,
     fetchRelayTerminalUrl,
+    fitTerminal,
     encodeResizeFrame,
     writeTerminalNotice,
   ]);
 
+  const applyGeometry = useCallback(() => {
+    const geometry = fitTerminal();
+    const socket = socketRef.current;
+    if (!geometry || !socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (usesRelayTerminal) {
+      socket.send(encodeResizeFrame(geometry.cols, geometry.rows));
+    } else {
+      socket.send(JSON.stringify({
+        type: "resize",
+        cols: geometry.cols,
+        rows: geometry.rows,
+      }));
+    }
+  }, [encodeResizeFrame, fitTerminal, usesRelayTerminal]);
+
   useEffect(() => {
+    connectInvokerRef.current = () => {
+      void connect().catch((nextError) => {
+        scheduleReconnect(
+          nextError instanceof Error ? nextError.message : "Failed to connect terminal.",
+        );
+      });
+    };
+  }, [connect, scheduleReconnect]);
+
+  useEffect(() => {
+    const initialViewport = resolveSessionTerminalViewportOptions(
+      typeof window === "undefined" ? undefined : window.innerWidth,
+    );
     const terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: "var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-      fontSize: 13,
-      lineHeight: 1.2,
+      fontFamily: initialViewport.fontFamily,
+      fontSize: initialViewport.fontSize,
+      lineHeight: initialViewport.lineHeight,
       convertEol: true,
       scrollback: 5000,
       allowTransparency: false,
@@ -345,11 +451,10 @@ export function IframeTerminalPage({
     }
 
     terminal.open(host);
-    fitAddon.fit();
     allowReconnectRef.current = true;
     cleanupTouchRef.current = attachMobileTouchScrollShim(terminal, host);
 
-    terminal.onData((data) => {
+    const dataSubscription = terminal.onData((data) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
@@ -362,30 +467,34 @@ export function IframeTerminalPage({
     });
 
     const resizeObserver = new ResizeObserver(() => {
-      const geometry = fitTerminal();
-      const socket = socketRef.current;
-      if (!geometry || !socket || socket.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      if (usesRelayTerminal) {
-        socket.send(encodeResizeFrame(geometry.cols, geometry.rows));
-      } else {
-        socket.send(JSON.stringify({
-          type: "resize",
-          cols: geometry.cols,
-          rows: geometry.rows,
-        }));
-      }
+      applyGeometry();
     });
     resizeObserver.observe(host);
+    const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        applyGeometry();
+      }
+    };
 
-    void connect().catch((nextError) => {
-      writeTerminalNotice(nextError instanceof Error ? nextError.message : "Failed to connect terminal.");
+    window.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("scroll", applyGeometry);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    window.requestAnimationFrame(() => {
+      applyGeometry();
+      connectInvokerRef.current?.();
     });
 
     return () => {
       allowReconnectRef.current = false;
+      dataSubscription.dispose();
       resizeObserver.disconnect();
+      window.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("scroll", applyGeometry);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       cleanupTouchRef.current?.();
       cleanupTouchRef.current = null;
       clearReconnectTimer();
@@ -395,14 +504,12 @@ export function IframeTerminalPage({
       fitAddonRef.current = null;
     };
   }, [
+    applyGeometry,
     clearReconnectTimer,
     closeSocket,
     connect,
     encodeInputFrame,
-    encodeResizeFrame,
-    fitTerminal,
     usesRelayTerminal,
-    writeTerminalNotice,
   ]);
 
   return (
