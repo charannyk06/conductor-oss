@@ -87,6 +87,7 @@ export function IframeTerminalPage({
   const connectInvokerRef = useRef<(() => void) | null>(null);
   const waitingForTerminalRef = useRef(false);
   const loadedOutputRef = useRef<string | null>(null);
+  const hasConnectedOnceRef = useRef(false);
   const bridgeScopedSession = useMemo(() => decodeBridgeSessionId(sessionId), [sessionId]);
   const usesRelayTerminal = Boolean(bridgeId?.trim() || bridgeScopedSession);
 
@@ -296,6 +297,11 @@ export function IframeTerminalPage({
       waitingForTerminalRef.current = false;
       loadedOutputRef.current = null;
       decoderRef.current = new TextDecoder();
+      if (hasConnectedOnceRef.current) {
+        terminalRef.current?.reset();
+      } else {
+        hasConnectedOnceRef.current = true;
+      }
       const geometry = fitTerminal();
       if (relayConnection) {
         ws.send(encodeResizeFrame(geometry?.cols ?? 120, geometry?.rows ?? 32));

@@ -91,6 +91,31 @@ type terminalAttachError struct {
 	err    error
 }
 
+type backendTerminalProtocol string
+
+const (
+	backendTerminalProtocolNative backendTerminalProtocol = "native"
+	backendTerminalProtocolTTYD   backendTerminalProtocol = "ttyd"
+)
+
+type terminalTokenPayload struct {
+	WSURL     string `json:"wsUrl"`
+	TtydWSURL string `json:"ttydWsUrl"`
+	Error     string `json:"error"`
+}
+
+type nativeTerminalClientMessage struct {
+	Type string `json:"type"`
+	Cols int    `json:"cols,omitempty"`
+	Rows int    `json:"rows,omitempty"`
+	Data string `json:"data,omitempty"`
+}
+
+type relayResizePayload struct {
+	Columns int `json:"columns"`
+	Rows    int `json:"rows"`
+}
+
 func (e *terminalAttachError) Error() string {
 	if e == nil {
 		return "terminal attach failed"
@@ -564,54 +589,37 @@ func terminalBridgeEndpoint(relayURL, terminalID, refreshToken string) (string, 
 	return base.String(), nil
 }
 
-func fetchSessionTerminalWSURL(sessionID string) (string, error) {
-	if strings.TrimSpace(sessionID) == "" {
-		return "", fmt.Errorf("session id is required")
-	}
-
-	endpoint := fmt.Sprintf(
-		"http://127.0.0.1:4749/api/sessions/%s/terminal/token",
-		url.PathEscape(strings.TrimSpace(sessionID)),
-	)
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("build terminal token request: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", &terminalAttachError{err: fmt.Errorf("request terminal token: %w", err)}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", &terminalAttachError{err: fmt.Errorf("read terminal token response: %w", err)}
-	}
-
-	var payload struct {
-		TtydWSURL string `json:"ttydWsUrl"`
-		Error     string `json:"error"`
-	}
+func resolveTerminalTokenPayload(body []byte, statusCode int) (string, backendTerminalProtocol, error) {
+	var payload terminalTokenPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", &terminalAttachError{err: fmt.Errorf("decode terminal token response: %w", err)}
+		return "", "", &terminalAttachError{err: fmt.Errorf("decode terminal token response: %w", err)}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if statusCode < 200 || statusCode >= 300 {
 		message := strings.TrimSpace(payload.Error)
 		if message == "" {
-			message = fmt.Sprintf("terminal token request failed with status %d", resp.StatusCode)
+			message = fmt.Sprintf("terminal token request failed with status %d", statusCode)
 		}
-		return "", &terminalAttachError{
-			status: resp.StatusCode,
+		return "", "", &terminalAttachError{
+			status: statusCode,
 			err:    errors.New(message),
 		}
 	}
 
+	rawURL := strings.TrimSpace(payload.WSURL)
+	protocol := backendTerminalProtocolNative
+	if rawURL == "" {
+		rawURL = strings.TrimSpace(payload.TtydWSURL)
+		protocol = backendTerminalProtocolTTYD
+	}
+	if rawURL == "" {
+		return "", "", &terminalAttachError{err: errors.New("terminal token response missing websocket url")}
+	}
+
 	base, _ := url.Parse("http://127.0.0.1:4749")
-	resolved, err := base.Parse(strings.TrimSpace(payload.TtydWSURL))
+	resolved, err := base.Parse(rawURL)
 	if err != nil {
-		return "", &terminalAttachError{err: fmt.Errorf("parse ttyd websocket url: %w", err)}
+		return "", "", &terminalAttachError{err: fmt.Errorf("parse terminal websocket url: %w", err)}
 	}
 
 	switch resolved.Scheme {
@@ -621,10 +629,38 @@ func fetchSessionTerminalWSURL(sessionID string) (string, error) {
 		resolved.Scheme = "wss"
 	case "ws", "wss":
 	default:
-		return "", &terminalAttachError{err: fmt.Errorf("unsupported ttyd websocket scheme %q", resolved.Scheme)}
+		return "", "", &terminalAttachError{err: fmt.Errorf("unsupported terminal websocket scheme %q", resolved.Scheme)}
 	}
 
-	return resolved.String(), nil
+	return resolved.String(), protocol, nil
+}
+
+func fetchSessionTerminalWSURL(sessionID string) (string, backendTerminalProtocol, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return "", "", fmt.Errorf("session id is required")
+	}
+
+	endpoint := fmt.Sprintf(
+		"http://127.0.0.1:4749/api/sessions/%s/terminal/token",
+		url.PathEscape(strings.TrimSpace(sessionID)),
+	)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("build terminal token request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", &terminalAttachError{err: fmt.Errorf("request terminal token: %w", err)}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", &terminalAttachError{err: fmt.Errorf("read terminal token response: %w", err)}
+	}
+
+	return resolveTerminalTokenPayload(body, resp.StatusCode)
 }
 
 func shouldRetryTerminalAttach(err error) bool {
@@ -651,20 +687,20 @@ func shouldRetryTerminalAttach(err error) bool {
 	return false
 }
 
-func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.Conn, error) {
+func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.Conn, backendTerminalProtocol, error) {
 	var lastErr error
 	backoff := 250 * time.Millisecond
 
 	for attempt := 0; attempt < terminalAttachMaxAttempts; attempt++ {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		}
 
-		backendEndpoint, err := fetchSessionTerminalWSURL(sessionID)
+		backendEndpoint, protocol, err := fetchSessionTerminalWSURL(sessionID)
 		if err == nil {
 			conn, _, dialErr := websocket.DefaultDialer.DialContext(ctx, backendEndpoint, nil)
 			if dialErr == nil {
-				return conn, nil
+				return conn, protocol, nil
 			}
 			err = &terminalAttachError{err: fmt.Errorf("connect backend terminal socket: %w", dialErr)}
 		}
@@ -683,7 +719,7 @@ func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.C
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-timer.C:
 		}
 		if backoff < 2*time.Second {
@@ -694,33 +730,32 @@ func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.C
 	if lastErr == nil {
 		lastErr = errors.New("backend terminal connection failed")
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }
 
-func proxyTerminalSession(
-	ctx context.Context,
-	relayURL string,
-	refreshToken string,
-	terminalID string,
-	sessionID string,
-) error {
-	backendConn, err := connectBackendTerminal(ctx, sessionID)
+func writeNativeTerminalMessage(conn *websocket.Conn, payload nativeTerminalClientMessage) error {
+	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode native terminal message: %w", err)
 	}
-	defer backendConn.Close()
-
-	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
-	if err != nil {
-		return err
+	if err := conn.WriteMessage(websocket.TextMessage, encoded); err != nil {
+		return fmt.Errorf("write native terminal message: %w", err)
 	}
+	return nil
+}
 
-	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
-	if err != nil {
-		return fmt.Errorf("connect relay terminal socket: %w", err)
+func parseRelayResizeMessage(payload []byte) (int, int, error) {
+	var resize relayResizePayload
+	if err := json.Unmarshal(payload, &resize); err != nil {
+		return 0, 0, fmt.Errorf("decode relay resize message: %w", err)
 	}
-	defer relayConn.Close()
+	if resize.Columns <= 0 || resize.Rows <= 0 {
+		return 0, 0, fmt.Errorf("relay resize message missing terminal dimensions")
+	}
+	return resize.Columns, resize.Rows, nil
+}
 
+func proxyTTYDTerminalSession(ctx context.Context, backendConn *websocket.Conn, relayConn *websocket.Conn) error {
 	errCh := make(chan error, 2)
 
 	forward := func(srcName string, src *websocket.Conn, dstName string, dst *websocket.Conn) {
@@ -758,6 +793,172 @@ func proxyTerminalSession(
 		}
 		return err
 	}
+}
+
+func proxyNativeTerminalSession(ctx context.Context, backendConn *websocket.Conn, relayConn *websocket.Conn) error {
+	errCh := make(chan error, 2)
+
+	go func() {
+		helloSent := false
+		cols := 120
+		rows := 32
+		for {
+			msgType, data, err := relayConn.ReadMessage()
+			if err != nil {
+				errCh <- fmt.Errorf("relay terminal read: %w", err)
+				return
+			}
+			switch msgType {
+			case websocket.BinaryMessage:
+				if len(data) == 0 {
+					continue
+				}
+				command := data[0]
+				payload := data[1:]
+				switch command {
+				case '1':
+					nextCols, nextRows, err := parseRelayResizeMessage(payload)
+					if err != nil {
+						continue
+					}
+					cols = nextCols
+					rows = nextRows
+					messageType := "resize"
+					if !helloSent {
+						messageType = "hello"
+						helloSent = true
+					}
+					if err := writeNativeTerminalMessage(backendConn, nativeTerminalClientMessage{
+						Type: messageType,
+						Cols: cols,
+						Rows: rows,
+					}); err != nil {
+						errCh <- fmt.Errorf("backend terminal write: %w", err)
+						return
+					}
+				case '0':
+					if !helloSent {
+						if err := writeNativeTerminalMessage(backendConn, nativeTerminalClientMessage{
+							Type: "hello",
+							Cols: cols,
+							Rows: rows,
+						}); err != nil {
+							errCh <- fmt.Errorf("backend terminal write: %w", err)
+							return
+						}
+						helloSent = true
+					}
+					if len(payload) == 0 {
+						continue
+					}
+					if err := writeNativeTerminalMessage(backendConn, nativeTerminalClientMessage{
+						Type: "input",
+						Data: string(payload),
+					}); err != nil {
+						errCh <- fmt.Errorf("backend terminal write: %w", err)
+						return
+					}
+				case '2', '3':
+					continue
+				default:
+					continue
+				}
+			case websocket.TextMessage:
+				nextCols, nextRows, err := parseRelayResizeMessage(data)
+				if err != nil {
+					continue
+				}
+				cols = nextCols
+				rows = nextRows
+				messageType := "resize"
+				if !helloSent {
+					messageType = "hello"
+					helloSent = true
+				}
+				if err := writeNativeTerminalMessage(backendConn, nativeTerminalClientMessage{
+					Type: messageType,
+					Cols: cols,
+					Rows: rows,
+				}); err != nil {
+					errCh <- fmt.Errorf("backend terminal write: %w", err)
+					return
+				}
+			case websocket.CloseMessage:
+				_ = backendConn.WriteMessage(websocket.CloseMessage, data)
+				errCh <- io.EOF
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			msgType, data, err := backendConn.ReadMessage()
+			if err != nil {
+				errCh <- fmt.Errorf("backend terminal read: %w", err)
+				return
+			}
+			switch msgType {
+			case websocket.TextMessage:
+				if err := relayConn.WriteMessage(websocket.TextMessage, data); err != nil {
+					errCh <- fmt.Errorf("relay terminal write: %w", err)
+					return
+				}
+			case websocket.BinaryMessage:
+				frame := make([]byte, 1+len(data))
+				frame[0] = '0'
+				copy(frame[1:], data)
+				if err := relayConn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+					errCh <- fmt.Errorf("relay terminal write: %w", err)
+					return
+				}
+			case websocket.CloseMessage:
+				_ = relayConn.WriteMessage(websocket.CloseMessage, data)
+				errCh <- io.EOF
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+}
+
+func proxyTerminalSession(
+	ctx context.Context,
+	relayURL string,
+	refreshToken string,
+	terminalID string,
+	sessionID string,
+) error {
+	backendConn, protocol, err := connectBackendTerminal(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer backendConn.Close()
+
+	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
+	if err != nil {
+		return err
+	}
+
+	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("connect relay terminal socket: %w", err)
+	}
+	defer relayConn.Close()
+
+	if protocol == backendTerminalProtocolTTYD {
+		return proxyTTYDTerminalSession(ctx, backendConn, relayConn)
+	}
+	return proxyNativeTerminalSession(ctx, backendConn, relayConn)
 }
 
 type apiResponse struct {

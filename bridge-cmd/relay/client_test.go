@@ -46,3 +46,36 @@ func TestShouldRetryTerminalAttach(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveTerminalTokenPayloadPrefersNativeWSURL(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"wsUrl":"/api/sessions/session-123/terminal/ws?token=abc"}`)
+	wsURL, protocol, err := resolveTerminalTokenPayload(payload, http.StatusOK)
+	if err != nil {
+		t.Fatalf("resolveTerminalTokenPayload returned error: %v", err)
+	}
+	if protocol != backendTerminalProtocolNative {
+		t.Fatalf("protocol = %q, want %q", protocol, backendTerminalProtocolNative)
+	}
+	want := "ws://127.0.0.1:4749/api/sessions/session-123/terminal/ws?token=abc"
+	if wsURL != want {
+		t.Fatalf("wsURL = %q, want %q", wsURL, want)
+	}
+}
+
+func TestResolveTerminalTokenPayloadAcceptsLegacyTTYDURL(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"ttydWsUrl":"ws://127.0.0.1:7681/ws"}`)
+	wsURL, protocol, err := resolveTerminalTokenPayload(payload, http.StatusOK)
+	if err != nil {
+		t.Fatalf("resolveTerminalTokenPayload returned error: %v", err)
+	}
+	if protocol != backendTerminalProtocolTTYD {
+		t.Fatalf("protocol = %q, want %q", protocol, backendTerminalProtocolTTYD)
+	}
+	if wsURL != "ws://127.0.0.1:7681/ws" {
+		t.Fatalf("wsURL = %q, want %q", wsURL, "ws://127.0.0.1:7681/ws")
+	}
+}
