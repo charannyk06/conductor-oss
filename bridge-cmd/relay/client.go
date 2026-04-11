@@ -28,7 +28,7 @@ const (
 	defaultScope              = "conductor-bridge-control"
 	defaultHeartbeatInterval  = 30 * time.Second
 	maxReconnectBackoff       = 30 * time.Second
-	terminalAttachMaxAttempts = 5
+	terminalAttachMaxAttempts = 12
 	ttydPortRangeStart        = 7681
 	ttydPortRangeEnd          = 8699
 	bridgeProxyMetaKey        = "$bridgeProxy"
