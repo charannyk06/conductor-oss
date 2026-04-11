@@ -134,7 +134,7 @@ struct ProxiedPreviewResponse {
     body_base64: Option<String>,
 }
 
-const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(8);
+const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Maximum number of output chunks buffered while the browser peer is paused.
 const TERMINAL_PAUSE_BUFFER_CAPACITY: usize = 256;
 /// ttyd protocol command bytes (first byte of binary WebSocket message).
