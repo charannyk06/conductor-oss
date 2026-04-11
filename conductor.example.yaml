@@ -70,7 +70,7 @@ projects:
         permissions: default
     # Optional project dev server for preview/test loop
     # devServer:
-    #   command: pnpm dev          # optional; leave blank if you run the app yourself
+    #   command: bun dev           # optional; leave blank if you run the app yourself
     #   cwd: apps/web             # optional; relative to the project root
     #   port: 3000                # optional; used for auto-preview + PORT env injection
     #   host: 127.0.0.1           # optional; defaults to 127.0.0.1

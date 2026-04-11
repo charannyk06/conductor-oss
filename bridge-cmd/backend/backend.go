@@ -571,9 +571,12 @@ func inferCliBinaryVersion(binaryPath string) string {
 
 func inferCliInstallMode(packageRoot string) string {
 	normalizedRoot := normalizeFsPath(packageRoot)
-	parentWorkspaceLockfile := filepath.Join(packageRoot, "..", "..", "pnpm-lock.yaml")
+	parentWorkspaceDir := filepath.Join(packageRoot, "..", "..")
 	if strings.HasSuffix(normalizedRoot, "/packages/cli") {
-		if _, err := os.Stat(parentWorkspaceLockfile); err == nil {
+		if _, err := os.Stat(filepath.Join(parentWorkspaceDir, "bun.lock")); err == nil {
+			return "source"
+		}
+		if _, err := os.Stat(filepath.Join(parentWorkspaceDir, "pnpm-lock.yaml")); err == nil {
 			return "source"
 		}
 	}

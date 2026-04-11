@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   isLoopbackHost,
   quoteWindowsCliArg,
+  resolveDashboardPackageManager,
   resolveLocalDashboardAuthEnv,
   resolveRustBackendLaunch,
 } from "../commands/start.js";
@@ -66,4 +67,27 @@ test("quoteWindowsCliArg escapes quotes and trailing backslashes", () => {
   assert.equal(quoteWindowsCliArg("C:\\Program Files\\Conductor"), "\"C:\\Program Files\\Conductor\"");
   assert.equal(quoteWindowsCliArg("C:\\path with spaces\\"), "\"C:\\path with spaces\\\\\"");
   assert.equal(quoteWindowsCliArg("say \"hello\""), "\"say \\\"hello\\\"\"");
+});
+
+test("resolveDashboardPackageManager honors the workspace packageManager field", () => {
+  const root = mkdtempSync(join(tmpdir(), "conductor-dashboard-pm-"));
+
+  try {
+    mkdirSync(join(root, "packages", "web"), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ packageManager: "bun@1.2.0" }),
+    );
+
+    assert.equal(resolveDashboardPackageManager(join(root, "packages", "web")), "bun");
+
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ packageManager: "pnpm@9.0.0" }),
+    );
+
+    assert.equal(resolveDashboardPackageManager(join(root, "packages", "web")), "pnpm");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

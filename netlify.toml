@@ -1,5 +1,5 @@
 [build]
-  command = "pnpm install --frozen-lockfile && pnpm --filter @conductor-oss/core build && pnpm --filter @conductor-oss/web build"
+  command = "bun install --frozen-lockfile && bun run --cwd packages/core build && bun run --cwd packages/web build"
   publish = "packages/web/.next"
 
 [build.environment]
