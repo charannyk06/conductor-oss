@@ -80,7 +80,7 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        source: "/embed/terminal/:path*",
+        source: "/api/sessions/:path*/terminal/ttyd",
         headers: embeddedTerminalHeaders,
       },
     ];

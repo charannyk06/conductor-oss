@@ -147,15 +147,4 @@ declare global {
 interface RouteContext<AppRouteHandlerRoute extends AppRouteHandlerRoutes> {
     params: Promise<ParamMap[AppRouteHandlerRoute]>
   }
-
-  interface Window {
-    __conductorDispatcherDebug?: {
-      sessionId: string;
-      getState: () => unknown;
-    };
-    __conductorSessionPreviewDebug?: {
-      sessionId: string;
-      getState: () => unknown;
-    };
-  }
 }

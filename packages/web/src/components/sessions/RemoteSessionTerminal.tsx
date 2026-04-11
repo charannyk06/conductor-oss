@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * Relay WebSocket + xterm.js terminal, kept as an alternate full-page surface.
- * The product path inside SessionDetail is still the iframe shell, but that shell
- * now renders our first-party xterm client rather than proxied terminal HTML.
+ * Relay WebSocket + xterm.js terminal — **not** wired into `SessionDetail` today.
+ * The product path is the ttyd iframe (`SessionTerminal` via `sessionTerminalRouting`).
+ * Kept for optional bridge/relay experiments; do not use for Polyscope-style embeds
+ * without a deliberate routing change.
  */
 import dynamic from "next/dynamic";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
