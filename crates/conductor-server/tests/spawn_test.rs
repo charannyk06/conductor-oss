@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn spawn_session_runs_from_queue_to_live_native_state() {
-    let harness = TestHarness::new("conductor-spawn-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-spawn-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

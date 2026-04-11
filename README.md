@@ -153,7 +153,7 @@ Agents run in their real terminal UI.
 - Codex runs as Codex
 - Gemini runs as Gemini
 
-Conductor uses ttyd-backed PTYs so reconnects, resize events, restore, and mobile terminal behavior act like a real terminal session.
+Conductor uses the native PTY pipeline so reconnects, resize events, restore, and mobile terminal behavior act like a real terminal session.
 
 <div align="center">
 

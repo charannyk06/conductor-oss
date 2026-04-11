@@ -3,7 +3,7 @@ import type { SessionTerminalProps } from "@/components/sessions/terminal/termin
 
 /**
  * The dashboard terminal stays iframe-based, but the iframe now renders a
- * first-party xterm.js client instead of proxied ttyd HTML.
+ * first-party xterm.js client instead of a proxied terminal HTML shell.
  */
 export const SESSION_TERMINAL_IMPLEMENTATION = "native-iframe" as const;
 

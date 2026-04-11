@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn board_automation_retries_ready_cards_without_new_board_events() {
         let root = std::env::temp_dir().join(format!("conductor-runtime-test-{}", Uuid::new_v4()));
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
         let project_root = root.join("repo");
@@ -519,7 +519,7 @@ mod tests {
                 ProjectConfig {
                     path: project_root.to_string_lossy().to_string(),
                     agent: Some("codex".to_string()),
-                    runtime: Some("ttyd".to_string()),
+                    runtime: Some("direct".to_string()),
                     ..ProjectConfig::default()
                 },
             )]),
@@ -623,7 +623,7 @@ mod tests {
             "conductor-runtime-dispatcher-launch-test-{}",
             Uuid::new_v4()
         ));
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -642,7 +642,7 @@ mod tests {
                 ProjectConfig {
                     path: project_root.to_string_lossy().to_string(),
                     agent: Some("codex".to_string()),
-                    runtime: Some("ttyd".to_string()),
+                    runtime: Some("direct".to_string()),
                     ..ProjectConfig::default()
                 },
             )]),

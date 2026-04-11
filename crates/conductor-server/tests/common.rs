@@ -21,10 +21,6 @@ use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-pub fn ttyd_available() -> bool {
-    which::which("ttyd").is_ok()
-}
-
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'\"'\"'"#))
 }
@@ -243,7 +239,7 @@ pub async fn build_state(
     project_id: &str,
 ) -> Arc<AppState> {
     if project.runtime.is_none() {
-        project.runtime = Some("ttyd".to_string());
+        project.runtime = Some("direct".to_string());
     }
 
     let config = ConductorConfig {

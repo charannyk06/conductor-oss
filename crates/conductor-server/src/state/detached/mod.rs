@@ -37,7 +37,7 @@ impl AppState {
         native_runtime::spawn_native_runtime(self, executor, session_id, options).await
     }
 
-    pub(crate) async fn archive_stale_non_ttyd_sessions(self: &Arc<Self>) {
+    pub(crate) async fn archive_stale_unrestorable_sessions(self: &Arc<Self>) {
         let now = chrono::Utc::now().to_rfc3339();
         let session_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
@@ -77,7 +77,7 @@ impl AppState {
 
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
         // Native PTY sessions stay attached while the backend stays alive.
-        // After a backend restart there is no detached ttyd process to recover,
+        // After a backend restart there is no recoverable detached runtime to restore,
         // so stale loaded sessions are archived during startup instead.
     }
 

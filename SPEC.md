@@ -1,7 +1,7 @@
 # Native iframe terminal spec
 
 ## Goal
-Replace Conductor OSS terminal delivery with a native PTY pipeline, xterm.js in a first-party iframe, no ttyd anywhere.
+Replace Conductor OSS terminal delivery with a native PTY pipeline, xterm.js in a first-party iframe, no legacy proxy terminal layer in the dashboard path.
 
 ## Product requirements
 - Real PTY shell in the browser via xterm.js
@@ -10,7 +10,7 @@ Replace Conductor OSS terminal delivery with a native PTY pipeline, xterm.js in 
 - Reconnect restores visible terminal state immediately
 - Mobile-friendly sizing and touch scroll
 - Keep iframe architecture in the dashboard
-- Remove ttyd launch, proxy, HTML mutation, and browser protocol code
+- Remove the legacy terminal launch, proxy, HTML mutation, and browser protocol code from the dashboard path
 
 ## Architecture
 
@@ -20,10 +20,10 @@ Replace Conductor OSS terminal delivery with a native PTY pipeline, xterm.js in 
 - Expose a native terminal WebSocket route at `/api/sessions/{id}/terminal/ws`.
 - Keep `/api/sessions/{id}/terminal/token` as the connection bootstrap endpoint, but change the payload to native terminal URLs.
 - Keep `/api/sessions/{id}/terminal/snapshot` for fallback and transcript restore.
-- Archive stale loaded sessions on backend restart instead of trying to revive ttyd processes.
+- Archive stale loaded sessions on backend restart instead of trying to revive detached legacy terminal processes.
 
 ### Frontend
-- Replace ttyd HTML iframe loading with a first-party embedded terminal page under `/embed/terminal/[id]`.
+- Replace the old proxied terminal HTML iframe loading with a first-party embedded terminal page under `/embed/terminal/[id]`.
 - The embedded page mounts xterm.js directly, fetches terminal connection info from `/api/sessions/{id}/terminal/token`, opens the terminal websocket, and renders reconnect and fallback states.
 - The dashboard session panel still embeds an iframe. It no longer injects auth, resize, or relay shims into third-party HTML.
 
@@ -62,20 +62,20 @@ Server to client messages:
 - Browser disconnect must not kill the PTY.
 - Live output continues to update `terminal_hosts` state and durable capture files.
 - Reconnect sends the current restore snapshot first, then resumes live stream.
-- Backend restart does not attempt ttyd-style session revival. Sessions loaded as active without an attached runtime are archived as stale.
+- Backend restart does not attempt detached terminal revival. Sessions loaded as active without an attached runtime are archived as stale.
 
 ## Implementation plan
 
 ### 1. Backend runtime cutover
-- Replace `state/detached/ttyd_launcher.rs` with a native runtime launcher that calls `executor.spawn()` directly.
+- Replace the old detached launcher with a native runtime launcher that calls `executor.spawn()` directly.
 - Set `SpawnOptions.interactive = executor.supports_direct_terminal_ui()`.
 - Mark metadata with `runtimeMode=direct`.
 - Set `streams_terminal_bytes = true` when the executor handle has `terminal_rx`.
-- Remove ttyd pid, port, ws, tunnel metadata.
+- Remove legacy terminal pid, port, ws, and tunnel metadata.
 
 ### 2. Backend terminal routes
 - Rewrite `routes/terminal.rs` to native routes only.
-- Remove ttyd frontend HTTP route and ttyd websocket protocol handling.
+- Remove the old frontend HTTP route and legacy websocket protocol handling.
 - Add `/api/sessions/{id}/terminal/ws` websocket handler.
 - Reuse terminal token signing and snapshot building.
 
@@ -92,8 +92,8 @@ Server to client messages:
 - Preserve queued terminal inserts by sending `/api/sessions/{id}/keys` directly from the host component.
 
 ### 5. Cleanup
-- Delete ttyd-specific Next routes and HTML patch helpers.
-- Delete ttyd protocol files and tests.
+- Delete legacy terminal-specific Next routes and HTML patch helpers.
+- Delete legacy dashboard protocol files and tests that only existed for the old path.
 - Update comments, runtime labels, and CSP frame exceptions.
 
 ## Verification
@@ -111,4 +111,4 @@ Server to client messages:
 ## Non-goals in this cut
 - Multi-viewer terminal fanout semantics beyond the existing broadcast stream
 - Hosted browser-side websocket proxying outside the existing dashboard origin setup
-- Keeping backward compatibility for ttyd URLs or ttyd HTML routes
+- Keeping backward compatibility for removed dashboard terminal URLs or the old embedded HTML route

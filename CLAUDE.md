@@ -15,7 +15,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 - **Backend:** Rust (axum, tokio, sqlx/SQLite). Repo dev scripts use port 4749; the launcher defaults to 4748 and forwards `CONDUCTOR_BACKEND_URL` / `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` into the dashboard.
 - **Dashboard:** Next.js (packages/web). Repo dev scripts use port 3000; the launcher defaults to 4747.
 - **CLI:** Node.js launcher + Rust native binary
-- **Runtime:** ttyd-first PTY-based session management; regular sessions stay terminal-first and only ACP dispatcher sessions use the dispatcher conversation pane
+- **Runtime:** native PTY-based session management; regular sessions stay terminal-first and only ACP dispatcher sessions use the dispatcher conversation pane
 - **Persistence:** SQLite in `.conductor/conductor.db` + Markdown files
 - **Bridge/Access:** optional relay, paired-device bridge, and dashboard access-control flows in the same repo
 
@@ -46,7 +46,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 
 - `crates/conductor-server/src/routes/` - route handlers (sessions, tasks, boards, github, terminal, attachments, access, notifications, etc.)
 - `crates/conductor-server/src/state/session_manager.rs` - Core session lifecycle
-- `crates/conductor-server/src/state/detached/` - detached runtime coordination, ttyd launcher, and PTY streaming
+- `crates/conductor-server/src/state/detached/` - detached runtime coordination and PTY streaming
 - `crates/conductor-server/src/runtime.rs` - Runtime coordination
 - `crates/conductor-executors/src/agents/` - agent adapters
 - `crates/conductor-relay/src/` - relay and bridge transport server
@@ -135,7 +135,7 @@ Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 1. User creates/moves task on Kanban board (`CONDUCTOR.md`)
 2. File watcher detects change, parses board
 3. Dispatcher picks up "Ready to Dispatch" tasks
-4. Executor launches a ttyd-backed PTY session and streams the native agent terminal
+4. Executor launches a native PTY session and streams the agent terminal
 5. Session manager tracks lifecycle (spawn, running, complete, failed)
 6. Dashboard streams updates via SSE
 7. On completion: diff captured, task moved to Done

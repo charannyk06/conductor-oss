@@ -494,7 +494,7 @@ pub struct LiveSessionHandle {
     pub kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     /// Retained senders preserved across repeated detach and reattach cycles.
     /// Each detach moves the active channels into these pools instead of
-    /// dropping them. That keeps the original ttyd process monitor alive and
+    /// dropping them. That keeps the original terminal runtime monitor alive and
     /// prevents newer reconnect channels from being dropped on subsequent page
     /// switches or tab throttling.
     pub retained_kill_txs: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,

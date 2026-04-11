@@ -2709,7 +2709,7 @@ mod tests {
             let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
             let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
             // Drain input in background. Hold output_tx open briefly so
-            // tests that use the direct (non-ttyd) runtime path have time to
+            // tests that use the native runtime path have time to
             // call send_to_session before the output consumer marks the
             // session as completed.
             tokio::spawn(async move {
@@ -3045,7 +3045,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
         fs::create_dir_all(repo.join("config")).unwrap();
@@ -3124,9 +3124,10 @@ mod tests {
 
     #[tokio::test]
     async fn send_to_session_records_structured_preference_updates() {
-        // Requires ttyd binary (spawn_with_runtime always uses ttyd).
-        if !crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check"))
-        {
+        // Requires the native terminal runtime path.
+        if !crate::state::terminal_runtime_available(
+            &std::env::temp_dir().join("conductor-native-runtime-check"),
+        ) {
             return;
         }
         let root =
@@ -3241,9 +3242,10 @@ mod tests {
 
     #[tokio::test]
     async fn send_to_session_keeps_acp_context_runtime_only() {
-        // Requires ttyd binary (spawn_with_runtime always uses ttyd).
-        if !crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check"))
-        {
+        // Requires the native terminal runtime path.
+        if !crate::state::terminal_runtime_available(
+            &std::env::temp_dir().join("conductor-native-runtime-check"),
+        ) {
             return;
         }
         let root = std::env::temp_dir().join(format!("conductor-acp-ui-test-{}", Uuid::new_v4()));
@@ -3337,7 +3339,7 @@ mod tests {
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -3402,7 +3404,7 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-dev-server-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
         fs::create_dir_all(root.join(".conductor")).unwrap();
@@ -3465,7 +3467,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-queue-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -3535,7 +3537,7 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-queue-paused-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -3622,7 +3624,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-archive-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
         let cleanup_log = root.join("cleanup.log");
@@ -3754,7 +3756,7 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-resume-tmux-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -3835,7 +3837,7 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-resume-acp-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
-        if !crate::state::ttyd_binary_available(&root) {
+        if !crate::state::terminal_runtime_available(&root) {
             return;
         }
 
@@ -4070,7 +4072,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_session_removes_live_terminal_host_and_ttyd_metadata() {
+    async fn archive_session_removes_live_terminal_host_and_legacy_terminal_metadata() {
         let root =
             std::env::temp_dir().join(format!("conductor-archive-host-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -4310,9 +4312,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_output_consumer_skips_reparsing_for_ttyd_runtime_output() {
-        let root =
-            std::env::temp_dir().join(format!("conductor-ttyd-output-test-{}", Uuid::new_v4()));
+    async fn start_output_consumer_skips_reparsing_for_legacy_runtime_output() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-legacy-runtime-output-test-{}",
+            Uuid::new_v4()
+        ));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -4325,9 +4329,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "ttyd-output".to_string(),
+            "legacy-runtime-output".to_string(),
             "demo".to_string(),
-            Some("session/ttyd-output".to_string()),
+            Some("session/legacy-runtime-output".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -4341,7 +4345,7 @@ mod tests {
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
         state.start_output_consumer(
-            "ttyd-output".to_string(),
+            "legacy-runtime-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
             OutputConsumerConfig {
@@ -4359,7 +4363,7 @@ mod tests {
 
         let updated = timeout(test_wait_timeout(), async {
             loop {
-                let current = state.get_session("ttyd-output").await.unwrap();
+                let current = state.get_session("legacy-runtime-output").await.unwrap();
                 if current
                     .conversation
                     .iter()
@@ -4554,9 +4558,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_live_terminal_uses_ttyd_resize_channel() {
+    async fn resize_live_terminal_uses_runtime_resize_channel() {
         let root = std::env::temp_dir().join(format!(
-            "conductor-ttyd-terminal-resize-test-{}",
+            "conductor-runtime-terminal-resize-test-{}",
             Uuid::new_v4()
         ));
         let repo = root.join("repo");
@@ -4571,9 +4575,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "ttyd-terminal-resize".to_string(),
+            "runtime-terminal-resize".to_string(),
             "demo".to_string(),
-            Some("session/ttyd-terminal-resize".to_string()),
+            Some("session/runtime-terminal-resize".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -4590,17 +4594,22 @@ mod tests {
         let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
-            .attach_terminal_runtime("ttyd-terminal-resize", input_tx, Some(resize_tx), kill_tx)
+            .attach_terminal_runtime(
+                "runtime-terminal-resize",
+                input_tx,
+                Some(resize_tx),
+                kill_tx,
+            )
             .await;
 
         state
-            .resize_live_terminal("ttyd-terminal-resize", 132, 40)
+            .resize_live_terminal("runtime-terminal-resize", 132, 40)
             .await
             .unwrap();
 
         let dimensions = timeout(test_wait_timeout(), resize_rx.recv())
             .await
-            .expect("resize should reach ttyd runtime channel")
+            .expect("resize should reach the runtime channel")
             .expect("resize channel should stay open");
         assert_eq!(
             dimensions,

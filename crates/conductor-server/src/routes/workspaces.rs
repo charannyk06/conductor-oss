@@ -292,7 +292,7 @@ async fn persist_workspace(
     project.agent = request.agent;
     project.agent_config.model = request.agent_model;
     project.agent_config.reasoning_effort = request.agent_reasoning_effort;
-    project.runtime = Some("ttyd".to_string());
+    project.runtime = Some("direct".to_string());
     project.workspace = Some(if request.use_worktree {
         "worktree".to_string()
     } else {

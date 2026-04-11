@@ -121,7 +121,7 @@ const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
 const BRIDGE_REGISTRY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-pub(crate) fn ttyd_binary_available(_workspace_path: &Path) -> bool {
+pub(crate) fn terminal_runtime_available(_workspace_path: &Path) -> bool {
     true
 }
 

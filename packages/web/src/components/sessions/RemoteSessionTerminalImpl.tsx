@@ -211,13 +211,13 @@ export function RemoteSessionTerminal({
   );
   const normalizedRuntimeMode = runtimeMode?.trim().toLowerCase() ?? null;
   const sessionClosed = TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus);
-  const ttydBacked = normalizedRuntimeMode === "ttyd";
-  const expectsRelayTerminal = ttydBacked
+  const relayBacked = normalizedRuntimeMode === "ttyd" || normalizedRuntimeMode === "direct";
+  const expectsRelayTerminal = relayBacked
     ? !sessionClosed
     : false;
   const expectsRelayTerminalRef = useRef(expectsRelayTerminal);
   expectsRelayTerminalRef.current = expectsRelayTerminal;
-  const showPromptBar = !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
+  const showPromptBar = !relayBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
   const showStoredOutput = !expectsRelayTerminal;
   const outputFallbackActive = showStoredOutput || relayUnavailableReason !== null;
   const bridgeRecoveryHref = useMemo(
@@ -410,7 +410,7 @@ export function RemoteSessionTerminal({
 
   // Monitor connection quality by checking elapsed time since the last WebSocket
   // message.  Thresholds are tuned so "degraded" triggers after 5 seconds of
-  // silence (network trouble) and "bad" after 15 seconds (ttyd may be hung).
+  // silence (network trouble) and "bad" after 15 seconds (the terminal stream may be hung).
   // This gives users immediate visual feedback before the backend health check
   // would otherwise fire, and works even when the WebSocket stays technically
   // open with no data flowing.
@@ -752,7 +752,7 @@ export function RemoteSessionTerminal({
 
         if (!availability.available) {
           setRelayUnavailableReason(
-            availability.reason ?? "This session no longer exposes a live ttyd terminal.",
+            availability.reason ?? "This session no longer exposes a live terminal stream.",
           );
           return;
         }
@@ -825,7 +825,7 @@ export function RemoteSessionTerminal({
                 break;
               }
               case CMD_SET_WINDOW_TITLE: {
-                // ttyd sends the terminal title as UTF-8 after the command byte.
+                // The relay protocol sends the terminal title as UTF-8 after the command byte.
                 // Update document.title so the browser tab reflects the session.
                 const titleBytes = frame.slice(1);
                 if (titleBytes.length > 0) {
@@ -966,13 +966,13 @@ export function RemoteSessionTerminal({
     ?? error
     ?? (expectsRelayTerminal
       ? "Reconnecting to the existing relay terminal."
-      : ttydBacked
-        ? "This ttyd terminal is no longer attached. It only closes after an explicit kill or archive."
+      : relayBacked
+        ? "This live terminal is no longer attached. It only closes after an explicit kill or archive."
         : showPromptBar
-          ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
+          ? "Send a follow-up below to relaunch the agent in a fresh live terminal."
           : LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus)
             ? "This session no longer exposes a relay terminal. Wait for it to relaunch or open the session overview."
-            : `Session status is \`${normalizedSessionStatus}\`. Relay terminals only run while a ttyd runtime is active.`);
+            : `Session status is \`${normalizedSessionStatus}\`. Relay terminals only run while a live terminal runtime is active.`);
 
   return (
     <div className="group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">

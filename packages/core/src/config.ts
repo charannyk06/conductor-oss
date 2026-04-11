@@ -79,7 +79,7 @@ const DEFAULT_AGENT_CONFIG = {
 };
 
 const DEFAULT_PROJECT_PLUGINS = {
-  runtime: "ttyd" as const,
+  runtime: "direct" as const,
   agent: "claude-code" as const,
   workspace: "worktree" as const,
   notifiers: ["desktop"],
@@ -159,7 +159,7 @@ const ProjectConfigSchema = z.object({
 });
 
 const DefaultPluginsSchema = z.object({
-  runtime: z.string().default("ttyd"),
+  runtime: z.string().default("direct"),
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["desktop"]),
@@ -371,7 +371,7 @@ function normalizeRuntime(value: string | undefined): string | undefined {
   const trimmed = value.trim();
   if (trimmed.length === 0) return undefined;
   if (trimmed === "direct" || trimmed === "tmux" || trimmed === "ttyd") {
-    return "ttyd";
+    return "direct";
   }
   return trimmed;
 }
@@ -626,7 +626,7 @@ function applyProjectDefaults(config: OrchestratorConfig): OrchestratorConfig {
       project.tracker = { plugin: "github" };
     }
 
-    project.runtime = normalizeRuntime(project.runtime) ?? normalizeRuntime(config.defaults.runtime) ?? "ttyd";
+    project.runtime = normalizeRuntime(project.runtime) ?? normalizeRuntime(config.defaults.runtime) ?? "direct";
   }
 
   return config;

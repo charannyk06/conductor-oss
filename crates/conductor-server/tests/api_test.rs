@@ -11,7 +11,7 @@ use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn smoke_all_route_modules() {
-    let harness = TestHarness::new("conductor-api-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-api-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -183,7 +183,7 @@ async fn smoke_all_route_modules() {
 
 #[tokio::test]
 async fn create_workspace_rejects_duplicate_project_id() {
-    let harness = TestHarness::new("conductor-api-workspace-duplicate", "ttyd").await;
+    let harness = TestHarness::new("conductor-api-workspace-duplicate", "direct").await;
     let duplicate_repo = harness.root.join("duplicate-repo");
     common::seed_git_repo(&duplicate_repo);
 

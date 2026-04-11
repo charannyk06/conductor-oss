@@ -1,7 +1,5 @@
 mod common;
-use common::{
-    spawn_request, ttyd_available, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness,
-};
+use common::{spawn_request, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use conductor_server::state::SessionRecord;
@@ -9,10 +7,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
-    if !ttyd_available() {
-        return;
-    }
-    let harness = TestHarness::new("conductor-session-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-session-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

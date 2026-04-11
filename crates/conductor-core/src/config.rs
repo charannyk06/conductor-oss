@@ -4,8 +4,8 @@ use serde_yaml::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const TTYD_RUNTIME: &str = "ttyd";
-pub const LEGACY_DIRECT_RUNTIME: &str = "direct";
+pub const DIRECT_RUNTIME: &str = "direct";
+pub const LEGACY_TTYD_RUNTIME: &str = "ttyd";
 pub const LEGACY_TMUX_RUNTIME: &str = "tmux";
 
 /// Root configuration for the Rust-first Conductor backend.
@@ -466,13 +466,13 @@ pub fn normalized_runtime_label(value: Option<&str>) -> String {
     let runtime = value
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .unwrap_or(TTYD_RUNTIME);
+        .unwrap_or(DIRECT_RUNTIME);
 
-    if runtime.eq_ignore_ascii_case(LEGACY_DIRECT_RUNTIME)
+    if runtime.eq_ignore_ascii_case(DIRECT_RUNTIME)
         || runtime.eq_ignore_ascii_case(LEGACY_TMUX_RUNTIME)
-        || runtime.eq_ignore_ascii_case(TTYD_RUNTIME)
+        || runtime.eq_ignore_ascii_case(LEGACY_TTYD_RUNTIME)
     {
-        TTYD_RUNTIME.to_string()
+        DIRECT_RUNTIME.to_string()
     } else {
         runtime.to_string()
     }
