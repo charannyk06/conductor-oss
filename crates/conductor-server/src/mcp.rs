@@ -1054,7 +1054,7 @@ mod tests {
                 ProjectConfig {
                     path: repo.to_string_lossy().to_string(),
                     agent: Some("codex".to_string()),
-                    runtime: Some("ttyd".to_string()),
+                    runtime: Some("direct".to_string()),
                     default_branch: "main".to_string(),
                     ..ProjectConfig::default()
                 },
@@ -1123,7 +1123,7 @@ mod tests {
                 path: "/tmp/demo".to_string(),
                 default_branch: "main".to_string(),
                 agent: Some("codex".to_string()),
-                runtime: Some("ttyd".to_string()),
+                runtime: Some("direct".to_string()),
             }])
         }
 

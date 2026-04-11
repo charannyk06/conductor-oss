@@ -31,8 +31,7 @@ pub(crate) use bridge_registry::{BridgeConnectionRecord, BridgeConnectionStatus}
 pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use detached::DETACHED_PID_METADATA_KEY;
 pub(crate) use detached::{
-    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE,
-    TTYD_TUNNEL_URL_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
 };
 pub(crate) use dispatcher_bindings::{
     DispatcherBindingLookup, DispatcherBindingRecord, UpsertDispatcherBindingInput,
@@ -48,7 +47,6 @@ pub(crate) use mcp_config::{
     ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use session_manager::OutputConsumerConfig;
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
     SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -123,8 +121,8 @@ const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
 const BRIDGE_REGISTRY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
-pub(crate) fn ttyd_binary_available(workspace_path: &Path) -> bool {
-    detached::ttyd_launcher::resolve_ttyd_binary(workspace_path).is_some()
+pub(crate) fn terminal_runtime_available(_workspace_path: &Path) -> bool {
+    true
 }
 
 pub(crate) fn is_project_dispatcher_session(session: &SessionRecord) -> bool {

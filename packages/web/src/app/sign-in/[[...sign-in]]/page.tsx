@@ -22,7 +22,7 @@ import {
 const LOCAL_RUNTIME_POINTS = [
   "Repositories remain on the paired laptop.",
   "Agent credentials remain on the paired laptop.",
-  "Terminal output streams from the local ttyd runtime.",
+  "Terminal output streams from the local native PTY runtime.",
 ] as const;
 
 const OPERATOR_POINTS = [

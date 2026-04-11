@@ -5,7 +5,7 @@ Conductor web and Conductor relay are separate production surfaces.
 - `app.conductross.com` is the hosted web dashboard.
 - `relay.conductross.com` is the websocket relay used by paired-device bridge terminals.
 
-A web deploy alone is not enough to roll out relay fixes. If the relay service stays on an older binary, hosted ttyd terminals can keep failing even after the dashboard has the latest code.
+A web deploy alone is not enough to roll out relay fixes. If the relay service stays on an older binary, hosted terminal sessions can keep failing even after the dashboard has the latest code.
 
 ## New automation
 

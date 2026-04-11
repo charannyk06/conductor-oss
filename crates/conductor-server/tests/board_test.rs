@@ -2,8 +2,8 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    build_app, build_state, seed_git_repo, spawn_request, ttyd_available, wait_for_condition,
-    TestExecutor, TestHarness,
+    build_app, build_state, seed_git_repo, spawn_request, wait_for_condition, TestExecutor,
+    TestHarness,
 };
 use conductor_core::board::Board;
 use conductor_core::config::ProjectConfig;
@@ -25,7 +25,7 @@ fn temp_path(label: &str) -> PathBuf {
 
 #[tokio::test]
 async fn dispatcher_task_routes_create_update_and_handoff_deterministically() {
-    let harness = TestHarness::new("dispatcher-task-lifecycle-route-test", "ttyd").await;
+    let harness = TestHarness::new("dispatcher-task-lifecycle-route-test", "direct").await;
     fs::write(
         &harness.board_path,
         ["## To do", "", "## Ready", "", "## In review", ""].join("\n"),
@@ -221,7 +221,7 @@ async fn dispatcher_task_routes_create_update_and_handoff_deterministically() {
 
 #[tokio::test]
 async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
-    let harness = TestHarness::new("dispatcher-bindings-route-test", "ttyd").await;
+    let harness = TestHarness::new("dispatcher-bindings-route-test", "direct").await;
     let app = build_app(harness.state.clone());
 
     let create_response = app
@@ -351,7 +351,7 @@ async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
 
 #[tokio::test]
 async fn dispatcher_preferences_route_persists_openclaw_runtime_settings() {
-    let harness = TestHarness::new("dispatcher-openclaw-preferences-route-test", "ttyd").await;
+    let harness = TestHarness::new("dispatcher-openclaw-preferences-route-test", "direct").await;
     let app = build_app(harness.state.clone());
     let gateway_token = ["gateway", "-token-", "123"].concat();
     let session_key = ["external:", "issue", ":123"].concat();
@@ -445,7 +445,7 @@ async fn dispatcher_preferences_route_persists_openclaw_runtime_settings() {
 
 #[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
-    let harness = TestHarness::new("conductor-board-route-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-board-route-test", "direct").await;
     fs::write(
         &harness.board_path,
         [
@@ -536,7 +536,7 @@ async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
 
 #[tokio::test]
 async fn board_routes_reorder_cards_with_target_index() {
-    let harness = TestHarness::new("conductor-board-reorder-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-board-reorder-test", "direct").await;
     fs::write(
         &harness.board_path,
         [
@@ -592,7 +592,7 @@ async fn board_routes_reorder_cards_with_target_index() {
 
 #[tokio::test]
 async fn board_routes_reorder_cards_within_same_column_with_target_index() {
-    let harness = TestHarness::new("conductor-board-same-column-reorder-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-board-same-column-reorder-test", "direct").await;
     fs::write(
         &harness.board_path,
         [
@@ -686,7 +686,7 @@ async fn board_routes_prefer_project_repo_board_outside_workspace() {
             .and_then(|value| value.to_str())
             .map(str::to_string),
         agent: Some("codex".to_string()),
-        runtime: Some("ttyd".to_string()),
+        runtime: Some("direct".to_string()),
         default_branch: "main".to_string(),
         ..ProjectConfig::default()
     };
@@ -725,10 +725,7 @@ async fn board_routes_prefer_project_repo_board_outside_workspace() {
 
 #[tokio::test]
 async fn board_change_events_drive_session_spawns_with_board_metadata() {
-    if !ttyd_available() {
-        return;
-    }
-    let harness = TestHarness::new("conductor-board-runtime-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-board-runtime-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

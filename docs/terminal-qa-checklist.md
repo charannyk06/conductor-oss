@@ -5,7 +5,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Desktop
 
 - [ ] Launch a fresh session from the dashboard on macOS or Linux desktop.
-- [ ] Confirm the session detail terminal reaches a usable ttyd-backed prompt through the backend ttyd facade.
+- [ ] Confirm the session detail terminal reaches a usable native prompt through the backend terminal facade.
 - [ ] Type directly into the terminal and verify shell editing, Enter, Backspace, Ctrl+C, and paste all work.
 - [ ] Scroll upward while output is streaming and confirm the viewport does not jump back to the live tail until `Jump to latest` is used.
 - [ ] Resize the browser narrower and wider and confirm the prompt reflows without garbling or duplicate redraw noise.
@@ -34,10 +34,10 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## External Browser
 
 - [ ] Validate an authenticated non-loopback dashboard path behind the configured access layer.
-- [ ] Confirm the terminal stream stays on the authenticated ttyd facade WS (`/api/sessions/:id/terminal/ttyd/ws`) using a live token from `/api/sessions/:id/terminal/token`.
+- [ ] Confirm the terminal stream stays on the authenticated terminal WS (`/api/sessions/:id/terminal/ws`) using a live token from `/api/sessions/:id/terminal/token`.
 - [ ] Refresh the external tab and confirm reconnect restores the same session content and prompt.
 - [ ] Confirm direct typing works after reconnect without requiring page navigation.
-- [ ] Trigger an intentional failure path and confirm terminal reconnect behavior is explicit (token refresh + ttyd reconnect) before any snapshot recovery path is used.
+- [ ] Trigger an intentional failure path and confirm terminal reconnect behavior is explicit (token refresh + terminal reconnect) before any snapshot recovery path is used.
 
 ## Diagnostics To Capture On Failure
 
@@ -47,5 +47,5 @@ Use this checklist before merging terminal architecture changes. Record the obse
 - [ ] terminal token headers and payload (`required`, `expiresInSeconds`)
 - [ ] terminal snapshot headers (`Server-Timing`, source, live, restored, format)
 - [ ] terminal snapshot payload (`source`, `live`, `restored`, `sequence`)
-- [ ] websocket close code, ttyd facade query string shape (token presence), and reconnect timing
+- [ ] websocket close code, terminal route query string shape (token presence), and reconnect timing
 - [ ] browser console and network errors

@@ -864,7 +864,7 @@ mod tests {
             session_prefix: Some("dmx".to_string()),
             default_working_directory: None,
             board_dir: None,
-            runtime: Some("ttyd".to_string()),
+            runtime: Some("direct".to_string()),
             agent: Some("claude-code".to_string()),
             workspace: Some("worktree".to_string()),
             scm: Some(Value::Mapping(serde_yaml::Mapping::from_iter([(

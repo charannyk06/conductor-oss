@@ -64,7 +64,7 @@ Installed aliases:
 ## What the package gives you
 
 - workspace linking for GitHub repos or local folders
-- real ttyd-backed terminal sessions in the dashboard
+- real native terminal sessions in the dashboard
 - worktree-isolated agent runs
 - Markdown board support through `CONDUCTOR.md`
 - session recovery with retry, restore, feedback, and cleanup

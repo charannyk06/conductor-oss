@@ -2,7 +2,7 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use common::{spawn_request, ttyd_available, wait_for_condition, TestHarness};
+use common::{spawn_request, wait_for_condition, TestHarness};
 use conductor_core::types::SessionStatus;
 use serde_json::Value;
 use tower::util::ServiceExt;
@@ -16,7 +16,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn metrics_endpoint_emits_valid_prometheus_samples() {
-    let harness = TestHarness::new("conductor-e2e-metrics-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-e2e-metrics-test", "direct").await;
 
     let response = harness
         .app()
@@ -46,7 +46,7 @@ async fn metrics_endpoint_emits_valid_prometheus_samples() {
 
 #[tokio::test]
 async fn failed_spawn_is_persisted_and_reported_in_error_health() {
-    let harness = TestHarness::new("conductor-e2e-error-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-e2e-error-test", "direct").await;
 
     let response = harness
         .app()
@@ -94,11 +94,7 @@ async fn failed_spawn_is_persisted_and_reported_in_error_health() {
 
 #[tokio::test]
 async fn spawn_session_route_drives_a_live_test_executor() {
-    if !ttyd_available() {
-        return;
-    }
-
-    let harness = TestHarness::new("conductor-e2e-spawn-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-e2e-spawn-test", "direct").await;
 
     let response = harness
         .app()

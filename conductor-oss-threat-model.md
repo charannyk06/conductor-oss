@@ -1,7 +1,7 @@
 # Conductor OSS Threat Model
 
 ## Executive summary
-Conductor OSS has solid default boundaries in the current tree: the Rust backend refuses remote binding unless an unsafe flag is set, relay/dashboard auth is now JWT-scoped instead of header-trusted, and ttyd tokens are HMAC-scoped. The remaining risk is concentrated in the preview/browser and relay edge: a public relay claim endpoint can be spammed for availability impact, and the server-side preview browser can be driven to attacker-influenced URLs while sharing one browser context across sessions. That combination creates realistic DoS, SSRF, and cross-session leakage paths even though the direct auth-bypass issues from prior reviews appear closed.
+Conductor OSS has solid default boundaries in the current tree: the Rust backend refuses remote binding unless an unsafe flag is set, relay/dashboard auth is now JWT-scoped instead of header-trusted, and terminal session tokens are HMAC-scoped. The remaining risk is concentrated in the preview/browser and relay edge: a public relay claim endpoint can be spammed for availability impact, and the server-side preview browser can be driven to attacker-influenced URLs while sharing one browser context across sessions. That combination creates realistic DoS, SSRF, and cross-session leakage paths even though the direct auth-bypass issues from prior reviews appear closed.
 
 ## Scope and assumptions
 - In scope: `crates/conductor-server/`, `crates/conductor-relay/`, `bridge-cmd/`, and the dashboard app under `packages/web/`.
@@ -18,17 +18,17 @@ Open questions that would materially change risk ranking:
 ## System model
 ### Primary components
 - Next.js dashboard in `packages/web/`: UI, auth, dashboard API proxy, preview browser orchestration, and bridge JWT minting.
-- Rust backend in `crates/conductor-server/`: session state, task/workspace control plane, filesystem browsing, attachments, GitHub webhook handling, and ttyd management.
+- Rust backend in `crates/conductor-server/`: session state, task/workspace control plane, filesystem browsing, attachments, GitHub webhook handling, and terminal runtime management.
 - Relay in `crates/conductor-relay/`: device pairing, relay websocket fan-out, browser/device proxying, and relay-scoped JWT authorization.
-- Bridge client in `bridge-cmd/`: paired-device agent that connects the local ttyd, local backend, and relay.
-- Local ttyd process: interactive shell surface launched on loopback only.
+- Bridge client in `bridge-cmd/`: paired-device agent that connects the local terminal runtime, local backend, and relay.
+- Local terminal runtime: interactive shell surface launched on loopback only.
 
 ### Data flows and trust boundaries
 - Browser -> Next.js dashboard: session rendering, operator actions, preview commands, upload requests, and auth cookies/headers. Security guarantees come from Clerk/trusted-header auth, origin/fetch-metadata checks for actions, and route-level role checks.
 - Next.js dashboard -> Rust backend (`127.0.0.1` by default): proxied API requests, session control, filesystem browsing, attachments, and terminal tokens. Security depends on loopback-only binding, header stripping in the proxy, and backend middleware that trusts only proxy-injected identity.
 - Next.js dashboard -> Relay: relay JWTs and short-lived browser/terminal scopes. Security depends on HS256 JWTs with issuer/audience/scope validation and a required `RELAY_JWT_SECRET`.
 - Relay -> paired device bridge client: websocket messages for terminal, API proxy, preview proxy, and bridge status. The bridge uses device refresh tokens, while browser-facing routes rely on relay-scoped JWTs or refresh tokens.
-- Bridge client -> local ttyd / local backend / local preview server: loopback-only network access from the paired device host. This is intentionally powerful and should be treated as a privileged local boundary.
+- Bridge client -> local terminal runtime / local backend / local preview server: loopback-only network access from the paired device host. This is intentionally powerful and should be treated as a privileged local boundary.
 - Rust backend -> workspace filesystem: attachments, workspace browsing, and dev-server logs. Security depends on path normalization, allowlisted roots, and workspace scoping.
 - Rust backend -> GitHub: webhook ingestion and GitHub API interactions. Security depends on HMAC webhook verification and GitHub auth tokens configured outside the repo.
 
@@ -43,7 +43,7 @@ flowchart LR
   end
   subgraph Local["Local host"]
     B["Rust backend"]
-    T["ttyd"]
+    T["terminal runtime"]
     F["Workspace"]
   end
   subgraph Relay["Relay"]
@@ -67,7 +67,7 @@ flowchart LR
 |---|---|---|
 | Dashboard auth session and role state | Gates viewer/operator/admin actions and access to private sessions | C/I |
 | Relay JWTs and device refresh tokens | Control bridge devices, terminal sessions, and device proxies | C/I |
-| Terminal tokens | Grant live shell access through ttyd | C/I |
+| Terminal tokens | Grant live shell access through the terminal runtime | C/I |
 | Workspace files, attachments, and board state | Contain task output, prompts, code, and potentially secrets | C/I |
 | Preview browser state (cookies, localStorage, cache) | Can leak or poison credentials across session previews | C/I |
 | Relay pairing codes and pending claims | Control device onboarding and pairing flow | C/I/A |
@@ -94,7 +94,7 @@ flowchart LR
 | Relay public API | Internet-facing relay routes on `0.0.0.0:8080` | Internet -> relay | JWT-protected for dashboard APIs, but some onboarding endpoints are public | `crates/conductor-relay/src/relay.rs:342-379`, `:474-520` |
 | Device pairing claim endpoints | Unauthenticated POST to `/api/devices/claims` | Internet -> relay | No auth and no visible request throttling | `crates/conductor-relay/src/relay.rs:474-482`, `:1714-1743` |
 | Bridge websocket and browser websocket | Relay websocket upgrade with tokens in headers/query | Dashboard/bridge -> relay | Scoped JWTs and refresh tokens are the intended auth boundary | `crates/conductor-relay/src/relay.rs:806-903`, `packages/web/src/lib/bridgeRelayAuth.ts:53-99` |
-| ttyd token route | Dashboard request for session ttyd tokens | Browser -> dashboard -> backend | Operator-gated and HMAC-scoped | `packages/web/src/app/api/sessions/[id]/terminal/ttyd/token/route.ts`, `crates/conductor-server/src/routes/terminal.rs:1183-1206` |
+| terminal token route | Dashboard request for live terminal tokens | Browser -> dashboard -> backend | Operator-gated and HMAC-scoped | `packages/web/src/app/api/sessions/[id]/terminal/token/route.ts`, `crates/conductor-server/src/routes/terminal.rs` |
 | Filesystem browser | Operator browses workspace and allowed roots | Browser -> backend filesystem | Exposes directory metadata beyond the workspace | `crates/conductor-server/src/routes/filesystem.rs` |
 | GitHub webhook | GitHub POSTs webhook payloads | GitHub -> backend | HMAC signature is required | `crates/conductor-server/src/routes/github.rs:671-699` |
 
@@ -140,7 +140,7 @@ flowchart LR
 - The main residual risk is not a single auth bypass, but the combination of a public relay onboarding surface and a powerful operator preview browser that can be pointed at attacker-controlled origins.
 
 ## Quality check
-- [x] Discovered entry points are covered: dashboard routes, relay routes, preview browser, ttyd, filesystem, attachments, and GitHub webhook.
+- [x] Discovered entry points are covered: dashboard routes, relay routes, preview browser, terminal runtime, filesystem, attachments, and GitHub webhook.
 - [x] Each major trust boundary appears in the threat table: browser/dashboard, dashboard/backend, dashboard/relay, relay/device, and browser/session state.
 - [x] Runtime behavior is separated from dev/build behavior: the review focuses on live routes and browser flows, not tests or CI.
 - [x] Assumptions and open questions are explicit in the scope section.

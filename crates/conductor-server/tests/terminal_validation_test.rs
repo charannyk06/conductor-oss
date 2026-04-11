@@ -2,17 +2,14 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use common::{spawn_request, ttyd_available, wait_for_condition_with_timeout, TestHarness};
+use common::{spawn_request, wait_for_condition_with_timeout, TestHarness};
 use serde_json::Value;
 use std::time::Duration;
 use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn terminal_snapshot_and_resize_routes_cover_live_session_validation_paths() {
-    if !ttyd_available() {
-        return;
-    }
-    let harness = TestHarness::new("conductor-terminal-validation-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-terminal-validation-test", "direct").await;
     let queued = harness
         .state
         .spawn_session(spawn_request("Validate terminal routes"))

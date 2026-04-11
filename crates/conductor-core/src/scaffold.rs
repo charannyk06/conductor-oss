@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(project.name.as_deref(), Some("MyRepo"));
         assert_eq!(project.session_prefix.as_deref(), Some("mr"));
         assert_eq!(project.workspace.as_deref(), Some("worktree"));
-        assert_eq!(project.runtime.as_deref(), Some("ttyd"));
+        assert_eq!(project.runtime.as_deref(), Some("direct"));
         assert_eq!(project.agent_config.permissions.as_deref(), Some("skip"));
         assert_eq!(project.scm, Some(Value::String("github".to_string())));
     }

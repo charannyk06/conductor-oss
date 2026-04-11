@@ -25,7 +25,7 @@ const OPENCLAW_GATEWAY_AUTH_TOKEN_ENV: &str = "OPENCLAW_GATEWAY_AUTH_TOKEN";
 const OPENCLAW_GATEWAY_PASSWORD_ENV: &str = "OPENCLAW_GATEWAY_PASSWORD";
 const OPENCLAW_GATEWAY_SCOPES_ENV: &str = "OPENCLAW_GATEWAY_SCOPES";
 const LEGACY_DIRECT_RUNTIME_SUMMARY: &str =
-    "Legacy direct terminal session is no longer supported. Archive it and start a fresh ttyd session.";
+    "Legacy direct terminal session is no longer supported. Archive it and start a fresh live terminal session.";
 const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tmux runtime removal";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1390,17 +1390,17 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             session.pid = None;
             return true;
         }
-        // Non-ttyd active sessions cannot be recovered — archive them so they
+        // Sessions without a recoverable detached runtime cannot be restored, archive them so they
         // don't clutter the dashboard after a restart/reinstall.
         None | Some("") if is_active_status || is_active_activity => {
             session.status = SessionStatus::Archived;
             session.activity = Some("exited".to_string());
             session.last_activity_at = now.clone();
             session.summary =
-                Some("Session archived after backend restart (pre-ttyd runtime)".to_string());
+                Some("Session archived after backend restart (non-restorable runtime)".to_string());
             session.metadata.insert(
                 "summary".to_string(),
-                "Session archived after backend restart (pre-ttyd runtime)".to_string(),
+                "Session archived after backend restart (non-restorable runtime)".to_string(),
             );
             session
                 .metadata
@@ -2068,8 +2068,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_loaded_session_archives_active_sessions_without_ttyd_runtime() {
-        // Sessions without runtimeMode="ttyd" that were active are now archived
+    fn normalize_loaded_session_archives_active_sessions_without_recoverable_runtime() {
+        // Sessions without a recoverable runtime mode are now archived
         // at restart so they don't pollute the dashboard as stale Stuck entries.
         let mut session = SessionRecord::new(
             "session-2".to_string(),
@@ -2163,8 +2163,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_loaded_session_archives_non_ttyd_active_session_even_with_live_pid() {
-        // Non-ttyd sessions without runtimeMode are archived regardless of PID
+    fn normalize_loaded_session_archives_nonrecoverable_active_session_even_with_live_pid() {
+        // Non-recoverable sessions without runtimeMode are archived regardless of PID
         // because the old runtime cannot be resumed.
         let mut session = SessionRecord::new(
             "session-3".to_string(),

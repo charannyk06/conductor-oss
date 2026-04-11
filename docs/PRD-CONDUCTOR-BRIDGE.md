@@ -73,7 +73,7 @@ Opens conductor.app
   → Already logged in
   → Dashboard shows workspace and active sessions
 Starts new session: ~/projects/shadower, selected agent
-  → Terminal opens in browser (ttyd iframe)
+  → Terminal opens in browser (native iframe terminal)
   → Selected agent runs on laptop, reads/writes ~/projects/shadower
   → Output streams to browser in real-time
 Closes laptop, goes to bed
@@ -87,7 +87,7 @@ Opens conductor.app on phone
   → Dashboard responsive, mobile-friendly
   → Shows active sessions
   → Taps the session
-  → Full terminal opens (ttyd iframe, touch-friendly)
+  → Full terminal opens (native iframe terminal, touch-friendly)
   → Can watch the selected agent writing files
   → Can send commands (Ctrl+C to stop)
 ```
@@ -129,18 +129,18 @@ conductor-bridge ──WSS────────────────► re
      ▼                                         │                    │
 conductor-backend                           │                  WSS
 (SQLite, agents,                            │                    │
-ttyd, filesystem)                          │                    │
+terminal runtime, filesystem)                          │                    │
                                             │                    │
 
 Relay: WebSocket server, JWT auth, frame forwarding, zero storage
-Dashboard: Next.js, GitHub OAuth, session list, ttyd viewer, settings
+Dashboard: Next.js, GitHub OAuth, session list, terminal viewer, settings
 ```
 
 ### The relay protocol
 
 Four channel types over a single WebSocket connection:
 
-**Terminal:** Browser ↔ Dashboard ↔ Relay ↔ Bridge ↔ ttyd ↔ PTY ↔ Agent
+**Terminal:** Browser ↔ Dashboard ↔ Relay ↔ Bridge ↔ terminal runtime ↔ PTY ↔ Agent
 The relay proxies raw WebSocket frames. No awareness of terminal protocol.
 
 **Session management:** Browser → Dashboard → Relay → Bridge → Conductor Backend (HTTP)
@@ -247,7 +247,7 @@ Architecturally enforced. The relay has no decryption keys.
 - GitHub OAuth login
 - `conductor bridge connect` — one command to connect
 - Session list (active sessions from local SQLite in browser)
-- Terminal viewer (ttyd iframe, full PTY, resize, input)
+- Terminal viewer (native iframe terminal, full PTY, resize, input)
 - Session sharing (read-only temporary link)
 - Bridge status indicator (online/offline)
 - One workspace per bridge
@@ -373,7 +373,7 @@ type Inbound =
 
 ### Conductor backend changes
 
-The existing backend (localhost:4749) needs **zero changes** for v1. The bridge proxies HTTP requests unchanged. ttyd integration is already in place.
+The existing backend (localhost:4749) needs **zero changes** for v1. The bridge proxies HTTP requests unchanged. terminal-runtime integration is already in place.
 
 ### Distribution
 

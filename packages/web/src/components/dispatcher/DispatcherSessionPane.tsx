@@ -303,7 +303,7 @@ function normalizeRepositorySettings(value: unknown): RepositorySettingsPayload 
     agentModel: readString(record.agentModel) ?? "",
     agentReasoningEffort: readString(record.agentReasoningEffort) ?? "",
     workspaceMode: readString(record.workspaceMode) ?? "local",
-    runtimeMode: readString(record.runtimeMode) ?? "ttyd",
+    runtimeMode: readString(record.runtimeMode) ?? "direct",
     scmMode: readString(record.scmMode) ?? "git",
     defaultWorkingDirectory: readString(record.defaultWorkingDirectory) ?? "",
     defaultBranch: readString(record.defaultBranch) ?? "main",

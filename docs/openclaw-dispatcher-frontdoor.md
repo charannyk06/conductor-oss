@@ -5,7 +5,7 @@ Full HTTP request/response details: [`openclaw-integration-contract.md`](./openc
 ## Product goal
 
 OpenClaw is the top-level orchestrator chat surface.
-Conductor remains the board, task lifecycle, and ttyd terminal execution engine.
+Conductor remains the board, task lifecycle, and terminal execution engine.
 
 Final UX:
 - talk to OpenClaw anywhere
@@ -16,7 +16,7 @@ Final UX:
 
 ## Hard rules
 
-- Regular sessions are terminal-first only, backed by web ttyd PTY
+- Regular sessions are terminal-first only, backed by the web terminal PTY
 - Dispatcher is the only orchestration surface
 - ACP is not a user-facing Conductor product surface
 - Board remains the visible execution graph

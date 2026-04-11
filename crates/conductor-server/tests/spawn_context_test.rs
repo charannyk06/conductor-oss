@@ -2,7 +2,7 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use common::{ttyd_available, TestExecutor, TestHarness};
+use common::{TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use serde_json::Value;
 use std::fs;
@@ -11,11 +11,7 @@ use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn spawn_session_links_board_task_context_and_attachment_paths() {
-    if !ttyd_available() {
-        return;
-    }
-
-    let harness = TestHarness::new("conductor-spawn-context-test", "ttyd").await;
+    let harness = TestHarness::new("conductor-spawn-context-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
