@@ -7,7 +7,6 @@ import {
   FileUp,
   Loader2,
   RefreshCw,
-  Send,
   SquareStop,
   X,
 } from "lucide-react";
@@ -23,7 +22,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
-import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "@/components/sessions/terminal/terminalConstants";
+import { LIVE_TERMINAL_STATUSES } from "@/components/sessions/terminal/terminalConstants";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
 
@@ -51,27 +50,6 @@ async function sendTerminalKeys(
   }
 }
 
-async function sendFollowUpMessage(
-  sessionId: string,
-  message: string,
-  bridgeId?: string | null,
-): Promise<void> {
-  const response = await fetch(
-    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, bridgeId),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action: "send", message }),
-    },
-  );
-  if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(data?.error ?? `Failed to send message (${response.status})`);
-  }
-}
-
 function SessionTerminalView({
   sessionId,
   projectId,
@@ -85,7 +63,6 @@ function SessionTerminalView({
 }: SessionTerminalProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
-  const promptInputRef = useRef<HTMLInputElement | null>(null);
   const loadTimerRef = useRef<number | null>(null);
   const lastAppliedInsertNonceRef = useRef(0);
   const pendingInsertNonceRef = useRef<number | null>(null);
@@ -95,9 +72,6 @@ function SessionTerminalView({
   const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
-  const [promptMessage, setPromptMessage] = useState("");
-  const [promptSending, setPromptSending] = useState(false);
-  const [promptError, setPromptError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const iframeSrc = useMemo(
@@ -114,9 +88,6 @@ function SessionTerminalView({
   const liveRuntimeExpected = normalizedRuntimeMode === "direct"
     ? !sessionClosed
     : LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
-  const showPromptBar = !liveRuntimeExpected
-    && !immersiveMobileMode
-    && RESUMABLE_STATUSES.has(normalizedSessionStatus);
   const terminalSessionHref = buildSessionHref(sessionId, { bridgeId, tab: "terminal" });
 
   useEffect(() => {
@@ -181,25 +152,6 @@ function SessionTerminalView({
       cancelled = true;
     };
   }, [bridgeId, onPendingInsertConsumed, pendingInsert, sessionId]);
-
-  const handlePromptSend = useCallback(async () => {
-    const message = promptMessage.trim();
-    if (!message || promptSending) {
-      return;
-    }
-
-    setPromptSending(true);
-    setPromptError(null);
-    try {
-      await sendFollowUpMessage(sessionId, message, bridgeId);
-      setPromptMessage("");
-      promptInputRef.current?.focus();
-    } catch (error) {
-      setPromptError(error instanceof Error ? error.message : "Failed to send message.");
-    } finally {
-      setPromptSending(false);
-    }
-  }, [bridgeId, promptMessage, promptSending, sessionId]);
 
   const handleRetry = useCallback(() => {
     setConnectionError(null);
@@ -390,7 +342,7 @@ function SessionTerminalView({
         </div>
       </div>
 
-      {!showPromptBar && (queuedInsertError || attachmentError) ? (
+      {queuedInsertError || attachmentError ? (
         <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
           {queuedInsertError ? (
             <div className="flex items-center gap-1.5">
@@ -418,82 +370,6 @@ function SessionTerminalView({
               </button>
             </div>
           ) : null}
-        </div>
-      ) : null}
-
-      {showPromptBar ? (
-        <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
-          {queuedInsertError ? (
-            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ffb39e]">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              <span className="truncate">{queuedInsertError}</span>
-              <button
-                type="button"
-                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                onClick={() => setQueuedInsertError(null)}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ) : null}
-          {attachmentError ? (
-            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ffb39e]">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              <span className="truncate">{attachmentError}</span>
-              <button
-                type="button"
-                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                onClick={() => setAttachmentError(null)}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ) : null}
-          {promptError ? (
-            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ff8f7a]">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              <span className="truncate">{promptError}</span>
-              <button
-                type="button"
-                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                onClick={() => setPromptError(null)}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ) : null}
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void handlePromptSend();
-            }}
-            className="flex items-center gap-2 px-2 py-2 lg:px-3"
-          >
-            <input
-              ref={promptInputRef}
-              type="text"
-              value={promptMessage}
-              onChange={(event) => setPromptMessage(event.target.value)}
-              placeholder="Send a follow-up message…"
-              enterKeyHint="done"
-              disabled={promptSending}
-              className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#0c0808] px-2.5 text-[12px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20 disabled:opacity-50"
-            />
-            <Button
-              type="submit"
-              size="icon"
-              variant="ghost"
-              disabled={promptSending || promptMessage.trim().length === 0}
-              className="h-8 w-8 shrink-0 rounded-md border border-white/10 bg-[#0c0808] text-[#c9c0b7] hover:bg-[#201818] disabled:opacity-30"
-              aria-label="Send message"
-            >
-              {promptSending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Send className="h-3.5 w-3.5" />
-              )}
-            </Button>
-          </form>
         </div>
       ) : null}
     </div>
