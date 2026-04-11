@@ -3,7 +3,7 @@
 import {
   AlertCircle,
   Clipboard,
-  ExternalLink,
+  FileUp,
   Loader2,
   RefreshCw,
   SquareStop,
@@ -25,7 +25,6 @@ import {
 } from "@/components/sessions/sessionTerminalUtils";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { buildSessionHref } from "@/lib/dashboardHref";
 
 const TTYD_READY_MESSAGE_TYPE = "conductor-ttyd-ready";
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
@@ -80,10 +79,6 @@ function SessionTerminalView({
 
   const iframeSrc = useMemo(
     () => withBridgeQuery(`/embed/terminal/${encodeURIComponent(sessionId)}`, bridgeId),
-    [bridgeId, sessionId],
-  );
-  const terminalSessionHref = useMemo(
-    () => buildSessionHref(sessionId, { bridgeId, tab: "terminal" }),
     [bridgeId, sessionId],
   );
 
@@ -218,6 +213,10 @@ function SessionTerminalView({
   const handleRetry = useCallback(() => {
     setFrameLoaded(false);
     setReloadNonce((value) => value + 1);
+  }, []);
+
+  const handleAttachmentPick = useCallback(() => {
+    attachmentInputRef.current?.click();
   }, []);
 
   const handleAttachmentFiles = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
@@ -431,13 +430,16 @@ function SessionTerminalView({
           type="button"
           size="icon"
           variant="ghost"
-          className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
-          onClick={() => {
-            window.open(terminalSessionHref, "_blank", "noopener,noreferrer");
-          }}
-          aria-label="Open terminal in new tab"
+          className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] disabled:opacity-40 sm:h-7 sm:w-7"
+          onClick={handleAttachmentPick}
+          aria-label="Attach photos or files"
+          disabled={attachmentUploading}
         >
-          <ExternalLink className="h-3.5 w-3.5" />
+          {attachmentUploading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <FileUp className="h-3.5 w-3.5" />
+          )}
         </Button>
         <Button
           type="button"
@@ -504,10 +506,11 @@ function SessionTerminalView({
               setFrameLoaded(false);
             }}
             onLoad={() => {
-              setFrameLoaded(false);
+              setFrameLoaded(true);
               lastPostedTerminalHostSizeRef.current = null;
               applyKeyboardAwareTerminalHeight();
               scheduleTerminalResizeBurst();
+              postTerminalResizeMessage();
             }}
           />
           {!panelVisible && !frameLoaded ? (
