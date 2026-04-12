@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
@@ -11,6 +10,10 @@ import {
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
+import {
+  buildBundledTtydHtmlResponse,
+  loadBundledTtydFrontendHtml,
+} from "@/lib/bundledTtydFrontend";
 import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
@@ -19,19 +22,6 @@ export const runtime = "nodejs";
 type RouteContext = {
   params: Promise<{ id: string }>;
 };
-
-
-function buildEmbeddedTerminalFallbackResponse(
-  request: Request,
-  sessionId: string,
-  bridgeId?: string,
-): Response {
-  const url = new URL(`/embed/terminal/${encodeURIComponent(sessionId)}`, request.url);
-  if (bridgeId) {
-    url.searchParams.set("bridgeId", bridgeId);
-  }
-  return NextResponse.redirect(url, { status: 307 });
-}
 
 export async function GET(
   request: Request,
@@ -54,13 +44,11 @@ export async function GET(
       },
     );
 
-    if (!proxied.ok) {
-      return buildEmbeddedTerminalFallbackResponse(request, id);
-    }
-
     const html = await readTtydHtmlResponse(proxied);
     if (html === null) {
-      return buildEmbeddedTerminalFallbackResponse(request, id);
+      return buildBundledTtydHtmlResponse(
+        injectTtydResizeShim(loadBundledTtydFrontendHtml()),
+      );
     }
 
     return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
@@ -90,18 +78,16 @@ export async function GET(
     );
   }
 
-  if (!proxied.ok) {
-    return buildEmbeddedTerminalFallbackResponse(request, id, target.bridgeId);
-  }
-
   const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return buildEmbeddedTerminalFallbackResponse(request, id, target.bridgeId);
-  }
+  const ttydHtml = html ?? loadBundledTtydFrontendHtml();
 
   const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
+    injectBridgeTtydRelayShim(ttydHtml, relayTtydWsUrl),
   );
+
+  if (html === null) {
+    return buildBundledTtydHtmlResponse(patchedHtml);
+  }
 
   return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
 }

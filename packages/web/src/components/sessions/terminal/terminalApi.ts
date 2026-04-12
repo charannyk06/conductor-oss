@@ -165,16 +165,28 @@ function appendBridgeIdToTerminalUrl(
   }
 }
 
-function buildEmbeddedTerminalUrl(
+function buildLegacyProxyTtydUrl(
   sessionId: string,
   dashboardOrigin: string,
+  legacyWsUrl: string,
   bridgeId?: string | null,
 ): string {
-  const url = new URL(`/embed/terminal/${encodeURIComponent(sessionId)}`, dashboardOrigin);
+  const url = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/ttyd`, dashboardOrigin);
   const normalizedBridgeId = bridgeId?.trim();
   if (normalizedBridgeId) {
     url.searchParams.set("bridgeId", normalizedBridgeId);
   }
+
+  try {
+    const token = new URL(legacyWsUrl, dashboardOrigin).searchParams.get("token")?.trim();
+    if (token) {
+      url.searchParams.set("token", token);
+    }
+  } catch {
+    // Ignore malformed legacy websocket URLs. The terminal auth cookie still covers
+    // the common same-origin case.
+  }
+
   return url.toString();
 }
 
@@ -331,18 +343,19 @@ export async function resolveTerminalConnection(
     dashboardOrigin,
   );
 
-  // Frontend-only iframe path: when the backend exposes only the native terminal
-  // websocket contract, render the existing iframe page instead of trying to open a
-  // ttyd HTML route that does not exist on the current backend.
+  // Legacy backend fallback: still front the terminal through the ttyd iframe
+  // route so the dashboard keeps the old iframe UX even when the backend only
+  // advertises the native websocket contract.
   if (!auth.ttydHttpUrl && auth.ttydWsUrl) {
-    const embeddedTerminalUrl = buildEmbeddedTerminalUrl(
+    const legacyProxyTtydUrl = buildLegacyProxyTtydUrl(
       sessionId,
       dashboardOrigin,
+      auth.ttydWsUrl,
       options?.bridgeId,
     );
     return {
-      terminalUrl: embeddedTerminalUrl,
-      terminalLinkUrl: embeddedTerminalUrl,
+      terminalUrl: legacyProxyTtydUrl,
+      terminalLinkUrl: legacyProxyTtydUrl,
       relayTtydWsUrl: auth.relayTtydWsUrl,
       interactive: true,
       reason: null,
