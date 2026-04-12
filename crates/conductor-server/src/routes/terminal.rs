@@ -147,6 +147,7 @@ static TTYD_UPSTREAM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 /// ttyd HTML is small; cap memory use if metadata were wrong or upstream misbehaves.
+/// Keep in sync with packages/web/src/lib/ttydHtmlResponse.ts.
 const MAX_TTYD_HTML_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Max binary/text WebSocket frame from the browser terminal facade (DoS guard).
 const MAX_TTYD_BROWSER_WS_FRAME_BYTES: usize = 512 * 1024;
