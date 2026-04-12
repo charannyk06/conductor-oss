@@ -18,6 +18,7 @@ type ConnectionInfo = {
   reason?: string | null;
   wsUrl?: string | null;
   wsProtocol?: string | null;
+  ttydWsUrl?: string | null;
   outputUrl?: string | null;
 };
 
@@ -292,7 +293,8 @@ export function IframeTerminalPage({
       throw new Error((info as { error?: string } | null)?.error ?? `Failed to resolve terminal (${response.status})`);
     }
 
-    if (!info?.wsUrl) {
+    const tokenWsUrl = info?.wsUrl ?? info?.ttydWsUrl ?? null;
+    if (!tokenWsUrl) {
       const hasOutput = await loadStoredOutput(info?.outputUrl);
       if (hasOutput) {
         waitingForTerminalRef.current = false;
@@ -306,14 +308,15 @@ export function IframeTerminalPage({
       return;
     }
 
+    const resolvedInfo = info as ConnectionInfo;
     const relayConnection = usesRelayTerminal ? await fetchRelayTerminalUrl() : null;
-    const directWsProtocol = typeof info.wsProtocol === "string" && info.wsProtocol.trim().length > 0
-      ? info.wsProtocol.trim()
-      : null;
+    const directWsProtocol = typeof resolvedInfo.wsProtocol === "string" && resolvedInfo.wsProtocol.trim().length > 0
+      ? resolvedInfo.wsProtocol.trim()
+      : (typeof resolvedInfo.ttydWsUrl === "string" && resolvedInfo.ttydWsUrl.trim().length > 0 ? "tty" : null);
     const useTtydProtocol = Boolean(
       relayConnection || directWsProtocol?.toLowerCase() === "tty",
     );
-    const resolvedDirectWsUrl = resolveNativeTerminalWebSocketUrl(info.wsUrl, window.location.origin);
+    const resolvedDirectWsUrl = resolveNativeTerminalWebSocketUrl(tokenWsUrl, window.location.origin);
     const ws = relayConnection
       ? new WebSocket(relayConnection.wsUrl, relayConnection.wsProtocol)
       : directWsProtocol
