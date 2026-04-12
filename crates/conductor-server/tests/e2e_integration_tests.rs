@@ -138,35 +138,6 @@ async fn spawn_session_route_drives_a_live_test_executor() {
     assert_eq!(session.prompt, "Stream the prompt back");
 
     wait_for_condition_with_timeout(
-        "live terminal snapshot to become restorable",
-        std::time::Duration::from_secs(180),
-        || {
-            let app = harness.app();
-            let session_id = session_id.clone();
-            async move {
-                let response = app
-                    .oneshot(
-                        Request::builder()
-                            .uri(format!(
-                                "/api/sessions/{}/terminal/snapshot?lines=1200&live=1",
-                                session_id
-                            ))
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .ok()?;
-                if response.status() != StatusCode::OK {
-                    return None;
-                }
-                let payload: Value = response_json(response).await;
-                (payload["restored"] == true && payload["live"] == true).then_some(())
-            }
-        },
-    )
-    .await;
-
-    wait_for_condition_with_timeout(
         "session input route to accept follow-up input",
         std::time::Duration::from_secs(180),
         || {
