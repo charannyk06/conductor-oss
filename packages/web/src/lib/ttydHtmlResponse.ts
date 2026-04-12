@@ -1,5 +1,4 @@
-// Keep in sync with crates/conductor-server/src/routes/terminal.rs.
-const MAX_TTYD_HTML_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_TTYD_HTML_RESPONSE_BYTES = 512 * 1024;
 const TTYD_HTML_TOO_LARGE_ERROR = "ttyd frontend response is too large";
 
 export async function readTtydHtmlResponse(proxied: Response): Promise<string | null> {
