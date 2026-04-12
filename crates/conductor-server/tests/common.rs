@@ -44,6 +44,22 @@ fn build_test_executor_script(prompt: &str, auto_complete: bool) -> String {
     segments.join("; ")
 }
 
+fn test_shell_path() -> &'static Path {
+    if Path::new("/bin/bash").is_file() {
+        Path::new("/bin/bash")
+    } else {
+        Path::new("/bin/sh")
+    }
+}
+
+fn test_shell_args(command: String) -> Vec<String> {
+    if test_shell_path() == Path::new("/bin/bash") {
+        vec!["-lc".to_string(), command]
+    } else {
+        vec!["-c".to_string(), command]
+    }
+}
+
 pub struct TestExecutor {
     pub kind: AgentKind,
     pub auto_complete: bool,
@@ -60,7 +76,7 @@ impl Executor for TestExecutor {
     }
 
     fn binary_path(&self) -> &Path {
-        Path::new("/bin/sh")
+        test_shell_path()
     }
 
     async fn is_available(&self) -> bool {
@@ -85,10 +101,10 @@ impl Executor for TestExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
-        vec![
-            "-lc".to_string(),
-            build_test_executor_script(&options.prompt, self.auto_complete),
-        ]
+        test_shell_args(build_test_executor_script(
+            &options.prompt,
+            self.auto_complete,
+        ))
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
@@ -117,7 +133,7 @@ impl Executor for ResumeExecutor {
     }
 
     fn binary_path(&self) -> &Path {
-        Path::new("/bin/sh")
+        test_shell_path()
     }
 
     async fn is_available(&self) -> bool {
@@ -142,11 +158,10 @@ impl Executor for ResumeExecutor {
     }
 
     fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
-        vec![
-            "-lc".to_string(),
+        test_shell_args(
             "printf 'ready\\n'; IFS= read -r line; printf 'echo:%s\\n' \"$line\"; sleep 0.2"
                 .to_string(),
-        ]
+        )
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
