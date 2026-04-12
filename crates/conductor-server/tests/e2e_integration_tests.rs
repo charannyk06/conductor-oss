@@ -160,7 +160,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
                     return None;
                 }
                 let payload: Value = response_json(response).await;
-                (payload["restored"] == true).then_some(())
+                (payload["restored"] == true && payload["live"] == true).then_some(())
             }
         },
     )
