@@ -10,6 +10,10 @@ import {
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
+import {
+  buildBundledTtydHtmlResponse,
+  loadBundledTtydFrontendHtml,
+} from "@/lib/bundledTtydFrontend";
 import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
@@ -43,7 +47,9 @@ export async function GET(
 
     const html = await readTtydHtmlResponse(proxied);
     if (html === null) {
-      return proxied;
+      return buildBundledTtydHtmlResponse(
+        injectTtydResizeShim(loadBundledTtydFrontendHtml()),
+      );
     }
 
     return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
@@ -74,13 +80,15 @@ export async function GET(
   }
 
   const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return proxied;
-  }
+  const ttydHtml = html ?? loadBundledTtydFrontendHtml();
 
   const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
+    injectBridgeTtydRelayShim(ttydHtml, relayTtydWsUrl),
   );
+
+  if (html === null) {
+    return buildBundledTtydHtmlResponse(patchedHtml);
+  }
 
   return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
 }
