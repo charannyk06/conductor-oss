@@ -165,6 +165,19 @@ function appendBridgeIdToTerminalUrl(
   }
 }
 
+function buildEmbeddedTerminalUrl(
+  sessionId: string,
+  dashboardOrigin: string,
+  bridgeId?: string | null,
+): string {
+  const url = new URL(`/embed/terminal/${encodeURIComponent(sessionId)}`, dashboardOrigin);
+  const normalizedBridgeId = bridgeId?.trim();
+  if (normalizedBridgeId) {
+    url.searchParams.set("bridgeId", normalizedBridgeId);
+  }
+  return url.toString();
+}
+
 type ResolveTerminalConnectionOptions = {
   bridgeId?: string | null;
   signal?: AbortSignal;
@@ -185,6 +198,8 @@ async function fetchTerminalToken(
   const data = (await res.json().catch(() => null)) as
     | {
       required?: boolean;
+      wsUrl?: string;
+      wsProtocol?: string;
       ttydHttpUrl?: string;
       ttydWsUrl?: string;
       tunnelUrl?: string;
@@ -197,10 +212,14 @@ async function fetchTerminalToken(
     typeof data?.ttydHttpUrl === "string" && data.ttydHttpUrl.trim().length > 0
       ? data.ttydHttpUrl.trim()
       : null;
+  const wsUrl =
+    typeof data?.wsUrl === "string" && data.wsUrl.trim().length > 0
+      ? data.wsUrl.trim()
+      : null;
   const ttydWsUrl =
     typeof data?.ttydWsUrl === "string" && data.ttydWsUrl.trim().length > 0
       ? data.ttydWsUrl.trim()
-      : null;
+      : wsUrl;
   const tunnelUrl =
     typeof data?.tunnelUrl === "string" && data.tunnelUrl.trim().length > 0
       ? data.tunnelUrl.trim()
@@ -317,6 +336,27 @@ export async function resolveTerminalConnection(
     backendOrigin,
     dashboardOrigin,
   );
+
+  // Frontend-only iframe path: when the backend exposes only the native terminal
+  // websocket contract, render the existing iframe page instead of trying to open a
+  // ttyd HTML route that does not exist on the current backend.
+  if (!auth.ttydHttpUrl && auth.ttydWsUrl) {
+    const embeddedTerminalUrl = buildEmbeddedTerminalUrl(
+      sessionId,
+      dashboardOrigin,
+      options?.bridgeId,
+    );
+    return {
+      terminalUrl: embeddedTerminalUrl,
+      terminalLinkUrl: embeddedTerminalUrl,
+      relayTtydWsUrl: auth.relayTtydWsUrl,
+      interactive: true,
+      reason: null,
+      expiresInSeconds: auth.expiresInSeconds,
+      tunnelUrl: auth.tunnelUrl,
+    };
+  }
+
   if (!resolvedTerminalUrl) {
     return {
       terminalUrl: null,
