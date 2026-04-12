@@ -136,7 +136,7 @@ fn push_terminal_auth_set_cookie(
     }
 }
 
-/// HTTP client for fetching ttyd's bundled HTML from the local ttyd process only.
+/// HTTP client for fetching an optional loopback ttyd frontend override.
 static TTYD_UPSTREAM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -147,6 +147,7 @@ static TTYD_UPSTREAM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 /// ttyd HTML is small; cap memory use if metadata were wrong or upstream misbehaves.
+/// Keep in sync with packages/web/src/lib/ttydHtmlResponse.ts.
 const MAX_TTYD_HTML_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Max binary/text WebSocket frame from the browser terminal facade (DoS guard).
 const MAX_TTYD_BROWSER_WS_FRAME_BYTES: usize = 512 * 1024;
@@ -155,21 +156,7 @@ const MAX_TERMINAL_KEYS_PAYLOAD_BYTES: usize = 65_536;
 /// Max raw input chunk forwarded to the PTY per WebSocket message.
 const MAX_TTYD_INPUT_CHUNK_BYTES: usize = 256 * 1024;
 const SHARED_TTYD_FRONTEND_URL_ENV: &str = "CONDUCTOR_TTYD_FRONTEND_URL";
-const SHARED_TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
-const SHARED_TTYD_FRONTEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-
-enum SharedTtydFrontendSource {
-    External,
-    Child(tokio::process::Child),
-}
-
-struct SharedTtydFrontend {
-    base_url: String,
-    source: SharedTtydFrontendSource,
-}
-
-static SHARED_TTYD_FRONTEND: LazyLock<tokio::sync::Mutex<Option<SharedTtydFrontend>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(None));
+const BUNDLED_TTYD_FRONTEND_HTML: &str = include_str!("ttyd_frontend_v1.7.7.html");
 
 const TTYD_MOBILE_TOUCH_SHIM_MARKER: &str = "conductor-ttyd-mobile-touch-shim";
 const TTYD_MOBILE_TOUCH_SHIM: &str = r#"
@@ -1310,122 +1297,6 @@ fn terminal_output_path(session_id: &str) -> String {
     format!("/api/sessions/{session_id}/output")
 }
 
-fn candidate_ttyd_paths(workspace_path: &StdPath) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    candidates.push(workspace_path.join(".conductor").join("bin").join("ttyd"));
-    candidates.push(
-        workspace_path
-            .join(".conductor")
-            .join("rust-backend")
-            .join("bin")
-            .join("ttyd"),
-    );
-
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(home.join(".local").join("bin").join("ttyd"));
-        candidates.push(home.join(".cargo").join("bin").join("ttyd"));
-        candidates.push(home.join(".bun").join("bin").join("ttyd"));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        candidates.push(PathBuf::from("/opt/homebrew/bin/ttyd"));
-        candidates.push(PathBuf::from("/usr/local/bin/ttyd"));
-    }
-
-    candidates
-}
-
-fn is_launchable_ttyd(path: &StdPath) -> bool {
-    path.is_file()
-}
-
-fn resolve_ttyd_binary(workspace_path: &StdPath) -> Option<PathBuf> {
-    if let Ok(override_path) = std::env::var(SHARED_TTYD_BINARY_ENV) {
-        let candidate = PathBuf::from(override_path.trim());
-        if is_launchable_ttyd(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    for candidate in candidate_ttyd_paths(workspace_path) {
-        if is_launchable_ttyd(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    which::which("ttyd").ok()
-}
-
-fn ttyd_missing_error(workspace_path: &StdPath) -> anyhow::Error {
-    let searched = candidate_ttyd_paths(workspace_path)
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    anyhow!(
-        "ttyd frontend is required, but no ttyd binary was found. Install ttyd, set {SHARED_TTYD_BINARY_ENV}, or place the binary in one of: {searched}"
-    )
-}
-
-fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .context("Failed to reserve a loopback port for ttyd")?;
-    listener
-        .set_nonblocking(true)
-        .context("Failed to set listener non-blocking")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let optval: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                listener.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            tracing::debug!(
-                error = %std::io::Error::last_os_error(),
-                "SO_REUSEADDR setsockopt failed while reserving ttyd port"
-            );
-        }
-    }
-    let port = listener
-        .local_addr()
-        .context("Failed to read reserved ttyd port")?
-        .port();
-    Ok((listener, port))
-}
-
-async fn wait_for_ttyd_startup(child: &mut tokio::process::Child, port: u16) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + SHARED_TTYD_FRONTEND_STARTUP_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait().context("Failed to poll ttyd process")? {
-            return Err(anyhow!(
-                "ttyd exited before accepting connections: {status}"
-            ));
-        }
-
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return Ok(());
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!("ttyd startup timeout"));
-        }
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 fn normalize_ttyd_frontend_base_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1452,76 +1323,89 @@ fn normalize_ttyd_frontend_base_url(raw: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-async fn shared_ttyd_frontend_base_url() -> Result<String> {
-    if let Ok(raw_url) = std::env::var(SHARED_TTYD_FRONTEND_URL_ENV) {
-        let base_url = normalize_ttyd_frontend_base_url(&raw_url).ok_or_else(|| {
-            anyhow!("{SHARED_TTYD_FRONTEND_URL_ENV} must point to a loopback ttyd frontend URL")
-        })?;
-        let mut guard = SHARED_TTYD_FRONTEND.lock().await;
-        *guard = Some(SharedTtydFrontend {
-            base_url: base_url.clone(),
-            source: SharedTtydFrontendSource::External,
-        });
-        return Ok(base_url);
-    }
+async fn load_ttyd_frontend_html(session_id: &str) -> String {
+    let Ok(raw_url) = std::env::var(SHARED_TTYD_FRONTEND_URL_ENV) else {
+        return BUNDLED_TTYD_FRONTEND_HTML.to_string();
+    };
 
-    let mut guard = SHARED_TTYD_FRONTEND.lock().await;
-    if let Some(existing) = guard.take() {
-        match existing.source {
-            SharedTtydFrontendSource::External => {}
-            SharedTtydFrontendSource::Child(mut child) => match child.try_wait() {
-                Ok(None) => {
-                    let base_url = existing.base_url.clone();
-                    *guard = Some(SharedTtydFrontend {
-                        base_url: existing.base_url,
-                        source: SharedTtydFrontendSource::Child(child),
-                    });
-                    return Ok(base_url);
-                }
-                Ok(Some(status)) => {
-                    tracing::warn!(status = %status, "shared ttyd frontend exited, restarting");
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to poll shared ttyd frontend, restarting");
-                }
-            },
+    let Some(ttyd_http_url) = normalize_ttyd_frontend_base_url(&raw_url) else {
+        tracing::warn!(
+            session_id = %session_id,
+            override_url = %raw_url,
+            "Ignoring invalid ttyd frontend override URL"
+        );
+        return BUNDLED_TTYD_FRONTEND_HTML.to_string();
+    };
+
+    let parsed_upstream = match reqwest::Url::parse(&ttyd_http_url) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to parse ttyd frontend override URL"
+            );
+            return BUNDLED_TTYD_FRONTEND_HTML.to_string();
         }
+    };
+
+    let upstream = match TTYD_UPSTREAM_CLIENT.get(parsed_upstream).send().await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to fetch ttyd frontend override HTML"
+            );
+            return BUNDLED_TTYD_FRONTEND_HTML.to_string();
+        }
+    };
+
+    if upstream
+        .content_length()
+        .is_some_and(|len| len > MAX_TTYD_HTML_RESPONSE_BYTES as u64)
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            "ttyd frontend override response exceeded max size, using bundled frontend"
+        );
+        return BUNDLED_TTYD_FRONTEND_HTML.to_string();
     }
 
-    let workspace_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let ttyd_binary =
-        resolve_ttyd_binary(&workspace_path).ok_or_else(|| ttyd_missing_error(&workspace_path))?;
-    let (port_listener, port) = reserve_ttyd_port()?;
-    let base_url = format!("http://127.0.0.1:{port}/");
-
-    let mut cmd = tokio::process::Command::new(ttyd_binary);
-    cmd.arg("-p")
-        .arg(port.to_string())
-        .arg("-i")
-        .arg("127.0.0.1")
-        .arg("-W")
-        .arg("/bin/sh")
-        .arg("-lc")
-        .arg("while :; do sleep 3600; done")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    let mut child = cmd
-        .spawn()
-        .context("Failed to spawn shared ttyd frontend")?;
-    if let Err(err) = wait_for_ttyd_startup(&mut child, port).await {
-        let _ = child.start_kill();
-        return Err(err);
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8"));
+    if !content_type_is_html(&content_type) {
+        tracing::warn!(
+            session_id = %session_id,
+            content_type = %content_type.to_str().unwrap_or("<invalid>"),
+            "ttyd frontend override did not return HTML, using bundled frontend"
+        );
+        return BUNDLED_TTYD_FRONTEND_HTML.to_string();
     }
-    drop(port_listener);
 
-    *guard = Some(SharedTtydFrontend {
-        base_url: base_url.clone(),
-        source: SharedTtydFrontendSource::Child(child),
-    });
+    let body = match upstream.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to read ttyd frontend override HTML"
+            );
+            return BUNDLED_TTYD_FRONTEND_HTML.to_string();
+        }
+    };
+    if body.len() > MAX_TTYD_HTML_RESPONSE_BYTES {
+        tracing::warn!(
+            session_id = %session_id,
+            "ttyd frontend override body exceeded max size, using bundled frontend"
+        );
+        return BUNDLED_TTYD_FRONTEND_HTML.to_string();
+    }
 
-    Ok(base_url)
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 fn client_requests_tty_subprotocol(headers: &HeaderMap) -> bool {
@@ -1701,102 +1585,20 @@ async fn terminal_ttyd_frontend(
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    let ttyd_http_url = match shared_ttyd_frontend_base_url().await {
-        Ok(url) => url,
-        Err(err) => {
-            tracing::warn!(session_id = %id, error = %err, "Failed to resolve shared ttyd frontend HTML source");
-            return error(
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to load ttyd frontend: {err}"),
-            )
-            .into_response();
-        }
-    };
-
-    let parsed_upstream = match reqwest::Url::parse(&ttyd_http_url) {
-        Ok(url) => url,
-        Err(err) => {
-            tracing::warn!(session_id = %id, error = %err, "Malformed ttyd HTTP URL");
-            return error(
-                StatusCode::BAD_GATEWAY,
-                "Malformed ttyd upstream URL".to_string(),
-            )
-            .into_response();
-        }
-    };
-    if !is_safe_conductor_ttyd_upstream_url(&parsed_upstream) {
-        tracing::error!(session_id = %id, "Rejected ttyd upstream URL (not loopback)");
-        return error(
-            StatusCode::BAD_GATEWAY,
-            "Refusing unsafe ttyd upstream URL".to_string(),
-        )
-        .into_response();
+    let mut html = load_ttyd_frontend_html(&id).await;
+    html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
+    html = inject_ttyd_resize_shim(&html);
+    html = inject_ttyd_auth_sync_shim(&html);
+    if should_inject_ttyd_mobile_touch_shim(&session) {
+        html = inject_ttyd_mobile_touch_shim(&html);
     }
 
-    let upstream = match TTYD_UPSTREAM_CLIENT.get(parsed_upstream).send().await {
-        Ok(upstream) => upstream,
-        Err(err) => {
-            tracing::warn!(session_id = %id, error = %err, "Failed to load ttyd frontend HTML");
-            return error(
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to load ttyd frontend: {err}"),
-            )
-            .into_response();
-        }
-    };
-
-    if upstream
-        .content_length()
-        .is_some_and(|len| len > MAX_TTYD_HTML_RESPONSE_BYTES as u64)
-    {
-        return error(
-            StatusCode::BAD_GATEWAY,
-            "ttyd frontend response is too large".to_string(),
-        )
-        .into_response();
-    }
-
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let content_type = upstream
-        .headers()
-        .get(CONTENT_TYPE)
-        .cloned()
-        .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8"));
-    let body = match upstream.bytes().await {
-        Ok(body) => body,
-        Err(err) => {
-            tracing::warn!(session_id = %id, error = %err, "Failed to read ttyd frontend HTML");
-            return error(
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to read ttyd frontend: {err}"),
-            )
-            .into_response();
-        }
-    };
-    if body.len() > MAX_TTYD_HTML_RESPONSE_BYTES {
-        return error(
-            StatusCode::BAD_GATEWAY,
-            "ttyd frontend response is too large".to_string(),
-        )
-        .into_response();
-    }
-    let body = if content_type_is_html(&content_type) {
-        let mut html = String::from_utf8_lossy(&body).into_owned();
-        html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
-        html = inject_ttyd_resize_shim(&html);
-        html = inject_ttyd_auth_sync_shim(&html);
-        if should_inject_ttyd_mobile_touch_shim(&session) {
-            html = inject_ttyd_mobile_touch_shim(&html);
-        }
-        html.into_bytes()
-    } else {
-        body.to_vec()
-    };
-
-    let mut response = Response::new(body.into());
-    *response.status_mut() = status;
-    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    let mut response = Response::new(html.into_bytes().into());
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     response
 }
 
@@ -2681,6 +2483,14 @@ mod tests {
         assert!(last_sequence_sent > stale.sequence);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_ttyd_frontend_html_contains_expected_shell_markers() {
+        assert!(BUNDLED_TTYD_FRONTEND_HTML.contains("<!DOCTYPE html>"));
+        assert!(BUNDLED_TTYD_FRONTEND_HTML.contains("ttyd - Terminal"));
+        assert!(BUNDLED_TTYD_FRONTEND_HTML.contains("/token"));
+        assert!(BUNDLED_TTYD_FRONTEND_HTML.contains("/ws"));
     }
 
     #[test]

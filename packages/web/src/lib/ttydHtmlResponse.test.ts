@@ -29,7 +29,7 @@ test("readTtydHtmlResponse still rejects oversized ttyd HTML responses", async (
   const proxied = new Response("<html><body>large</body></html>", {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "content-length": String(600 * 1024),
+      "content-length": String(9 * 1024 * 1024),
     },
   });
 
