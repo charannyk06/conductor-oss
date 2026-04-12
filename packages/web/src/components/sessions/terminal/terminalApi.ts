@@ -198,6 +198,8 @@ async function fetchTerminalToken(
   const data = (await res.json().catch(() => null)) as
     | {
       required?: boolean;
+      wsUrl?: string;
+      wsProtocol?: string;
       ttydHttpUrl?: string;
       ttydWsUrl?: string;
       tunnelUrl?: string;
@@ -210,10 +212,14 @@ async function fetchTerminalToken(
     typeof data?.ttydHttpUrl === "string" && data.ttydHttpUrl.trim().length > 0
       ? data.ttydHttpUrl.trim()
       : null;
+  const wsUrl =
+    typeof data?.wsUrl === "string" && data.wsUrl.trim().length > 0
+      ? data.wsUrl.trim()
+      : null;
   const ttydWsUrl =
     typeof data?.ttydWsUrl === "string" && data.ttydWsUrl.trim().length > 0
       ? data.ttydWsUrl.trim()
-      : null;
+      : wsUrl;
   const tunnelUrl =
     typeof data?.tunnelUrl === "string" && data.tunnelUrl.trim().length > 0
       ? data.tunnelUrl.trim()

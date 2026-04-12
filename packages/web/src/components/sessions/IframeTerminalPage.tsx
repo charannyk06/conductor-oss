@@ -17,6 +17,7 @@ type ConnectionInfo = {
   interactive?: boolean;
   reason?: string | null;
   wsUrl?: string | null;
+  wsProtocol?: string | null;
   outputUrl?: string | null;
 };
 
@@ -91,6 +92,7 @@ export function IframeTerminalPage({
   const cleanupTouchRef = useRef<(() => void) | null>(null);
   const retryAttemptRef = useRef(0);
   const decoderRef = useRef(new TextDecoder());
+  const ttydProtocolRef = useRef(false);
   const connectInvokerRef = useRef<(() => void) | null>(null);
   const waitingForTerminalRef = useRef(false);
   const loadedOutputRef = useRef<string | null>(null);
@@ -113,6 +115,7 @@ export function IframeTerminalPage({
   const closeSocket = useCallback(() => {
     const socket = socketRef.current;
     socketRef.current = null;
+    ttydProtocolRef.current = false;
     allowReconnectRef.current = false;
     if (!socket) {
       return;
@@ -304,11 +307,21 @@ export function IframeTerminalPage({
     }
 
     const relayConnection = usesRelayTerminal ? await fetchRelayTerminalUrl() : null;
+    const directWsProtocol = typeof info.wsProtocol === "string" && info.wsProtocol.trim().length > 0
+      ? info.wsProtocol.trim()
+      : null;
+    const useTtydProtocol = Boolean(
+      relayConnection || directWsProtocol?.toLowerCase() === "tty",
+    );
+    const resolvedDirectWsUrl = resolveNativeTerminalWebSocketUrl(info.wsUrl, window.location.origin);
     const ws = relayConnection
       ? new WebSocket(relayConnection.wsUrl, relayConnection.wsProtocol)
-      : new WebSocket(resolveNativeTerminalWebSocketUrl(info.wsUrl, window.location.origin));
+      : directWsProtocol
+        ? new WebSocket(resolvedDirectWsUrl, directWsProtocol)
+        : new WebSocket(resolvedDirectWsUrl);
     ws.binaryType = "arraybuffer";
     socketRef.current = ws;
+    ttydProtocolRef.current = useTtydProtocol;
 
     ws.onopen = () => {
       retryAttemptRef.current = 0;
@@ -321,7 +334,7 @@ export function IframeTerminalPage({
         hasConnectedOnceRef.current = true;
       }
       const geometry = fitTerminal();
-      if (relayConnection) {
+      if (useTtydProtocol) {
         ws.send(encodeResizeFrame(geometry?.cols ?? 120, geometry?.rows ?? 32));
       } else {
         ws.send(JSON.stringify({
@@ -335,7 +348,7 @@ export function IframeTerminalPage({
     ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
         const frame = new Uint8Array(event.data);
-        if (relayConnection) {
+        if (useTtydProtocol) {
           if (frame.length === 0) {
             return;
           }
@@ -393,7 +406,11 @@ export function IframeTerminalPage({
 
     ws.onerror = () => {
       writeTerminalNotice(
-        relayConnection ? "Relay terminal connection failed." : "Terminal websocket failed.",
+        relayConnection
+          ? "Relay terminal connection failed."
+          : useTtydProtocol
+            ? "TTYD terminal websocket failed."
+            : "Terminal websocket failed.",
       );
     };
 
@@ -427,7 +444,7 @@ export function IframeTerminalPage({
     if (!geometry || !socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (usesRelayTerminal) {
+    if (ttydProtocolRef.current) {
       socket.send(encodeResizeFrame(geometry.cols, geometry.rows));
     } else {
       socket.send(JSON.stringify({
@@ -518,7 +535,7 @@ export function IframeTerminalPage({
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (usesRelayTerminal) {
+      if (ttydProtocolRef.current) {
         socket.send(encodeInputFrame(data));
       } else {
         socket.send(JSON.stringify({ type: "input", data }));

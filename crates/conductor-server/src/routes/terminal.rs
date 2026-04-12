@@ -20,9 +20,7 @@ use crate::routes::config::access_control_enabled;
 use crate::routes::ttyd_protocol;
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
-    DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_TUNNEL_URL_METADATA_KEY,
-    TTYD_WS_URL_METADATA_KEY,
+    DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -156,6 +154,23 @@ const MAX_TTYD_BROWSER_WS_FRAME_BYTES: usize = 512 * 1024;
 const MAX_TERMINAL_KEYS_PAYLOAD_BYTES: usize = 65_536;
 /// Max raw input chunk forwarded to the PTY per WebSocket message.
 const MAX_TTYD_INPUT_CHUNK_BYTES: usize = 256 * 1024;
+const SHARED_TTYD_FRONTEND_URL_ENV: &str = "CONDUCTOR_TTYD_FRONTEND_URL";
+const SHARED_TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
+const SHARED_TTYD_FRONTEND_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+enum SharedTtydFrontendSource {
+    External,
+    Child(tokio::process::Child),
+}
+
+struct SharedTtydFrontend {
+    base_url: String,
+    source: SharedTtydFrontendSource,
+}
+
+static SHARED_TTYD_FRONTEND: LazyLock<tokio::sync::Mutex<Option<SharedTtydFrontend>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(None));
+
 const TTYD_MOBILE_TOUCH_SHIM_MARKER: &str = "conductor-ttyd-mobile-touch-shim";
 const TTYD_MOBILE_TOUCH_SHIM: &str = r#"
 <!-- conductor-ttyd-mobile-touch-shim -->
@@ -978,18 +993,6 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
     script
 }
 
-fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
-    let runtime_mode = session
-        .metadata
-        .get(RUNTIME_MODE_METADATA_KEY)
-        .map(String::as_str);
-    if runtime_mode != Some(TTYD_RUNTIME_MODE) {
-        return None;
-    }
-
-    session.metadata.get(TTYD_WS_URL_METADATA_KEY).cloned()
-}
-
 /// ttyd is always bound to loopback. Reject anything else so session metadata cannot be turned into SSRF.
 fn is_safe_conductor_ttyd_upstream_url(url: &reqwest::Url) -> bool {
     if !url.username().is_empty() {
@@ -1053,10 +1056,6 @@ fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-fn ttyd_session_http_url(session: &SessionRecord) -> Option<String> {
-    ttyd_session_ws_url(session).and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
-}
-
 fn content_type_is_html(content_type: &HeaderValue) -> bool {
     content_type
         .to_str()
@@ -1065,8 +1064,8 @@ fn content_type_is_html(content_type: &HeaderValue) -> bool {
         .unwrap_or(false)
 }
 
-fn should_inject_ttyd_mobile_touch_shim(session: &SessionRecord) -> bool {
-    ttyd_session_ws_url(session).is_some()
+fn should_inject_ttyd_mobile_touch_shim(_session: &SessionRecord) -> bool {
+    true
 }
 
 fn inject_ttyd_mobile_touch_shim(html: &str) -> String {
@@ -1195,10 +1194,6 @@ pub fn router() -> Router<Arc<AppState>> {
             get(terminal_ttyd_frontend),
         )
         .route(
-            "/api/sessions/{id}/terminal/ttyd/token",
-            get(terminal_ttyd_frontend_token),
-        )
-        .route(
             "/api/sessions/{id}/terminal/snapshot",
             get(terminal_snapshot),
         )
@@ -1307,6 +1302,228 @@ fn ttyd_frontend_proxy_ws_path(session_id: &str, token: Option<&str>) -> String 
     }
 }
 
+fn terminal_snapshot_path(session_id: &str) -> String {
+    format!("/api/sessions/{session_id}/terminal/snapshot?live=1")
+}
+
+fn terminal_output_path(session_id: &str) -> String {
+    format!("/api/sessions/{session_id}/output")
+}
+
+fn candidate_ttyd_paths(workspace_path: &StdPath) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    candidates.push(workspace_path.join(".conductor").join("bin").join("ttyd"));
+    candidates.push(
+        workspace_path
+            .join(".conductor")
+            .join("rust-backend")
+            .join("bin")
+            .join("ttyd"),
+    );
+
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".local").join("bin").join("ttyd"));
+        candidates.push(home.join(".cargo").join("bin").join("ttyd"));
+        candidates.push(home.join(".bun").join("bin").join("ttyd"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from("/opt/homebrew/bin/ttyd"));
+        candidates.push(PathBuf::from("/usr/local/bin/ttyd"));
+    }
+
+    candidates
+}
+
+fn is_launchable_ttyd(path: &StdPath) -> bool {
+    path.is_file()
+}
+
+fn resolve_ttyd_binary(workspace_path: &StdPath) -> Option<PathBuf> {
+    if let Ok(override_path) = std::env::var(SHARED_TTYD_BINARY_ENV) {
+        let candidate = PathBuf::from(override_path.trim());
+        if is_launchable_ttyd(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    for candidate in candidate_ttyd_paths(workspace_path) {
+        if is_launchable_ttyd(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    which::which("ttyd").ok()
+}
+
+fn ttyd_missing_error(workspace_path: &StdPath) -> anyhow::Error {
+    let searched = candidate_ttyd_paths(workspace_path)
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow!(
+        "ttyd frontend is required, but no ttyd binary was found. Install ttyd, set {SHARED_TTYD_BINARY_ENV}, or place the binary in one of: {searched}"
+    )
+}
+
+fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .context("Failed to reserve a loopback port for ttyd")?;
+    listener
+        .set_nonblocking(true)
+        .context("Failed to set listener non-blocking")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let optval: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                listener.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            tracing::debug!(
+                error = %std::io::Error::last_os_error(),
+                "SO_REUSEADDR setsockopt failed while reserving ttyd port"
+            );
+        }
+    }
+    let port = listener
+        .local_addr()
+        .context("Failed to read reserved ttyd port")?
+        .port();
+    Ok((listener, port))
+}
+
+async fn wait_for_ttyd_startup(child: &mut tokio::process::Child, port: u16) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + SHARED_TTYD_FRONTEND_STARTUP_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().context("Failed to poll ttyd process")? {
+            return Err(anyhow!(
+                "ttyd exited before accepting connections: {status}"
+            ));
+        }
+
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!("ttyd startup timeout"));
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn normalize_ttyd_frontend_base_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut url = if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        reqwest::Url::parse(&ttyd_http_url_from_ws_url(trimmed)?).ok()?
+    } else {
+        reqwest::Url::parse(trimmed).ok()?
+    };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    if !is_safe_conductor_ttyd_upstream_url(&url) {
+        return None;
+    }
+
+    if url.path().is_empty() || url.path() == "/ws" {
+        url.set_path("/");
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+async fn shared_ttyd_frontend_base_url() -> Result<String> {
+    if let Ok(raw_url) = std::env::var(SHARED_TTYD_FRONTEND_URL_ENV) {
+        let base_url = normalize_ttyd_frontend_base_url(&raw_url).ok_or_else(|| {
+            anyhow!("{SHARED_TTYD_FRONTEND_URL_ENV} must point to a loopback ttyd frontend URL")
+        })?;
+        let mut guard = SHARED_TTYD_FRONTEND.lock().await;
+        *guard = Some(SharedTtydFrontend {
+            base_url: base_url.clone(),
+            source: SharedTtydFrontendSource::External,
+        });
+        return Ok(base_url);
+    }
+
+    let mut guard = SHARED_TTYD_FRONTEND.lock().await;
+    if let Some(existing) = guard.take() {
+        match existing.source {
+            SharedTtydFrontendSource::External => {}
+            SharedTtydFrontendSource::Child(mut child) => match child.try_wait() {
+                Ok(None) => {
+                    let base_url = existing.base_url.clone();
+                    *guard = Some(SharedTtydFrontend {
+                        base_url: existing.base_url,
+                        source: SharedTtydFrontendSource::Child(child),
+                    });
+                    return Ok(base_url);
+                }
+                Ok(Some(status)) => {
+                    tracing::warn!(status = %status, "shared ttyd frontend exited, restarting");
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to poll shared ttyd frontend, restarting");
+                }
+            },
+        }
+    }
+
+    let workspace_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ttyd_binary =
+        resolve_ttyd_binary(&workspace_path).ok_or_else(|| ttyd_missing_error(&workspace_path))?;
+    let (port_listener, port) = reserve_ttyd_port()?;
+    let base_url = format!("http://127.0.0.1:{port}/");
+
+    let mut cmd = tokio::process::Command::new(ttyd_binary);
+    cmd.arg("-p")
+        .arg(port.to_string())
+        .arg("-i")
+        .arg("127.0.0.1")
+        .arg("-W")
+        .arg("/bin/sh")
+        .arg("-lc")
+        .arg("while :; do sleep 3600; done")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = cmd
+        .spawn()
+        .context("Failed to spawn shared ttyd frontend")?;
+    if let Err(err) = wait_for_ttyd_startup(&mut child, port).await {
+        let _ = child.start_kill();
+        return Err(err);
+    }
+    drop(port_listener);
+
+    *guard = Some(SharedTtydFrontend {
+        base_url: base_url.clone(),
+        source: SharedTtydFrontendSource::Child(child),
+    });
+
+    Ok(base_url)
+}
+
 fn client_requests_tty_subprotocol(headers: &HeaderMap) -> bool {
     headers
         .get(SEC_WEBSOCKET_PROTOCOL)
@@ -1361,18 +1578,6 @@ async fn terminal_ttyd_frontend_websocket(
         }
     }
 
-    let Some(session) = state.get_session(&id).await else {
-        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
-    };
-
-    if ttyd_session_ws_url(&session).is_none() {
-        return error(
-            StatusCode::CONFLICT,
-            format!("Session {id} is not backed by ttyd"),
-        )
-        .into_response();
-    }
-
     ws.on_upgrade(move |socket| handle_ttyd_frontend_socket(state, id, socket))
 }
 
@@ -1390,51 +1595,37 @@ async fn build_terminal_token_response(
     scope: TerminalTokenScope,
     request_headers: &HeaderMap,
 ) -> Response {
-    let Some(initial_session) = state.get_session(&id).await else {
+    let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    if ttyd_session_ws_url(&initial_session).is_some()
-        && initial_session.metadata.contains_key(TTYD_PID_METADATA_KEY)
-    {
-        match state.ensure_session_live(&id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return error(StatusCode::CONFLICT, format!("Session {id} is not running"))
-                    .into_response();
-            }
-            Err(err) => {
-                tracing::warn!(
-                    session_id = %id,
-                    error = %err,
-                    "Failed to restore live terminal session before issuing token"
-                );
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to attach live terminal: {err}"),
-                )
-                .into_response();
-            }
+    let interactive = match state.ensure_session_live(&id).await {
+        Ok(interactive) => interactive,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %id,
+                error = %err,
+                "Failed to restore live terminal session before issuing token"
+            );
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to attach live terminal: {err}"),
+            )
+            .into_response();
         }
-    }
-
-    let Some(session) = state.get_session(&id).await else {
-        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
     let access = state.config.read().await.access.clone();
     let token_required = should_issue_terminal_token(&access);
-    let token = if token_required {
-        create_scoped_terminal_token(&id, scope).ok()
+    let token = if interactive && token_required {
+        match create_scoped_terminal_token(&id, scope) {
+            Ok(token) => Some(token),
+            Err(err) => {
+                return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            }
+        }
     } else {
         None
-    };
-    let Some(_ttyd_ws_url) = ttyd_session_ws_url(&session) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            format!("Session {id} does not expose a ttyd terminal"),
-        )
-        .into_response();
     };
     let embed_token_in_urls = !token_required || terminal_token_in_query_enabled();
     let url_token = if embed_token_in_urls {
@@ -1442,19 +1633,35 @@ async fn build_terminal_token_response(
     } else {
         None
     };
-    let ttyd_http_url = ttyd_frontend_proxy_path(&id, url_token);
-    let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, url_token);
-    let tunnel_url = session.metadata.get(TTYD_TUNNEL_URL_METADATA_KEY).cloned();
-
-    let mut response = Json(json!({
+    let ws_url = interactive.then(|| ttyd_frontend_proxy_ws_path(&id, url_token));
+    let ttyd_ws_url = ws_url.clone();
+    let ttyd_http_url = if interactive {
+        match shared_ttyd_frontend_base_url().await {
+            Ok(_) => Some(ttyd_frontend_proxy_path(&id, url_token)),
+            Err(err) => {
+                tracing::debug!(session_id = %id, error = %err, "ttyd frontend unavailable, falling back to embedded terminal page");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let payload = json!({
         "token": token,
         "required": token_required,
-        "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
+        "expiresInSeconds": if interactive && token_required { Some(TERMINAL_TOKEN_TTL_SECONDS) } else { None },
+        "interactive": interactive,
+        "reason": if interactive { Value::Null } else { Value::String("Session is not running".to_string()) },
+        "wsUrl": ws_url,
+        "wsProtocol": if interactive { Some("tty") } else { None },
+        "snapshotUrl": terminal_snapshot_path(&id),
+        "outputUrl": terminal_output_path(&id),
         "ttydHttpUrl": ttyd_http_url,
         "ttydWsUrl": ttyd_ws_url,
-        "tunnelUrl": tunnel_url,
-    }))
-    .into_response();
+        "tunnelUrl": Value::Null,
+    });
+
+    let mut response = Json(payload).into_response();
 
     if token_required {
         if let Some(token_value) = token.as_ref() {
@@ -1504,12 +1711,16 @@ async fn terminal_ttyd_frontend(
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    let Some(ttyd_http_url) = ttyd_session_http_url(&session) else {
-        return error(
-            StatusCode::CONFLICT,
-            format!("Session {id} does not expose a ttyd terminal"),
-        )
-        .into_response();
+    let ttyd_http_url = match shared_ttyd_frontend_base_url().await {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::warn!(session_id = %id, error = %err, "Failed to resolve shared ttyd frontend HTML source");
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to load ttyd frontend: {err}"),
+            )
+            .into_response();
+        }
     };
 
     let parsed_upstream = match reqwest::Url::parse(&ttyd_http_url) {
@@ -1597,32 +1808,6 @@ async fn terminal_ttyd_frontend(
     *response.status_mut() = status;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     response
-}
-
-async fn terminal_ttyd_frontend_token(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(session) = state.get_session(&id).await else {
-        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
-    };
-
-    if ttyd_session_ws_url(&session).is_none() {
-        return error(
-            StatusCode::CONFLICT,
-            format!("Session {id} does not expose a ttyd terminal"),
-        )
-        .into_response();
-    }
-
-    let access = state.config.read().await.access.clone();
-    let token = if should_issue_terminal_token(&access) {
-        create_scoped_terminal_token(&id, TerminalTokenScope::Control).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    Json(json!({ "token": token })).into_response()
 }
 
 async fn terminal_snapshot(
@@ -2344,7 +2529,6 @@ mod tests {
     use super::*;
     use crate::state::TERMINAL_RESTORE_SNAPSHOT_VERSION;
     use axum::body::{to_bytes, Body};
-    use axum::extract::{Path, State};
     use axum::http::Request;
     use conductor_core::config::ConductorConfig;
     use conductor_db::Database;
@@ -2673,50 +2857,24 @@ mod tests {
     }
 
     #[test]
-    fn should_inject_ttyd_mobile_touch_shim_for_all_ttyd_sessions() {
-        let mut ttyd_codex_session = SessionRecord::builder(
-            "session-ttyd-codex".to_string(),
+    fn should_inject_ttyd_mobile_touch_shim_for_all_terminal_facade_sessions() {
+        let codex_session = SessionRecord::builder(
+            "session-codex".to_string(),
             "project-1".to_string(),
             "codex".to_string(),
             "prompt".to_string(),
         )
         .build();
-        ttyd_codex_session.metadata.insert(
-            RUNTIME_MODE_METADATA_KEY.to_string(),
-            TTYD_RUNTIME_MODE.to_string(),
-        );
-        ttyd_codex_session.metadata.insert(
-            TTYD_WS_URL_METADATA_KEY.to_string(),
-            "ws://127.0.0.1:41002/ws".to_string(),
-        );
-
-        let mut ttyd_opencode_session = SessionRecord::builder(
-            "session-ttyd-opencode".to_string(),
+        let opencode_session = SessionRecord::builder(
+            "session-opencode".to_string(),
             "project-1".to_string(),
             "opencode".to_string(),
             "prompt".to_string(),
         )
         .build();
-        ttyd_opencode_session.metadata.insert(
-            RUNTIME_MODE_METADATA_KEY.to_string(),
-            TTYD_RUNTIME_MODE.to_string(),
-        );
-        ttyd_opencode_session.metadata.insert(
-            TTYD_WS_URL_METADATA_KEY.to_string(),
-            "ws://127.0.0.1:41003/ws".to_string(),
-        );
 
-        let non_ttyd_session = SessionRecord::builder(
-            "session-non-ttyd".to_string(),
-            "project-1".to_string(),
-            "codex".to_string(),
-            "prompt".to_string(),
-        )
-        .build();
-
-        assert!(should_inject_ttyd_mobile_touch_shim(&ttyd_codex_session));
-        assert!(should_inject_ttyd_mobile_touch_shim(&ttyd_opencode_session));
-        assert!(!should_inject_ttyd_mobile_touch_shim(&non_ttyd_session));
+        assert!(should_inject_ttyd_mobile_touch_shim(&codex_session));
+        assert!(should_inject_ttyd_mobile_touch_shim(&opencode_session));
     }
 
     #[test]
@@ -2932,29 +3090,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_token_response_exposes_backend_ttyd_proxy_urls() {
+    async fn terminal_token_response_exposes_ttyd_and_embedded_terminal_metadata() {
         let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(SHARED_TTYD_FRONTEND_URL_ENV, "http://127.0.0.1:41000/");
+        }
         let (state, root) = build_test_state().await;
-        let mut session = SessionRecord::builder(
-            "session-ttyd-token".to_string(),
-            "demo".to_string(),
-            "codex".to_string(),
-            "Validate ttyd token metadata".to_string(),
-        )
-        .build();
-        session.metadata.insert(
-            RUNTIME_MODE_METADATA_KEY.to_string(),
-            TTYD_RUNTIME_MODE.to_string(),
-        );
-        session.metadata.insert(
-            TTYD_WS_URL_METADATA_KEY.to_string(),
-            "ws://127.0.0.1:41000/ws".to_string(),
-        );
-        state
-            .sessions
-            .write()
-            .await
-            .insert(session.id.clone(), session.clone());
+        let (session, _input_rx) = seed_live_terminal_session(&state, "session-ttyd-token").await;
         state.config.write().await.access.require_auth = true;
 
         let response = build_terminal_token_response(
@@ -2981,9 +3123,15 @@ mod tests {
         let payload: Value =
             serde_json::from_slice(&body).expect("token response should be valid json");
 
+        assert_eq!(payload["interactive"], Value::Bool(true));
+        assert_eq!(payload["wsProtocol"], Value::String("tty".to_string()));
         let _token = payload["token"]
             .as_str()
             .expect("token should be included in ttyd token response");
+        assert_eq!(
+            payload["wsUrl"],
+            Value::String(format!("/api/sessions/{}/terminal/ttyd/ws", session.id))
+        );
         assert_eq!(
             payload["ttydHttpUrl"],
             Value::String(format!("/api/sessions/{}/terminal/ttyd", session.id))
@@ -2992,48 +3140,21 @@ mod tests {
             payload["ttydWsUrl"],
             Value::String(format!("/api/sessions/{}/terminal/ttyd/ws", session.id))
         );
-        assert!(payload.get("token").is_some());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn ttyd_frontend_token_route_returns_a_token_when_access_control_is_enabled() {
-        let (state, root) = build_test_state().await;
-        state.config.write().await.access.require_auth = true;
-        let mut session = SessionRecord::builder(
-            "session-ttyd-frontend-token".to_string(),
-            "demo".to_string(),
-            "codex".to_string(),
-            "Validate ttyd frontend token route".to_string(),
-        )
-        .build();
-        session.metadata.insert(
-            RUNTIME_MODE_METADATA_KEY.to_string(),
-            TTYD_RUNTIME_MODE.to_string(),
+        assert_eq!(
+            payload["outputUrl"],
+            Value::String(format!("/api/sessions/{}/output", session.id))
         );
-        session.metadata.insert(
-            TTYD_WS_URL_METADATA_KEY.to_string(),
-            "ws://127.0.0.1:41001/ws".to_string(),
+        assert_eq!(
+            payload["snapshotUrl"],
+            Value::String(format!(
+                "/api/sessions/{}/terminal/snapshot?live=1",
+                session.id
+            ))
         );
-        state
-            .sessions
-            .write()
-            .await
-            .insert(session.id.clone(), session.clone());
 
-        let response =
-            terminal_ttyd_frontend_token(State(state.clone()), Path(session.id.clone())).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("frontend token body should read");
-        let payload: Value =
-            serde_json::from_slice(&body).expect("frontend token response should be valid json");
-        let token = payload["token"].as_str().expect("token should be present");
-        assert!(!token.is_empty());
-
+        unsafe {
+            std::env::remove_var(SHARED_TTYD_FRONTEND_URL_ENV);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

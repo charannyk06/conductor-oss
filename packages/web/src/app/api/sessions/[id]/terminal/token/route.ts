@@ -35,14 +35,18 @@ export async function GET(
   const tunnelUrl = typeof ensured.upstreamPayload?.tunnelUrl === "string"
     ? ensured.upstreamPayload.tunnelUrl
     : null;
+  const hasFrontendHtml = typeof ensured.upstreamPayload?.ttydHttpUrl === "string"
+    && ensured.upstreamPayload.ttydHttpUrl.trim().length > 0;
 
   return NextResponse.json({
     required: false,
     expiresInSeconds: null,
-    ttydHttpUrl: buildStableBridgeTtydProxyUrl(
-      ensured.routeSessionId,
-      ensured.bridgeId,
-    ),
+    ttydHttpUrl: hasFrontendHtml
+      ? buildStableBridgeTtydProxyUrl(
+        ensured.routeSessionId,
+        ensured.bridgeId,
+      )
+      : null,
     ttydWsUrl: ensured.relayTtydWsUrl,
     relayTtydWsUrl: ensured.relayTtydWsUrl,
     tunnelUrl,

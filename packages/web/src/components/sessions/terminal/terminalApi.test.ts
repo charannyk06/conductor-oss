@@ -179,6 +179,28 @@ test("resolveTerminalConnection falls back to the embedded iframe page when only
   );
 });
 
+
+test("resolveTerminalConnection also falls back when the backend only returns legacy ws metadata", async () => {
+  setWindowLocation("https://dashboard.example.com/sessions/session-legacy");
+  setFetchResponse({
+    required: true,
+    wsUrl: "/api/sessions/session-legacy/terminal/ws?token=legacy-token",
+  });
+
+  const connection = await resolveTerminalConnection("session-legacy");
+
+  assert.equal(connection.interactive, true);
+  assert.equal(connection.reason, null);
+  assert.equal(
+    connection.terminalUrl,
+    "https://dashboard.example.com/embed/terminal/session-legacy",
+  );
+  assert.equal(
+    connection.terminalLinkUrl,
+    "https://dashboard.example.com/embed/terminal/session-legacy",
+  );
+});
+
 test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", async () => {
   setWindowLocation("https://app.conductross.com/sessions/bridge-session");
   setBackendOriginMeta("https://api.conductross.com");
