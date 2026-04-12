@@ -81,7 +81,7 @@ pub async fn spawn_tunnel(port: u16) -> Result<(Child, String)> {
     use tokio::io::AsyncBufReadExt;
     let mut lines = reader.lines();
 
-    let tunnel_url = tokio::time::timeout(TUNNEL_STARTUP_TIMEOUT, async {
+    let tunnel_url = match tokio::time::timeout(TUNNEL_STARTUP_TIMEOUT, async {
         while let Ok(Some(line)) = lines.next_line().await {
             // cloudflared prints: "https://xxx-yyy-zzz.trycloudflare.com"
             // in a line like: "|  https://random-words.trycloudflare.com  |"
@@ -94,8 +94,19 @@ pub async fn spawn_tunnel(port: u16) -> Result<(Child, String)> {
         ))
     })
     .await
-    .context("Timed out waiting for cloudflared tunnel URL")?
-    .context("cloudflared failed to produce a tunnel URL")?;
+    {
+        Ok(Ok(url)) => url,
+        Ok(Err(err)) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(err).context("cloudflared failed to produce a tunnel URL");
+        }
+        Err(err) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(err).context("Timed out waiting for cloudflared tunnel URL");
+        }
+    };
 
     tracing::info!(port, %tunnel_url, "Cloudflare tunnel established");
     Ok((child, tunnel_url))
@@ -132,11 +143,15 @@ pub async fn kill_tunnel(state: &Arc<AppState>, session_id: &str) {
 
     if let Some(pid_str) = pid_str {
         if let Ok(pid) = pid_str.parse::<u32>() {
-            #[cfg(unix)]
-            unsafe {
-                // Send SIGTERM to the cloudflared process
-                libc::kill(pid as i32, libc::SIGTERM);
-                tracing::info!(session_id, pid, "Sent SIGTERM to cloudflared tunnel");
+            if pid > 0 {
+                #[cfg(unix)]
+                unsafe {
+                    // Send SIGTERM to the cloudflared process
+                    libc::kill(pid as i32, libc::SIGTERM);
+                    tracing::info!(session_id, pid, "Sent SIGTERM to cloudflared tunnel");
+                }
+            } else {
+                tracing::warn!(session_id, "Ignoring invalid cloudflared PID 0");
             }
         }
     }
@@ -160,7 +175,10 @@ pub async fn start_tunnel_for_session(
     ttyd_port: u16,
 ) -> Result<String> {
     let (mut child, tunnel_url) = spawn_tunnel(ttyd_port).await?;
-    let tunnel_pid = child.id().unwrap_or(0);
+    let tunnel_pid = child
+        .id()
+        .filter(|pid| *pid > 0)
+        .context("cloudflared exited before exposing a non-zero PID")?;
 
     // Store tunnel URL and PID in session metadata
     {

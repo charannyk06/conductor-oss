@@ -143,6 +143,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 #[tokio::test]
 async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux() {
     if !ttyd_available() {
+        eprintln!("skipping ttyd runtime test: ttyd binary not found");
         return;
     }
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;

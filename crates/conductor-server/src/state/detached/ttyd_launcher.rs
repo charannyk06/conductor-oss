@@ -201,11 +201,11 @@ fn resolve_interactive_shell(env: &HashMap<String, String>) -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-/// Reserve a loopback port for ttyd.  The listener is kept alive (returned
+/// Reserve a loopback port for ttyd. The listener is kept alive (returned
 /// alongside the port number) to prevent other sessions from stealing the port
-/// between reservation and ttyd binding.  SO_REUSEADDR lets ttyd bind the
-/// same port while our listener is still held.  This eliminates the TOCTOU
-/// race entirely rather than retrying around it.
+/// between reservation and ttyd binding. SO_REUSEADDR lets ttyd bind the
+/// same port while our listener is still held. This significantly reduces the
+/// TOCTOU race window rather than retrying around it.
 fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve a loopback port for ttyd")?;
@@ -533,7 +533,18 @@ pub async fn spawn_ttyd_runtime(
     let _tunnel_result = if super::tunnel_launcher::resolve_cloudflared_binary().is_some() {
         match super::tunnel_launcher::spawn_tunnel(port).await {
             Ok((mut tunnel_child, tunnel_url)) => {
-                let tunnel_pid = tunnel_child.id().unwrap_or(0);
+                let Some(tunnel_pid) = tunnel_child.id().filter(|pid| *pid > 0) else {
+                    tracing::warn!(
+                        session_id,
+                        port,
+                        "Cloudflare tunnel started without exposing a non-zero PID, skipping tunnel metadata"
+                    );
+                    return Ok(RuntimeLaunch {
+                        handle,
+                        metadata,
+                        streams_terminal_bytes: true,
+                    });
+                };
                 tracing::info!(
                     session_id,
                     port,
