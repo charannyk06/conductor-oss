@@ -157,7 +157,7 @@ test("resolveTerminalConnection resolves proxy ttyd paths against the current da
   );
 });
 
-test("resolveTerminalConnection falls back to the embedded iframe page when only the native terminal websocket exists", async () => {
+test("resolveTerminalConnection fronts legacy native terminal metadata through the ttyd iframe route", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-3");
   setFetchResponse({
     required: true,
@@ -171,16 +171,16 @@ test("resolveTerminalConnection falls back to the embedded iframe page when only
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/embed/terminal/session-3",
+    "https://dashboard.example.com/api/sessions/session-3/terminal/ttyd?token=native-token",
   );
   assert.equal(
     connection.terminalLinkUrl,
-    "https://dashboard.example.com/embed/terminal/session-3",
+    "https://dashboard.example.com/api/sessions/session-3/terminal/ttyd?token=native-token",
   );
 });
 
 
-test("resolveTerminalConnection also falls back when the backend only returns legacy ws metadata", async () => {
+test("resolveTerminalConnection also fronts legacy ws metadata through the ttyd iframe route", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-legacy");
   setFetchResponse({
     required: true,
@@ -193,11 +193,11 @@ test("resolveTerminalConnection also falls back when the backend only returns le
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/embed/terminal/session-legacy",
+    "https://dashboard.example.com/api/sessions/session-legacy/terminal/ttyd?token=legacy-token",
   );
   assert.equal(
     connection.terminalLinkUrl,
-    "https://dashboard.example.com/embed/terminal/session-legacy",
+    "https://dashboard.example.com/api/sessions/session-legacy/terminal/ttyd?token=legacy-token",
   );
 });
 
