@@ -8,7 +8,7 @@
 import {
   AlertCircle,
   Clipboard,
-  FileUp,
+  ExternalLink,
   Loader2,
   RefreshCw,
   Send,
@@ -1079,35 +1079,17 @@ function SessionTerminalView(props: SessionTerminalProps) {
         : "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
       <div className="absolute right-2 top-2 z-20 flex items-center gap-2 sm:right-3 sm:top-3">
-        <input
-          ref={attachmentInputRef}
-          type="file"
-          multiple
-          accept="*/*"
-          className="sr-only"
-          tabIndex={-1}
-          aria-hidden
-          onChange={(event) => void handleAttachmentFiles(event)}
-        />
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          disabled={
-            !expectsLiveTerminal
-            || !terminalUrl
-            || attachmentUploading
-          }
-          className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] disabled:opacity-40 sm:h-7 sm:w-7"
-          onClick={handleAttachmentPick}
-          aria-label="Attach photos or files"
-        >
-          {attachmentUploading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <FileUp className="h-3.5 w-3.5" />
-          )}
-        </Button>
+        {terminalDirectHref ? (
+          <a
+            href={terminalDirectHref}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm transition hover:bg-[#201818] sm:h-7 sm:w-7"
+            aria-label="Open ttyd terminal in a new tab"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        ) : null}
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
           <Button
             type="button"
