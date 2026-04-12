@@ -201,42 +201,21 @@ fn resolve_interactive_shell(env: &HashMap<String, String>) -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-/// Reserve a loopback port for ttyd. The listener is kept alive (returned
-/// alongside the port number) to prevent other sessions from stealing the port
-/// between reservation and ttyd binding. SO_REUSEADDR lets ttyd bind the
-/// same port while our listener is still held. This significantly reduces the
-/// TOCTOU race window rather than retrying around it.
-fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
+/// Pick an ephemeral loopback port for ttyd.
+///
+/// We bind a temporary listener only long enough to ask the OS for a free port,
+/// then immediately close it before spawning ttyd. Keeping the placeholder
+/// listener open prevents ttyd from binding the same address on Linux and makes
+/// the startup probe connect to the placeholder instead of ttyd itself.
+fn reserve_ttyd_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .context("Failed to reserve a loopback port for ttyd")?;
-    listener
-        .set_nonblocking(true)
-        .context("Failed to set listener non-blocking")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let optval: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                listener.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            tracing::debug!(
-                "SO_REUSEADDR setsockopt failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
     let port = listener
         .local_addr()
         .context("Failed to read reserved ttyd port")?
         .port();
-    Ok((listener, port))
+    drop(listener);
+    Ok(port)
 }
 
 async fn wait_for_ttyd_startup(
@@ -311,7 +290,7 @@ pub async fn spawn_ttyd_runtime(
     let launch_command = build_agent_launch_command(&binary, &args);
     let terminal_shell = resolve_interactive_shell(&options.env);
     let ttyd_shell_args = build_ttyd_shell_args(&terminal_shell, Some(&binary), &args);
-    let (port_listener, port) = reserve_ttyd_port()?;
+    let port = reserve_ttyd_port()?;
 
     // TODO(P3): Add ttyd -c credential flag to prevent unauthorized local
     // connections to the terminal port. Requires updating the session owner
@@ -366,7 +345,6 @@ pub async fn spawn_ttyd_runtime(
         tokio::spawn(drain_ttyd_log(session_id.to_string(), "stderr", stderr));
     }
     wait_for_ttyd_startup(&mut child, port, session_id).await?;
-    drop(port_listener);
     let ttyd_ws_url = ttyd_protocol::upstream_ws_url(port);
     tracing::info!(session_id, ttyd_pid, port, "ttyd launched");
 
@@ -1191,7 +1169,7 @@ where
 mod tests {
     use super::{
         build_agent_launch_command, build_ttyd_shell_args, owner_reconnect_delay,
-        resolve_interactive_shell,
+        reserve_ttyd_port, resolve_interactive_shell,
     };
     use crate::routes::ttyd_protocol;
     use std::collections::HashMap;
@@ -1252,6 +1230,14 @@ mod tests {
     fn ttyd_protocol_handshake_starts_with_json_data_prefix() {
         let frame = ttyd_protocol::encode_handshake(160, 48);
         assert_eq!(frame.first().copied(), Some(ttyd_protocol::CMD_JSON_DATA));
+    }
+
+    #[test]
+    fn reserve_ttyd_port_releases_port_before_returning() {
+        let port = reserve_ttyd_port().expect("port reservation should succeed");
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("reserved port should be reusable immediately");
+        drop(rebound);
     }
 
     #[test]
