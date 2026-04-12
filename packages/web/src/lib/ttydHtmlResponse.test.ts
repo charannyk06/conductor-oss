@@ -27,6 +27,31 @@ test("readTtydHtmlResponse returns null when the proxied HTML stream errors", as
   assert.equal(html, null);
 });
 
+test("readTtydHtmlResponse accepts html bodies even when upstream headers mark them as downloads", async () => {
+  const html = "<!DOCTYPE html><html><body>ttyd</body></html>";
+  const proxied = new Response(html, {
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-disposition": 'attachment; filename="ttyd"',
+    },
+  });
+
+  const resolved = await readTtydHtmlResponse(proxied);
+  assert.equal(resolved, html);
+});
+
+test("readTtydHtmlResponse still returns null for non-html download responses", async () => {
+  const proxied = new Response("terminal-bytes", {
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-disposition": 'attachment; filename="ttyd"',
+    },
+  });
+
+  const resolved = await readTtydHtmlResponse(proxied);
+  assert.equal(resolved, null);
+});
+
 test("readTtydHtmlResponse accepts the vendored ttyd frontend size used by the iframe proxy", async () => {
   const ttydFrontendPath = join(
     process.cwd(),
