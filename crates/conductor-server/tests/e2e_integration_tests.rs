@@ -138,7 +138,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
     assert_eq!(session.prompt, "Stream the prompt back");
 
     wait_for_condition_with_timeout(
-        "session output to include the prompt banner",
+        "live terminal snapshot to include the prompt banner",
         std::time::Duration::from_secs(60),
         || {
             let app = harness.app();
@@ -147,17 +147,22 @@ async fn spawn_session_route_drives_a_live_test_executor() {
                 let response = app
                     .oneshot(
                         Request::builder()
-                            .uri(format!("/api/sessions/{session_id}/output"))
+                            .uri(format!(
+                                "/api/sessions/{}/terminal/snapshot?lines=1200&live=1",
+                                session_id
+                            ))
                             .body(Body::empty())
                             .unwrap(),
                     )
                     .await
                     .ok()?;
+                if response.status() != StatusCode::OK {
+                    return None;
+                }
                 let payload: Value = response_json(response).await;
-                payload["output"]
-                    .as_str()
-                    .filter(|output| output.contains("prompt:Stream the prompt back"))
-                    .map(|_| ())
+                let snapshot = payload["snapshot"].as_str().unwrap_or_default();
+                (payload["restored"] == true && snapshot.contains("Stream the prompt back"))
+                    .then_some(())
             }
         },
     )
