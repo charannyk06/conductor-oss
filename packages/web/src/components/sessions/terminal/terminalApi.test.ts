@@ -157,12 +157,12 @@ test("resolveTerminalConnection resolves proxy ttyd paths against the current da
   );
 });
 
-test("resolveTerminalConnection normalizes ws-only ttyd urls without adding a trailing slash", async () => {
+test("resolveTerminalConnection falls back to the embedded iframe page when only the native terminal websocket exists", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-3");
   setFetchResponse({
     required: true,
     ttydHttpUrl: null,
-    ttydWsUrl: "/api/sessions/session-3/terminal/ttyd/ws",
+    ttydWsUrl: "/api/sessions/session-3/terminal/ws?token=native-token",
   });
 
   const connection = await resolveTerminalConnection("session-3");
@@ -171,7 +171,11 @@ test("resolveTerminalConnection normalizes ws-only ttyd urls without adding a tr
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/api/sessions/session-3/terminal/ttyd",
+    "https://dashboard.example.com/embed/terminal/session-3",
+  );
+  assert.equal(
+    connection.terminalLinkUrl,
+    "https://dashboard.example.com/embed/terminal/session-3",
   );
 });
 

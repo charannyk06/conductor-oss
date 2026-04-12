@@ -39,7 +39,7 @@ import type {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { APP_SURFACE_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
+import { APP_SURFACE_SCROLL_CLASS_NAME, MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
 
 type SessionSkillsProps = {
   session: DashboardSession;
@@ -439,7 +439,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
           </Card>
 
           <div className="grid min-h-0 min-w-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] lg:overflow-hidden">
-            <div className="min-h-0 min-w-0 rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] p-3 lg:overflow-y-auto">
+            <div className={`min-h-0 min-w-0 rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] p-3 lg:overflow-y-auto ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
               <div className="space-y-3 lg:pr-2">
                 {showInitialLoading ? (
                   <div className="flex min-h-[180px] items-center justify-center text-[13px] text-[var(--vk-text-muted)] sm:min-h-[220px]">
@@ -541,7 +541,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
               </div>
             </div>
 
-            <Card className="min-h-0 min-w-0 border-[var(--vk-border)] bg-[var(--vk-bg-surface)] lg:overflow-y-auto">
+            <Card className={`min-h-0 min-w-0 border-[var(--vk-border)] bg-[var(--vk-bg-surface)] lg:overflow-y-auto ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
               <CardHeader className="flex-col items-start gap-1.5">
                 <h3 className="text-[14px] font-semibold text-[var(--vk-text-normal)]">Detected custom skills</h3>
                 <p className="text-[13px] text-[var(--vk-text-muted)]">

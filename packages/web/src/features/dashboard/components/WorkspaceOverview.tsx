@@ -11,7 +11,10 @@ import {
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { APP_SURFACE_SCROLL_CLASS_NAME } from "@/components/sessions/sessionMobileScroll";
+import {
+  APP_SURFACE_SCROLL_CLASS_NAME,
+  MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
+} from "@/components/sessions/sessionMobileScroll";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import type { ConfigProject } from "@/hooks/useConfig";
 import { SessionCard } from "@/components/SessionCard";
@@ -186,7 +189,7 @@ export function WorkspaceOverview({
               </div>
               <Badge variant="outline">{visibleSessions.length}</Badge>
             </CardHeader>
-            <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
+            <CardContent className={`flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
               {recentSessions.length === 0 ? (
                 <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
                   No sessions yet. Create or open a workspace to start work.

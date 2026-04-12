@@ -4,15 +4,14 @@ import type { SessionTerminalProps } from "@/components/sessions/terminal/termin
 /**
  * ## Session terminal implementation (supported path)
  *
- * The dashboard’s **only** wired terminal is the **ttyd iframe** (`SessionTerminal`):
- * browser → Next `/api/sessions/:id/terminal/ttyd` (same-origin) → Rust facade →
- * loopback ttyd → one PTY per session.
+ * The dashboard’s wired terminal stays iframe-based through `SessionTerminal`.
+ * When a same-origin ttyd HTML facade exists, the iframe loads that route.
+ * Otherwise it falls back to the embedded terminal page, which keeps the
+ * current backend websocket/session architecture inside an iframe shell.
  *
- * Hosts that embed the dashboard (e.g. **Polyscope** in a WKWebView) rely on this
- * path: the iframe loads HTML from the proxied ttyd route; `next.config` relaxes
- * `frame-ancestors` for proxied ttyd routes under `/api/sessions/.../terminal/ttyd` so the frame can render.
- * Do not switch embedders to a second terminal stack without updating CSP and
- * auth cookie paths.
+ * Hosts that embed the dashboard rely on the iframe path, so avoid switching
+ * to a separate non-iframe terminal implementation here without updating the
+ * embed, CSP, and auth assumptions together.
  *
  * ## Not used by default
  *
