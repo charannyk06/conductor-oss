@@ -1,5 +1,7 @@
 mod common;
-use common::{spawn_request, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness};
+use common::{
+    spawn_request, ttyd_available, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness,
+};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use conductor_server::state::SessionRecord;
@@ -7,7 +9,12 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
-    let harness = TestHarness::new("conductor-session-test", "direct").await;
+    if !ttyd_available() {
+        eprintln!("skipping session lifecycle test: ttyd binary not found");
+        return;
+    }
+
+    let harness = TestHarness::new("conductor-session-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -139,7 +146,11 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 }
 
 #[tokio::test]
-async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tmux() {
+async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux() {
+    if !ttyd_available() {
+        eprintln!("skipping ttyd runtime test: ttyd binary not found");
+        return;
+    }
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;
     harness
         .state
@@ -149,7 +160,7 @@ async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tm
         .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
 
     let session = SessionRecord::new(
-        "resume-native-session".to_string(),
+        "resume-ttyd-session".to_string(),
         "demo".to_string(),
         None,
         None,
@@ -170,7 +181,7 @@ async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tm
     harness
         .state
         .resume_session_with_prompt(
-            "resume-native-session",
+            "resume-ttyd-session",
             "Continue after reconnect".to_string(),
             Vec::new(),
             None,
@@ -180,14 +191,14 @@ async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tm
         .await
         .unwrap();
 
-    let updated = wait_for_condition("resumed native session", || {
+    let updated = wait_for_condition("resumed ttyd session", || {
         let state = harness.state.clone();
         async move {
             state
-                .get_session("resume-native-session")
+                .get_session("resume-ttyd-session")
                 .await
                 .and_then(|session| {
-                    (session.metadata.get("runtimeMode").map(String::as_str) == Some("direct")
+                    (session.metadata.get("runtimeMode").map(String::as_str) == Some("ttyd")
                         && session.pid.is_some())
                     .then_some(session)
                 })
@@ -197,12 +208,12 @@ async fn resume_session_uses_native_runtime_even_when_project_requests_legacy_tm
 
     assert_eq!(
         updated.metadata.get("runtimeMode").map(String::as_str),
-        Some("direct")
+        Some("ttyd")
     );
 
     harness
         .state
-        .kill_session("resume-native-session")
+        .kill_session("resume-ttyd-session")
         .await
         .unwrap();
 }
