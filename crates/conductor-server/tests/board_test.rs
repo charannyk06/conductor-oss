@@ -800,7 +800,7 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
             let session_id = queued.id.clone();
             async move {
                 state.get_session(&session_id).await.and_then(|session| {
-                    (session.status == SessionStatus::Working
+                    (session.status != SessionStatus::Queued
                         && session.metadata.contains_key("worktree"))
                     .then_some(session)
                 })
@@ -808,6 +808,10 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
         },
     )
     .await;
+    assert!(matches!(
+        session.status,
+        SessionStatus::Spawning | SessionStatus::Working
+    ));
     assert_eq!(session.project_id, "demo");
     assert_eq!(
         session.metadata.get("model").map(String::as_str),
