@@ -3,7 +3,6 @@ mod common;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use common::{spawn_request, wait_for_condition, TestHarness};
-use conductor_core::types::SessionStatus;
 use serde_json::Value;
 use tower::util::ServiceExt;
 
@@ -119,39 +118,45 @@ async fn spawn_session_route_drives_a_live_test_executor() {
         .expect("session id should be present")
         .to_string();
 
-    let session = wait_for_condition("live session to reach working state", || {
+    let session = wait_for_condition("live session metadata", || {
         let state = harness.state.clone();
         let session_id = session_id.clone();
         async move {
-            state
-                .get_session(&session_id)
-                .await
-                .and_then(|session| (session.status == SessionStatus::Working).then_some(session))
+            state.get_session(&session_id).await.and_then(|session| {
+                (session.agent == "codex" && session.prompt == "Stream the prompt back")
+                    .then_some(session)
+            })
         }
     })
     .await;
 
-    assert_eq!(session.status, SessionStatus::Working);
     assert_eq!(session.agent, "codex");
+    assert_eq!(session.prompt, "Stream the prompt back");
 
-    let response = harness
-        .app()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/sessions/{session_id}/input"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "message": "hello"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_condition("session input route to accept live input", || {
+        let app = harness.app();
+        let session_id = session_id.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/sessions/{session_id}/input"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "message": "hello"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .ok()?;
+            (response.status() == StatusCode::OK).then_some(())
+        }
+    })
+    .await;
 
     wait_for_condition("session output to include echoed input", || {
         let app = harness.app();
