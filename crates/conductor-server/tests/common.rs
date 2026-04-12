@@ -319,16 +319,30 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Option<T>>,
 {
-    timeout(duration, async move {
+    timeout(duration, async {
         loop {
             if let Some(value) = check().await {
                 return value;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
+}
+
+pub fn ttyd_available() -> bool {
+    let candidates = [
+        "/opt/homebrew/bin/ttyd",
+        "/usr/local/bin/ttyd",
+        "/usr/bin/ttyd",
+        "/bin/ttyd",
+    ];
+
+    candidates
+        .iter()
+        .any(|candidate| Path::new(candidate).is_file())
+        || which::which("ttyd").is_ok()
 }
 
 pub fn spawn_request(prompt: &str) -> conductor_server::state::SpawnRequest {

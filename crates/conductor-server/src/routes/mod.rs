@@ -20,6 +20,7 @@ pub mod sessions;
 pub mod skills;
 pub mod tasks;
 pub mod terminal;
+pub mod ttyd_protocol;
 pub mod workspaces;
 
 #[cfg(test)]
