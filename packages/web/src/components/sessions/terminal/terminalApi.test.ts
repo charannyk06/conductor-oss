@@ -157,7 +157,7 @@ test("resolveTerminalConnection resolves proxy ttyd paths against the current da
   );
 });
 
-test("resolveTerminalConnection falls back to the embedded iframe page when only the native terminal websocket exists", async () => {
+test("resolveTerminalConnection keeps the pre-390 direct terminal path when only the native terminal websocket exists", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-3");
   setFetchResponse({
     required: true,
@@ -171,12 +171,9 @@ test("resolveTerminalConnection falls back to the embedded iframe page when only
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/embed/terminal/session-3",
+    "https://dashboard.example.com/api/sessions/session-3/terminal?token=native-token",
   );
-  assert.equal(
-    connection.terminalLinkUrl,
-    "https://dashboard.example.com/embed/terminal/session-3",
-  );
+  assert.equal(connection.terminalLinkUrl, undefined);
 });
 
 test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", async () => {
@@ -198,7 +195,7 @@ test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", 
   );
 });
 
-test("resolveTerminalConnection keeps the embedded iframe on the proxied ttyd path even when a tunnel url exists", async () => {
+test("resolveTerminalConnection uses the direct ttyd tunnel url when one is available", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-4");
   setBackendOriginMeta("https://api.example.com/internal");
   setFetchResponse({
@@ -213,15 +210,12 @@ test("resolveTerminalConnection keeps the embedded iframe on the proxied ttyd pa
   assert.equal(connection.interactive, true);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/api/sessions/session-4/terminal/ttyd?token=proxy-token",
-  );
-  assert.equal(
-    connection.terminalLinkUrl,
     "https://violet-waterfall.trycloudflare.com/?token=proxy-token",
   );
+  assert.equal(connection.terminalLinkUrl, undefined);
 });
 
-test("resolveTerminalConnection keeps direct terminal links on the proxy origin when auth is cookie-scoped", async () => {
+test("resolveTerminalConnection keeps cookie-scoped ttyd sessions on the direct terminal tunnel when available", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-cookie");
   setBackendOriginMeta("https://api.example.com/internal");
   setFetchResponse({
@@ -237,15 +231,12 @@ test("resolveTerminalConnection keeps direct terminal links on the proxy origin 
   assert.equal(connection.interactive, true);
   assert.equal(
     connection.terminalUrl,
-    "https://dashboard.example.com/api/sessions/session-cookie/terminal/ttyd",
+    "https://violet-waterfall.trycloudflare.com/",
   );
-  assert.equal(
-    connection.terminalLinkUrl,
-    "https://dashboard.example.com/api/sessions/session-cookie/terminal/ttyd",
-  );
+  assert.equal(connection.terminalLinkUrl, undefined);
 });
 
-test("resolveTerminalConnection keeps bridge iframe urls stable and exposes relay websocket refresh metadata", async () => {
+test("resolveTerminalConnection keeps the pre-390 bridge ttyd iframe path and does not expose relay refresh metadata", async () => {
   setWindowLocation("https://app.conductross.com/sessions/bridge-session");
   setBackendOriginMeta("https://api.conductross.com");
   setFetchResponse({
@@ -262,12 +253,6 @@ test("resolveTerminalConnection keeps bridge iframe urls stable and exposes rela
     connection.terminalUrl,
     "https://app.conductross.com/api/sessions/bridge%3Adevice-1%3Asession-9/terminal/ttyd?bridgeId=device-1",
   );
-  assert.equal(
-    connection.terminalLinkUrl,
-    "https://app.conductross.com/api/sessions/bridge%3Adevice-1%3Asession-9/terminal/ttyd?bridgeId=device-1",
-  );
-  assert.equal(
-    connection.relayTtydWsUrl,
-    "wss://relay.example.com/terminal/new/browser?jwt=new",
-  );
+  assert.equal(connection.terminalLinkUrl, undefined);
+  assert.equal(connection.relayTtydWsUrl, undefined);
 });
