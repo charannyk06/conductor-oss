@@ -15,7 +15,10 @@ import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/cn";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
-import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
+import {
+  APP_SURFACE_SCROLL_CLASS_NAME,
+  MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
+} from "./sessionMobileScroll";
 import {
   type ChangedFileSummary,
   type DiffCategory,
@@ -1195,7 +1198,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         </label>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className={`min-h-0 flex-1 ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
         {loading && !payload.hasDiff && !error ? (
           <div className="flex h-full items-center justify-center p-8 text-[13px] text-[var(--vk-text-muted)]">
             Loading session diff...

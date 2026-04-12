@@ -19,7 +19,10 @@ import {
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
-import { MOBILE_MOMENTUM_SCROLL_CLASS_NAME } from "./sessionMobileScroll";
+import {
+  APP_SURFACE_SCROLL_CLASS_NAME,
+  MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
+} from "./sessionMobileScroll";
 
 type SessionData = DashboardSession & {
   agent?: string;
@@ -783,7 +786,7 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
   }, [queueDepth, queuePosition, recoveryState, session.status]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div className={`flex h-full min-h-0 flex-col ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
       {/* Recovery / queue banner */}
       {recoveryBanner ? (
         <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-2">

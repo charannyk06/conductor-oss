@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -42,4 +43,25 @@ test("preview shell stays passive so the screenshot surface keeps mobile scroll 
 
 test("preview inspector scroll areas reuse the mobile momentum viewport helper", () => {
   assert.equal(SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME, MOBILE_MOMENTUM_SCROLL_CLASS_NAME);
+});
+
+test("overview screen restores app surface scroll ownership", () => {
+  const source = readFileSync(new URL("./SessionOverview.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /APP_SURFACE_SCROLL_CLASS_NAME/);
+  assert.match(source, /className=\{`flex h-full min-h-0 flex-col \$\{APP_SURFACE_SCROLL_CLASS_NAME\}`\}/);
+});
+
+test("review diff screen restores app surface scroll ownership", () => {
+  const source = readFileSync(new URL("./SessionDiff.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /APP_SURFACE_SCROLL_CLASS_NAME/);
+  assert.match(source, /className=\{`min-h-0 flex-1 \$\{APP_SURFACE_SCROLL_CLASS_NAME\}`\}/);
+});
+
+test("preview screen restores app surface scroll ownership", () => {
+  const source = readFileSync(new URL("./SessionPreview.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /APP_SURFACE_SCROLL_CLASS_NAME/);
+  assert.match(source, /className=\{`relative flex min-h-0 min-w-0 flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-\[minmax\(0,1\.55fr\)_minmax\(320px,0\.95fr\)\] \$\{APP_SURFACE_SCROLL_CLASS_NAME\}`\}/);
 });

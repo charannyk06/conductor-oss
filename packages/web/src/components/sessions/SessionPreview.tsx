@@ -34,6 +34,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { cn } from "@/lib/cn";
 import { selectPreviewAutoConnectCandidate } from "@/lib/previewAutoConnect";
 import {
+  APP_SURFACE_SCROLL_CLASS_NAME,
   MOBILE_MOMENTUM_SCROLL_CLASS_NAME,
   SESSION_PREVIEW_SCROLL_SHELL_CLASS_NAME,
   SESSION_SCROLL_AREA_VIEWPORT_CLASS_NAME,
@@ -1837,7 +1838,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
         </div>
       </div>
 
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)] lg:overflow-hidden">
+      <div className={`relative flex min-h-0 min-w-0 flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.95fr)] ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
         <div className="flex min-h-0 min-w-0 flex-[1.25] flex-col overflow-hidden border-b border-[var(--vk-border)] lg:flex-1 lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-2 text-[11px] text-[var(--vk-text-muted)]">
             <div className="min-w-0">
