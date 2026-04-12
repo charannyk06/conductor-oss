@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
@@ -20,17 +21,16 @@ type RouteContext = {
 };
 
 
-/**
- * Inject the resize coordination shim into a proxied HTML response.
- * Falls back to the original response if the content is not HTML.
- */
-async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
-  const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return proxied;
+function buildEmbeddedTerminalFallbackResponse(
+  request: Request,
+  sessionId: string,
+  bridgeId?: string,
+): Response {
+  const url = new URL(`/embed/terminal/${encodeURIComponent(sessionId)}`, request.url);
+  if (bridgeId) {
+    url.searchParams.set("bridgeId", bridgeId);
   }
-
-  return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
+  return NextResponse.redirect(url, { status: 307 });
 }
 
 export async function GET(
@@ -54,7 +54,16 @@ export async function GET(
       },
     );
 
-    return injectResizeShimIntoResponse(proxied);
+    if (!proxied.ok) {
+      return buildEmbeddedTerminalFallbackResponse(request, id);
+    }
+
+    const html = await readTtydHtmlResponse(proxied);
+    if (html === null) {
+      return buildEmbeddedTerminalFallbackResponse(request, id);
+    }
+
+    return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
   }
 
   // Bridge session: proxy to bridge device, inject relay shim + resize shim.
@@ -81,9 +90,13 @@ export async function GET(
     );
   }
 
+  if (!proxied.ok) {
+    return buildEmbeddedTerminalFallbackResponse(request, id, target.bridgeId);
+  }
+
   const html = await readTtydHtmlResponse(proxied);
   if (html === null) {
-    return proxied;
+    return buildEmbeddedTerminalFallbackResponse(request, id, target.bridgeId);
   }
 
   const patchedHtml = injectTtydResizeShim(

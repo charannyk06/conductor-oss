@@ -1635,17 +1635,7 @@ async fn build_terminal_token_response(
     };
     let ws_url = interactive.then(|| ttyd_frontend_proxy_ws_path(&id, url_token));
     let ttyd_ws_url = ws_url.clone();
-    let ttyd_http_url = if interactive {
-        match shared_ttyd_frontend_base_url().await {
-            Ok(_) => Some(ttyd_frontend_proxy_path(&id, url_token)),
-            Err(err) => {
-                tracing::debug!(session_id = %id, error = %err, "ttyd frontend unavailable, falling back to embedded terminal page");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let ttyd_http_url = interactive.then(|| ttyd_frontend_proxy_path(&id, url_token));
     let payload = json!({
         "token": token,
         "required": token_required,
