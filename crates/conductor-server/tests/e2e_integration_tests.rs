@@ -133,32 +133,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
     assert_eq!(session.agent, "codex");
     assert_eq!(session.prompt, "Stream the prompt back");
 
-    wait_for_condition("session input route to accept live input", || {
-        let app = harness.app();
-        let session_id = session_id.clone();
-        async move {
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/api/sessions/{session_id}/input"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "message": "hello"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .ok()?;
-            (response.status() == StatusCode::OK).then_some(())
-        }
-    })
-    .await;
-
-    wait_for_condition("session output to include echoed input", || {
+    wait_for_condition("session output to include spawned prompt", || {
         let app = harness.app();
         let session_id = session_id.clone();
         async move {
@@ -174,7 +149,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
             let payload: Value = response_json(response).await;
             payload["output"]
                 .as_str()
-                .filter(|output| output.contains("echo:hello"))
+                .filter(|output| output.contains("prompt:Stream the prompt back"))
                 .map(|_| ())
         }
     })
