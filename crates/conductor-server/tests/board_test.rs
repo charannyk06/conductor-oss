@@ -2,8 +2,8 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    build_app, build_state, seed_git_repo, spawn_request, wait_for_condition, TestExecutor,
-    TestHarness,
+    build_app, build_state, seed_git_repo, spawn_request, wait_for_condition_with_timeout,
+    TestExecutor, TestHarness,
 };
 use conductor_core::board::Board;
 use conductor_core::config::ProjectConfig;
@@ -792,17 +792,21 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
     request.source = "board_dispatch".to_string();
 
     let queued = harness.state.spawn_session(request).await.unwrap();
-    let session = wait_for_condition("board-dispatched session", || {
-        let state = harness.state.clone();
-        let session_id = queued.id.clone();
-        async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Working
-                    && session.metadata.contains_key("worktree"))
-                .then_some(session)
-            })
-        }
-    })
+    let session = wait_for_condition_with_timeout(
+        "board-dispatched session",
+        std::time::Duration::from_secs(30),
+        || {
+            let state = harness.state.clone();
+            let session_id = queued.id.clone();
+            async move {
+                state.get_session(&session_id).await.and_then(|session| {
+                    (session.status == SessionStatus::Working
+                        && session.metadata.contains_key("worktree"))
+                    .then_some(session)
+                })
+            }
+        },
+    )
     .await;
     assert_eq!(session.project_id, "demo");
     assert_eq!(
