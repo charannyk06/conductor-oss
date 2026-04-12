@@ -593,9 +593,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     if (previous === false) {
       requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
       // Radix tabs keep inactive panels mounted (`forceMount`) with opacity/pointer-events
-      // toggles; layout can settle after the first paint. Double-rAF matches the pattern
-      // used by direct xterm hosts (e.g. Cabinet) so ttyd's FitAddon runs against the
-      // final host box, not a transient zero/collapsed size.
+      // toggles; layout can settle after the first paint. A double-rAF gives ttyd's
+      // FitAddon a stable host box instead of a transient zero or collapsed size.
       outerRaf = requestAnimationFrame(() => {
         innerRaf = requestAnimationFrame(() => {
           lastPostedTerminalHostSizeRef.current = null;

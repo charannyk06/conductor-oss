@@ -1,9 +1,7 @@
-mod helpers;
-pub(crate) mod ttyd_launcher;
-pub(crate) mod tunnel_launcher;
+pub(crate) mod native_runtime;
 pub(crate) mod types;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,37 +11,19 @@ use crate::state::AppState;
 
 pub(crate) use types::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use types::DETACHED_PID_METADATA_KEY;
-use types::DIRECT_RUNTIME_MODE;
 pub(crate) use types::{
-    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE,
-    TTYD_TUNNEL_URL_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_PORT_METADATA_KEY,
+    TTYD_WS_URL_METADATA_KEY,
 };
 
 pub(crate) struct RuntimeLaunch {
     pub(crate) handle: ExecutorHandle,
     pub(crate) metadata: HashMap<String, String>,
-    /// When true, the runtime already emits terminal bytes directly via
-    /// `emit_terminal_bytes()` (e.g. ttyd mirror client). The output consumer
-    /// should NOT also mirror Stdout lines as terminal bytes, which would
-    /// cause double output.
     pub(crate) streams_terminal_bytes: bool,
 }
 
-fn validate_interactive_runtime(runtime: Option<&str>) -> Result<()> {
-    let normalized = runtime.map(str::trim).filter(|value| !value.is_empty());
-    match normalized {
-        None => Ok(()),
-        Some(value) if value.eq_ignore_ascii_case(TTYD_RUNTIME_MODE) => Ok(()),
-        Some(value)
-            if value.eq_ignore_ascii_case(DIRECT_RUNTIME_MODE)
-                || value.eq_ignore_ascii_case("tmux") =>
-        {
-            Ok(())
-        }
-        Some(other) => Err(anyhow!(
-            "Unsupported runtime `{other}`. Conductor now launches interactive sessions through ttyd only."
-        )),
-    }
+fn validate_interactive_runtime(_runtime: Option<&str>) {
+    // Conductor now treats every interactive session as a native PTY-backed runtime.
 }
 
 impl AppState {
@@ -54,30 +34,17 @@ impl AppState {
         session_id: &str,
         options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
-        validate_interactive_runtime(project.runtime.as_deref())?;
-        let ttyd_binary = ttyd_launcher::resolve_ttyd_binary(&self.workspace_path)
-            .ok_or_else(|| ttyd_launcher::ttyd_missing_error(&self.workspace_path))?;
-        ttyd_launcher::spawn_ttyd_runtime(self, executor, session_id, options, &ttyd_binary).await
+        validate_interactive_runtime(project.runtime.as_deref());
+        native_runtime::spawn_native_runtime(self, executor, session_id, options).await
     }
 
-    /// Archive any non-ttyd sessions that survived previous restarts as Stuck/Working.
-    /// These are legacy sessions from before the ttyd runtime was introduced.
-    /// They cannot be recovered and should not pollute the dashboard.
-    pub(crate) async fn archive_stale_non_ttyd_sessions(self: &Arc<Self>) {
+    pub(crate) async fn archive_stale_unrestorable_sessions(self: &Arc<Self>) {
         let now = chrono::Utc::now().to_rfc3339();
         let session_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
                 .filter(|session| !session.status.is_terminal())
-                .filter(|session| {
-                    // Only non-ttyd sessions
-                    session
-                        .metadata
-                        .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value != TTYD_RUNTIME_MODE)
-                        .unwrap_or(true) // no runtimeMode = pre-ttyd
-                })
                 .map(|session| session.id.clone())
                 .collect()
         };
@@ -90,13 +57,17 @@ impl AppState {
                     session.activity = Some("exited".to_string());
                     session.last_activity_at = now.clone();
                     session.summary = Some(
-                        "Session archived on restart (pre-ttyd runtime not recoverable)"
+                        "Session archived on restart (native PTY runtime is not automatically recoverable)"
                             .to_string(),
                     );
                     session
                         .metadata
                         .insert("archivedAt".to_string(), now.clone());
                     session.pid = None;
+                    session.metadata.remove(DETACHED_PID_METADATA_KEY);
+                    session.metadata.remove(TTYD_PID_METADATA_KEY);
+                    session.metadata.remove(TTYD_WS_URL_METADATA_KEY);
+                    session.metadata.remove(TTYD_PORT_METADATA_KEY);
                     Some(session.clone())
                 } else {
                     None
@@ -110,35 +81,9 @@ impl AppState {
     }
 
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
-        // Clean up orphaned ttyd processes from previous server runs before
-        // restoring sessions. This prevents port exhaustion and zombie processes.
-        self.cleanup_orphaned_ttyd_processes().await;
-
-        let session_ids: Vec<String> = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .values()
-                .filter(|session| !session.status.is_terminal())
-                .filter(|session| {
-                    session
-                        .metadata
-                        .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == TTYD_RUNTIME_MODE)
-                        .unwrap_or(false)
-                })
-                .map(|session| session.id.clone())
-                .collect()
-        };
-
-        for session_id in session_ids {
-            if let Err(err) = ttyd_launcher::restore_ttyd_runtime(self, &session_id).await {
-                tracing::warn!(
-                    session_id,
-                    error = %err,
-                    "Failed to restore ttyd runtime session"
-                );
-            }
-        }
+        // Native PTY sessions stay attached while the backend stays alive.
+        // After a backend restart there is no recoverable detached runtime to restore,
+        // so stale loaded sessions are archived during startup instead.
     }
 
     pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
@@ -150,32 +95,6 @@ impl AppState {
                 .clone()
         };
         let _restore_lock = restore_guard.lock().await;
-
-        if self.terminal_runtime_attached(session_id).await {
-            return Ok(true);
-        }
-
-        let Some(session) = self.get_session(session_id).await else {
-            return Ok(false);
-        };
-
-        if matches!(
-            session.status,
-            crate::state::SessionStatus::Archived | crate::state::SessionStatus::Killed
-        ) {
-            return Ok(false);
-        }
-
-        let runtime_mode = session
-            .metadata
-            .get(RUNTIME_MODE_METADATA_KEY)
-            .map(String::as_str);
-
-        if runtime_mode != Some(TTYD_RUNTIME_MODE) {
-            return Ok(false);
-        }
-
-        ttyd_launcher::restore_ttyd_runtime(self, session_id).await?;
         Ok(self.terminal_runtime_attached(session_id).await)
     }
 
@@ -194,91 +113,5 @@ impl AppState {
                 .await;
         }
         Ok(())
-    }
-
-    /// Reaps any lingering ttyd processes that belong to this Conductor backend
-    /// but are not tracked in the current active session state. This prevents
-    /// orphan terminal processes from consuming memory and exhausting the ttyd port range.
-    async fn cleanup_orphaned_ttyd_processes(&self) {
-        #[cfg(unix)]
-        {
-            let (known_pids, known_ppids): (
-                std::collections::HashSet<u32>,
-                std::collections::HashSet<u32>,
-            ) = {
-                let sessions = self.sessions.read().await;
-                let mut pids = std::collections::HashSet::new();
-                let mut ppids = std::collections::HashSet::new();
-                for s in sessions.values() {
-                    if !s.status.is_terminal() {
-                        if let Some(pid_str) = s.metadata.get(TTYD_PID_METADATA_KEY) {
-                            if let Ok(pid) = pid_str.parse::<u32>() {
-                                pids.insert(pid);
-                                ppids.insert(pid);
-                            }
-                        }
-                    }
-                }
-                (pids, ppids)
-            };
-
-            use tokio::process::Command;
-
-            // Find all running ttyd processes
-            let output = Command::new("ps")
-                .args(["-e", "-o", "pid,ppid,command"])
-                .output()
-                .await;
-
-            if let Ok(output) = output {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines().skip(1) {
-                    // Skip header
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() < 3 {
-                        continue;
-                    }
-
-                    if let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-                    {
-                        let command = parts[2..].join(" ");
-
-                        // Match the ttyd server binary (not ttyd-agent, which is a child of ttyd).
-                        // A process is an orphan if its PID and PPID are both unknown:
-                        // - known_pids: PIDs of live ttyd sessions
-                        // - known_ppids: PPIDs of live ttyd sessions (their children)
-                        //
-                        // The ttyd server has PPID of the conductor process (not in known_ppids),
-                        // but its child ttyd-agent has PPID of the ttyd server (in known_ppids).
-                        // So by checking both PID and PPID are unknown, we correctly identify orphans.
-                        let is_ttyd_binary = command.starts_with("ttyd ")
-                            || command.starts_with("./ttyd ")
-                            || command.contains(" /ttyd ")
-                            || command == "ttyd";
-                        let is_orphan = is_ttyd_binary
-                            && !known_pids.contains(&pid)
-                            && !known_ppids.contains(&ppid);
-
-                        if is_orphan {
-                            tracing::info!(pid, ppid, command, "Cleaning up orphaned ttyd process");
-                            unsafe {
-                                // Kill the entire process group with SIGTERM, then SIGKILL.
-                                // Using -pid sends the signal to all processes in the process group.
-                                libc::kill(-(pid as i32), libc::SIGTERM);
-
-                                // We spawn a short sleeper to send SIGKILL to avoid blocking the main startup
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                    // Check process group existence with kill(-pid, 0)
-                                    if libc::kill(-(pid as i32), 0) == 0 {
-                                        libc::kill(-(pid as i32), libc::SIGKILL);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }

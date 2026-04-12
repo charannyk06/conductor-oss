@@ -1,16 +1,13 @@
 mod common;
 
-use common::{spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness};
+use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn spawn_session_runs_from_queue_to_live_ttyd_state() {
-    if !ttyd_available() {
-        return;
-    }
-    let harness = TestHarness::new("conductor-spawn-test", "ttyd").await;
+async fn spawn_session_runs_from_queue_to_live_native_state() {
+    let harness = TestHarness::new("conductor-spawn-test", "direct").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -26,7 +23,7 @@ async fn spawn_session_runs_from_queue_to_live_ttyd_state() {
         .unwrap();
     assert_eq!(queued.status, SessionStatus::Queued);
 
-    let session = wait_for_condition("spawned session to reach live ttyd state", || {
+    let session = wait_for_condition("spawned session to reach live native state", || {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
@@ -45,6 +42,13 @@ async fn spawn_session_runs_from_queue_to_live_ttyd_state() {
     assert!(session.metadata.contains_key("worktree"));
     assert_eq!(
         session.metadata.get("runtimeMode").map(String::as_str),
-        Some("ttyd")
+        Some("direct")
+    );
+    assert_eq!(
+        session
+            .metadata
+            .get("terminalTransport")
+            .map(String::as_str),
+        Some("native-pty")
     );
 }

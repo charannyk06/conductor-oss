@@ -9,6 +9,7 @@ use conductor_core::board::Board;
 use conductor_core::config::ProjectConfig;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
+use conductor_core::types::SessionStatus;
 use conductor_core::EventBus;
 use serde_json::json;
 use serde_json::Value;
@@ -791,22 +792,25 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
     request.source = "board_dispatch".to_string();
 
     let queued = harness.state.spawn_session(request).await.unwrap();
-    let session = wait_for_condition("board-dispatched session metadata", || {
+    let session = wait_for_condition("board-dispatched session", || {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.model.as_deref() == Some("gpt-5-mini")
-                    && session.reasoning_effort.as_deref() == Some("medium")
-                    && session.conversation.iter().any(|entry| {
-                        entry.kind == "user_message" && entry.text == "Trigger watcher refresh"
-                    }))
+                (session.status == SessionStatus::Working
+                    && session.metadata.contains_key("worktree"))
                 .then_some(session)
             })
         }
     })
     .await;
     assert_eq!(session.project_id, "demo");
-    assert_eq!(session.model.as_deref(), Some("gpt-5-mini"));
-    assert_eq!(session.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        session.metadata.get("model").map(String::as_str),
+        Some("gpt-5-mini")
+    );
+    assert_eq!(
+        session.metadata.get("reasoningEffort").map(String::as_str),
+        Some("medium")
+    );
 }
