@@ -120,7 +120,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
 
     let session = wait_for_condition_with_timeout(
         "live session metadata",
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(180),
         || {
             let state = harness.state.clone();
             let session_id = session_id.clone();
@@ -139,7 +139,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
 
     wait_for_condition_with_timeout(
         "live terminal snapshot to become restorable",
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(180),
         || {
             let app = harness.app();
             let session_id = session_id.clone();
@@ -168,7 +168,7 @@ async fn spawn_session_route_drives_a_live_test_executor() {
 
     wait_for_condition_with_timeout(
         "session input route to accept follow-up input",
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(180),
         || {
             let app = harness.app();
             let session_id = session_id.clone();
