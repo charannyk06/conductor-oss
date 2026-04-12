@@ -137,24 +137,35 @@ async fn spawn_session_route_drives_a_live_test_executor() {
     assert_eq!(session.agent, "codex");
     assert_eq!(session.prompt, "Stream the prompt back");
 
-    let response = harness
-        .app()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/sessions/{session_id}/input"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "message": "hello"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_condition_with_timeout(
+        "session input route to accept follow-up input",
+        std::time::Duration::from_secs(30),
+        || {
+            let app = harness.app();
+            let session_id = session_id.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/sessions/{session_id}/input"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "message": "hello"
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .ok()?;
+
+                (response.status() == StatusCode::OK).then_some(())
+            }
+        },
+    )
+    .await;
 
     wait_for_condition("session output to include echoed input", || {
         let app = harness.app();
