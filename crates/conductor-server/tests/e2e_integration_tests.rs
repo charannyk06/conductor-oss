@@ -2,7 +2,9 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use common::{spawn_request, wait_for_condition, wait_for_condition_with_timeout, TestHarness};
+use common::{
+    spawn_request, ttyd_available, wait_for_condition, wait_for_condition_with_timeout, TestHarness,
+};
 use serde_json::Value;
 use tower::util::ServiceExt;
 
@@ -93,7 +95,12 @@ async fn failed_spawn_is_persisted_and_reported_in_error_health() {
 
 #[tokio::test]
 async fn spawn_session_route_drives_a_live_test_executor() {
-    let harness = TestHarness::new("conductor-e2e-spawn-test", "direct").await;
+    if !ttyd_available() {
+        eprintln!("skipping live executor e2e: ttyd binary not found");
+        return;
+    }
+
+    let harness = TestHarness::new("conductor-e2e-spawn-test", "ttyd").await;
 
     let response = harness
         .app()

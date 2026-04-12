@@ -9,7 +9,12 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
-    let harness = TestHarness::new("conductor-session-test", "direct").await;
+    if !ttyd_available() {
+        eprintln!("skipping session lifecycle test: ttyd binary not found");
+        return;
+    }
+
+    let harness = TestHarness::new("conductor-session-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
