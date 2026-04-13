@@ -94,10 +94,10 @@ interface SessionDetailProps {
 
 type SessionTab = "overview" | "diff" | "dispatcher" | "terminal" | "preview" | "skills";
 
-const STANDARD_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0";
+const STANDARD_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=active]:relative data-[state=active]:z-10 data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:z-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0";
 // Keep terminal-like surfaces painted with opacity only. `visibility:hidden` was causing browser-level
 // suspension / blanking on tab switches even though the panels stayed force-mounted.
-const PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=active]:relative data-[state=active]:z-10 data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:opacity-0 data-[state=inactive]:select-none";
+const PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME = "min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=active]:relative data-[state=active]:z-10 data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:z-0 data-[state=inactive]:opacity-0 data-[state=inactive]:select-none";
 
 function resolveSessionTab(
   value: string | null,

@@ -237,6 +237,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [frameLoaded, setFrameLoaded] = useState(false);
+  const [iframeReloadNonce, setIframeReloadNonce] = useState(0);
   const [connectionRefreshTick, setConnectionRefreshTick] = useState(0);
   const [promptMessage, setPromptMessage] = useState("");
   const [promptSending, setPromptSending] = useState(false);
@@ -1053,6 +1054,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setConnectionError(null);
     retryAttemptRef.current = 0;
     forceTerminalReloadRef.current = true;
+    frameLoadedRef.current = false;
+    setFrameLoaded(false);
+    setIframeReloadNonce((current) => current + 1);
     setConnectionRefreshTick((current) => current + 1);
   }, []);
 
@@ -1168,7 +1172,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               </div>
             ) : null}
             <iframe
-              key={sessionId}
+              key={`${sessionId}:${iframeReloadNonce}`}
               ref={ttydIframeRef}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
