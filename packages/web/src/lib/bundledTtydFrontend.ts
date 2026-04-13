@@ -1,12 +1,6 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
-const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
-const BUNDLED_TTYD_FRONTEND_PATH = join(
-  MODULE_DIRECTORY,
-  "ttyd_frontend_v1.7.7.html",
-);
+const BUNDLED_TTYD_FRONTEND_URL = new URL("./ttyd_frontend_v1.7.7.html", import.meta.url);
 
 const BUNDLED_TTYD_RESPONSE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -24,7 +18,7 @@ export function loadBundledTtydFrontendHtml(): string {
     return cachedBundledTtydFrontendHtml;
   }
 
-  cachedBundledTtydFrontendHtml = readFileSync(BUNDLED_TTYD_FRONTEND_PATH, "utf8");
+  cachedBundledTtydFrontendHtml = readFileSync(BUNDLED_TTYD_FRONTEND_URL, "utf8");
   return cachedBundledTtydFrontendHtml;
 }
 

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 
+import { loadBundledTtydFrontendHtml } from "./bundledTtydFrontend";
 import { readTtydHtmlResponse } from "./ttydHtmlResponse";
 
 test("readTtydHtmlResponse returns null when the proxied HTML stream errors", async () => {
@@ -53,17 +52,7 @@ test("readTtydHtmlResponse still returns null for non-html download responses", 
 });
 
 test("readTtydHtmlResponse accepts the vendored ttyd frontend size used by the iframe proxy", async () => {
-  const ttydFrontendPath = join(
-    process.cwd(),
-    "..",
-    "..",
-    "crates",
-    "conductor-server",
-    "src",
-    "routes",
-    "ttyd_frontend_v1.7.7.html",
-  );
-  const html = readFileSync(ttydFrontendPath, "utf8");
+  const html = loadBundledTtydFrontendHtml();
   const proxied = new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
