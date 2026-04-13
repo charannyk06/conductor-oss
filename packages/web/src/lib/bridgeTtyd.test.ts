@@ -120,6 +120,7 @@ test("buildPatchedTtydHtmlResponse forces html rendering headers for patched tty
   const patched = buildPatchedTtydHtmlResponse(proxied, "<html><body>new</body></html>");
 
   assert.equal(patched.headers.get("content-type"), "text/html; charset=utf-8");
-  assert.equal(patched.headers.get("content-disposition"), null);
+  assert.equal(patched.headers.get("content-disposition"), "inline; filename=ttyd.html");
+  assert.equal(patched.headers.get("x-content-type-options"), "nosniff");
   assert.equal(await patched.text(), "<html><body>new</body></html>");
 });
