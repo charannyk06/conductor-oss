@@ -10,6 +10,10 @@ import {
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
+import {
+  buildBundledTtydHtmlResponse,
+  loadBundledTtydFrontendHtml,
+} from "@/lib/bundledTtydFrontend";
 import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +26,9 @@ type RouteContext = {
 async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
   const html = await readTtydHtmlResponse(proxied);
   if (html === null) {
-    return proxied;
+    return buildBundledTtydHtmlResponse(
+      injectTtydResizeShim(loadBundledTtydFrontendHtml()),
+    );
   }
 
   return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
@@ -67,11 +73,6 @@ export async function GET(
     },
   );
 
-  const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return proxied;
-  }
-
   let relayTtydWsUrl = new URL(request.url).searchParams.get(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM)?.trim() ?? "";
   if (!relayTtydWsUrl) {
     relayTtydWsUrl = await createBridgeTtydRelayWebSocketUrl(
@@ -81,9 +82,16 @@ export async function GET(
     );
   }
 
+  const html = await readTtydHtmlResponse(proxied);
+  const ttydHtml = html ?? loadBundledTtydFrontendHtml();
+
   const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
+    injectBridgeTtydRelayShim(ttydHtml, relayTtydWsUrl),
   );
+
+  if (html === null) {
+    return buildBundledTtydHtmlResponse(patchedHtml);
+  }
 
   return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
 }
