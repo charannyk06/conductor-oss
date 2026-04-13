@@ -531,7 +531,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           setTerminalRelayWsUrl(null);
           setFrameLoaded(false);
         }
-        setConnectionError(connection.reason ?? "Live ttyd terminal is unavailable.");
+        setConnectionError(connection.reason ?? "Live terminal is unavailable.");
       })
       .catch((error) => {
         if (cancelled || !expectsLiveTerminalRef.current) return;
@@ -546,7 +546,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           setFrameLoaded(false);
         }
         setConnectionError(
-          error instanceof Error ? error.message : "Failed to resolve ttyd terminal.",
+          error instanceof Error ? error.message : "Failed to resolve terminal.",
         );
         const attempt = retryAttemptRef.current;
         const delay = hasTerminal ? 5000 : Math.min(4000, 500 * 2 ** attempt);
@@ -1068,12 +1068,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
   const emptyStateDescription = connectionError
     ?? (expectsLiveTerminal
-      ? "Reconnecting to the existing ttyd terminal."
+      ? "Reconnecting to the existing terminal."
       : ttydBacked
-        ? "This ttyd terminal is no longer attached. It only closes after an explicit kill or archive."
+        ? "This terminal is no longer attached. It only closes after an explicit kill or archive."
       : showPromptBar
-        ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
-        : `Session status is \`${normalizedSessionStatus}\`. Interactive ttyd terminals only run while the agent is active.`);
+        ? "Send a follow-up below to relaunch the agent in a fresh terminal."
+        : `Session status is \`${normalizedSessionStatus}\`. Interactive terminals only run while the agent is active.`);
   const terminalDirectHref = terminalLinkUrl ?? terminalUrl ?? undefined;
   const terminalSessionHref = buildSessionHref(sessionId, { bridgeId, tab: "terminal" });
 
@@ -1141,7 +1141,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           variant="ghost"
           className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
           onClick={handleRetry}
-          aria-label="Reload ttyd terminal"
+          aria-label="Reload terminal"
         >
           {resolvingConnection ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1167,14 +1167,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
                 <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Loading ttyd terminal…</span>
+                  <span>Loading terminal…</span>
                 </div>
               </div>
             ) : null}
             <iframe
               key={`${sessionId}:${iframeReloadNonce}`}
               ref={ttydIframeRef}
-              title={`ttyd terminal for ${sessionId}`}
+              title={`terminal for ${sessionId}`}
               src={terminalUrl}
               className="block h-full min-h-0 w-full flex-1 border-0 bg-[#060404]"
               allow="clipboard-read; clipboard-write"
@@ -1228,7 +1228,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
                         rel="noreferrer"
                         className="text-[12px] text-[#a79c94] underline underline-offset-4"
                       >
-                        Open the ttyd terminal directly
+                        Open the terminal directly
                       </a>
                     </div>
                   ) : null}

@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import type { BridgePreviewSessionConfig } from "./types.js";
 
 const LOCAL_NAVIGATION_HOSTS = ["127.0.0.1", "localhost", "::1", "0.0.0.0"] as const;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
@@ -96,6 +97,28 @@ export async function assertSafeDirectNavigationTarget(value: string): Promise<v
     throw new Error(
       "Preview navigation resolved to a private network address and was blocked. Set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true only if you intentionally trust that target.",
     );
+  }
+}
+
+export type PreviewNavigationMode = "bridge" | "direct" | "blocked";
+
+export function resolvePreviewNavigationMode(
+  value: string,
+  bridgePreview: Pick<BridgePreviewSessionConfig, "allowedOrigins"> | null,
+): PreviewNavigationMode {
+  if (!bridgePreview) {
+    return "direct";
+  }
+
+  try {
+    const parsed = new URL(value);
+    const isLocal = isLocalHost(normalizeNavigationHostname(parsed.hostname));
+    if (bridgePreview.allowedOrigins.includes(parsed.origin)) {
+      return "bridge";
+    }
+    return isLocal ? "blocked" : "direct";
+  } catch {
+    return "direct";
   }
 }
 

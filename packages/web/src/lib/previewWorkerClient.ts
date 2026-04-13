@@ -6,6 +6,7 @@ import type {
   PreviewStatusResponse,
 } from "@/lib/previewTypes";
 import type { PreviewBrowserManagerClient } from "./devPreviewBrowser";
+import { resolveBridgeRelayUrl } from "./bridgeRelayUrl";
 
 type WorkerCommandRequest =
   | PreviewCommandRequest
@@ -18,6 +19,15 @@ type WorkerCommandResponse =
   | ({ kind: "dom" } & PreviewDomResponse)
   | { kind: "screenshot"; imageBase64: string }
   | { kind: "error"; message: string };
+
+type RemoteBridgePreviewConfig = BridgePreviewConfig & {
+  relayUrl: string;
+  forwardedHeaders: Record<string, string>;
+};
+
+type CreatePreviewWorkerSessionPayload = {
+  bridgePreview?: RemoteBridgePreviewConfig | null;
+};
 
 function normalizeWorkerUrl(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -63,18 +73,49 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
   private readonly workerUrl = normalizeWorkerUrl(process.env.CONDUCTOR_PREVIEW_WORKER_URL);
   private readonly workerApiKey = process.env.CONDUCTOR_PREVIEW_WORKER_KEY?.trim() || null;
   private readonly remoteSessionIds = new Map<string, string>();
+  private readonly bridgePreviewConfigs = new Map<string, RemoteBridgePreviewConfig | null>();
 
   async configureBridgePreview(
-    _sessionId: string,
-    _config: BridgePreviewConfig | null,
-    _forwardedHeaders?: HeadersInit,
+    sessionId: string,
+    config: BridgePreviewConfig | null,
+    forwardedHeaders?: HeadersInit,
   ): Promise<void> {
-    // The remote worker handles localhost access through its own tunnel flow.
+    const relayUrl = resolveBridgeRelayUrl();
+    const nextConfig = config && forwardedHeaders && relayUrl
+      ? {
+          ...config,
+          relayUrl,
+          forwardedHeaders: Object.fromEntries(new Headers(forwardedHeaders).entries()),
+        }
+      : null;
+    const previousConfig = this.bridgePreviewConfigs.get(sessionId) ?? null;
+    if (JSON.stringify(previousConfig) === JSON.stringify(nextConfig)) {
+      return;
+    }
+
+    this.bridgePreviewConfigs.set(sessionId, nextConfig);
+
+    const remoteSessionId = this.remoteSessionIds.get(sessionId);
+    if (!remoteSessionId || !this.isConfigured()) {
+      return;
+    }
+
+    this.remoteSessionIds.delete(sessionId);
+    try {
+      await fetch(`${this.workerUrl}/sessions/${encodeURIComponent(remoteSessionId)}`, {
+        method: "DELETE",
+        headers: this.buildHeaders(),
+        cache: "no-store",
+      });
+    } catch {
+      // Swallow worker teardown failures so config refresh never blocks callers.
+    }
   }
 
   async destroySession(sessionId: string): Promise<void> {
     const remoteSessionId = this.remoteSessionIds.get(sessionId);
     this.remoteSessionIds.delete(sessionId);
+    this.bridgePreviewConfigs.delete(sessionId);
     if (!remoteSessionId || !this.isConfigured()) {
       return;
     }
@@ -221,20 +262,25 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
       throw new Error(configurationError);
     }
 
+    const payload: CreatePreviewWorkerSessionPayload = {
+      bridgePreview: this.bridgePreviewConfigs.get(sessionId) ?? null,
+    };
+
     try {
       const response = await fetch(`${this.workerUrl}/sessions`, {
         method: "POST",
         headers: this.buildHeaders(),
+        body: JSON.stringify(payload),
         cache: "no-store",
       });
 
-      const payload = await response.json() as { sessionId?: string; error?: string };
-      if (!response.ok || !payload.sessionId) {
-        throw new Error(payload.error || "Preview worker session creation failed");
+      const sessionPayload = await response.json() as { sessionId?: string; error?: string };
+      if (!response.ok || !sessionPayload.sessionId) {
+        throw new Error(sessionPayload.error || "Preview worker session creation failed");
       }
 
-      this.remoteSessionIds.set(sessionId, payload.sessionId);
-      return payload.sessionId;
+      this.remoteSessionIds.set(sessionId, sessionPayload.sessionId);
+      return sessionPayload.sessionId;
     } catch (error) {
       throw new Error(this.networkErrorMessage(error));
     }

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { BrowserManager } from "../browser/BrowserManager.js";
 import { requireRequestApiKey } from "../lib/auth.js";
-import { PreviewWorkerError } from "../lib/types.js";
+import { PreviewWorkerError, parseCreatePreviewSessionRequest } from "../lib/types.js";
 
 function resolveErrorStatus(error: unknown): number {
   return error instanceof PreviewWorkerError ? error.statusCode : 500;
@@ -15,7 +15,11 @@ export function registerSessionRoutes(app: FastifyInstance, browserManager: Brow
   app.post("/sessions", async (request, reply) => {
     try {
       const apiKey = requireRequestApiKey(request);
-      const session = await browserManager.createSession(apiKey);
+      const payload = parseCreatePreviewSessionRequest(request.body);
+      if (!payload) {
+        return await reply.code(400).send({ error: "Invalid preview session payload." });
+      }
+      const session = await browserManager.createSession(apiKey, payload);
       return await reply.code(201).send({ sessionId: session.id });
     } catch (error) {
       return await reply.code(resolveErrorStatus(error)).send({ error: resolveErrorMessage(error) });

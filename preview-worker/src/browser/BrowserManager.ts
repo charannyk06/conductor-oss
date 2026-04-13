@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +21,7 @@ import { rewriteLoopbackUrl, startTunnel, stopTunnel } from "./tunnel.js";
 import { SessionStore } from "../sessions/SessionStore.js";
 import {
   PreviewWorkerError,
+  type CreatePreviewSessionRequest,
   type PreviewDomResponse,
   type PreviewFrameInfo,
   type PreviewLogEntry,
@@ -34,6 +36,7 @@ import {
   buildPreviewNavigationCandidates,
   isLocalHost,
   normalizeNavigationHostname,
+  resolvePreviewNavigationMode,
 } from "../lib/security.js";
 
 const VIEWPORT = { width: 1440, height: 960 };
@@ -189,6 +192,95 @@ function urlsShareOrigin(left: string, right: string): boolean {
   }
 }
 
+type BridgePreviewResponse = {
+  status: number;
+  headers: Record<string, string>;
+  bodyBase64?: string | null;
+};
+
+function sanitizeBridgePreviewRequestHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized) continue;
+    if (
+      normalized === "host"
+      || normalized === "connection"
+      || normalized === "proxy-connection"
+      || normalized === "keep-alive"
+      || normalized === "transfer-encoding"
+      || normalized === "content-length"
+      || normalized === "accept-encoding"
+    ) {
+      continue;
+    }
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
+async function requestBridgePreview(
+  session: PreviewSession,
+  payload: {
+    method: string;
+    url: string;
+    headers: Record<string, string>;
+    bodyBase64: string | null;
+  },
+): Promise<BridgePreviewResponse> {
+  const bridgePreview = session.bridgePreview;
+  if (!bridgePreview) {
+    throw new Error("Bridge preview is not configured for this session.");
+  }
+
+  const target = new URL(`/api/devices/${encodeURIComponent(bridgePreview.bridgeId)}/preview`, bridgePreview.relayUrl);
+  const headers = new Headers(bridgePreview.forwardedHeaders);
+  headers.set("Content-Type", "application/json");
+
+  const response = await fetch(target, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      session_id: bridgePreview.sessionId,
+      method: payload.method,
+      url: payload.url,
+      headers: payload.headers,
+      body_base64: payload.bodyBase64,
+    }),
+    cache: "no-store",
+    redirect: "manual",
+  });
+
+  const body = await response.json().catch(() => null) as
+    | { status?: number; headers?: Record<string, string>; body_base64?: string | null }
+    | { error?: string }
+    | null;
+
+  if (!response.ok) {
+    throw new Error(
+      body && typeof body === "object" && "error" in body && body.error
+        ? body.error
+        : "Failed to reach paired device preview",
+    );
+  }
+
+  const previewBody = body && typeof body === "object"
+    ? body as { status?: number; headers?: Record<string, string>; body_base64?: string | null }
+    : null;
+
+  return {
+    status: typeof previewBody?.status === "number" ? previewBody.status : 502,
+    headers: previewBody?.headers && typeof previewBody.headers === "object"
+      ? previewBody.headers as Record<string, string>
+      : {},
+    bodyBase64: typeof previewBody?.body_base64 === "string" || previewBody?.body_base64 === null
+      ? previewBody.body_base64 as string | null
+      : undefined,
+  };
+}
+
 export class BrowserManager {
   private readonly cleanupTimer: NodeJS.Timeout;
 
@@ -206,7 +298,7 @@ export class BrowserManager {
     return new PreviewWorkerError(statusCode, message);
   }
 
-  async createSession(apiKey: string): Promise<PreviewSession> {
+  async createSession(apiKey: string, options: CreatePreviewSessionRequest = {}): Promise<PreviewSession> {
     if (this.sessionStore.countByApiKey(apiKey) >= this.config.maxSessions) {
       throw this.error(429, "Preview session limit exceeded for this API key.");
     }
@@ -233,6 +325,7 @@ export class BrowserManager {
       tunnelUrl: null,
       tunnelProcess: null,
       tunnelLocalOrigin: null,
+      bridgePreview: options.bridgePreview ?? null,
       status: "active",
       activeFrameId: null,
       selectedElement: null,
@@ -369,19 +462,32 @@ export class BrowserManager {
     let lastError: unknown = null;
 
     for (const candidate of candidates) {
+      const navigationMode = resolvePreviewNavigationMode(candidate, session.bridgePreview);
+      if (navigationMode === "blocked") {
+        lastError = new Error("Bridge preview only allows navigation to the session's reported local dev server origin.");
+        continue;
+      }
+
       const previousUrl = session.page.url();
 
       try {
-        const targetUrl = await this.resolveNavigationTarget(session, candidate);
+        const targetUrl = navigationMode === "bridge"
+          ? candidate
+          : await this.resolveNavigationTarget(session, candidate);
+        await this.syncRequestInterception(session, navigationMode === "bridge");
         await session.page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+        await this.syncRequestInterception(session, navigationMode === "bridge");
         session.selectedElement = null;
         session.lastError = null;
         session.activeFrameId = this.ensureFrameId(session, session.page.mainFrame());
         session.lastRequestedUrl = candidate;
         return;
       } catch (error) {
-        const targetUrl = session.lastRequestedUrl ?? candidate;
+        const targetUrl = navigationMode === "bridge"
+          ? candidate
+          : (session.lastRequestedUrl ?? candidate);
         if (await this.navigationProducedUsablePage(session.page, targetUrl, previousUrl, error)) {
+          await this.syncRequestInterception(session, navigationMode === "bridge");
           session.selectedElement = null;
           session.lastError = null;
           session.activeFrameId = this.ensureFrameId(session, session.page.mainFrame());
@@ -475,7 +581,6 @@ export class BrowserManager {
       session.tunnelLocalOrigin = tunnel.localOrigin;
     }
 
-    await this.syncRequestInterception(session, true);
     const rewritten = rewriteLoopbackUrl(candidate, session.tunnelUrl);
     if (!rewritten) {
       throw this.error(500, "Failed to rewrite localhost preview URL through the tunnel.");
@@ -558,18 +663,48 @@ export class BrowserManager {
     session: PreviewSession,
     request: HTTPRequest,
   ): Promise<void> {
-    if (!session.tunnelUrl) {
+    const bridgePreview = session.bridgePreview;
+    if (!bridgePreview) {
       await request.continue();
       return;
     }
 
-    const rewritten = rewriteLoopbackUrl(request.url(), session.tunnelUrl);
-    if (!rewritten) {
-      await request.continue();
+    let parsed: URL;
+    try {
+      parsed = new URL(request.url());
+    } catch {
+      await request.abort("blockedbyclient");
       return;
     }
 
-    await request.continue({ url: rewritten });
+    if (parsed.protocol !== "http:" && parsed.protocol != "https:") {
+      await request.abort("blockedbyclient");
+      return;
+    }
+
+    if (!bridgePreview.allowedOrigins.includes(parsed.origin)) {
+      await request.abort("blockedbyclient");
+      return;
+    }
+
+    const postData = request.method() === "GET" || request.method() === "HEAD"
+      ? null
+      : request.postData() ?? null;
+
+    const previewResponse = await requestBridgePreview(session, {
+      method: request.method(),
+      url: parsed.toString(),
+      headers: sanitizeBridgePreviewRequestHeaders(request.headers()),
+      bodyBase64: postData ? Buffer.from(postData).toString("base64") : null,
+    });
+
+    await request.respond({
+      status: previewResponse.status,
+      headers: previewResponse.headers,
+      body: previewResponse.bodyBase64
+        ? Buffer.from(previewResponse.bodyBase64, "base64")
+        : Buffer.alloc(0),
+    });
   }
 
   private async syncRequestInterception(session: PreviewSession, enabled: boolean): Promise<void> {
