@@ -28,6 +28,20 @@ function withLookupError(
 
 const MISSING_SESSION_PREVIEW_ERROR = "Session is no longer available.";
 
+function readPreviewUrlHint(request: NextRequest): string | null {
+  const value = request.nextUrl.searchParams.get("previewUrlHint");
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function resolveCommandPreviewUrlHint(command: PreviewCommandRequest): string | null {
+  if (command.command === "connect" || command.command === "navigate") {
+    const trimmed = command.url.trim();
+    return trimmed ? trimmed : null;
+  }
+  return null;
+}
+
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
@@ -38,6 +52,7 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   const previewContext = await loadPreviewSessionContext(id, {
     request,
     headers: forwardedHeaders,
+    previewUrlHint: readPreviewUrlHint(request),
   });
   const manager = getPreviewBrowserManager();
   if (!previewContext.session && !previewContext.error) {
@@ -78,22 +93,23 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
 
   const { id } = await context.params;
 
-  const forwardedHeaders = await buildForwardedAccessHeaders(request);
-  const previewContext = await loadPreviewSessionContext(id, {
-    request,
-    headers: forwardedHeaders,
-  });
-  const manager = getPreviewBrowserManager();
-  if (!previewContext.session && !previewContext.error) {
-    await manager.destroySession(id);
-    return NextResponse.json({ error: MISSING_SESSION_PREVIEW_ERROR }, { status: 404 });
-  }
-
   let body: PreviewCommandRequest;
   try {
     body = await request.json() as PreviewCommandRequest;
   } catch {
     return NextResponse.json({ error: "Invalid preview command payload" }, { status: 400 });
+  }
+
+  const forwardedHeaders = await buildForwardedAccessHeaders(request);
+  const previewContext = await loadPreviewSessionContext(id, {
+    request,
+    headers: forwardedHeaders,
+    previewUrlHint: resolveCommandPreviewUrlHint(body) ?? readPreviewUrlHint(request),
+  });
+  const manager = getPreviewBrowserManager();
+  if (!previewContext.session && !previewContext.error) {
+    await manager.destroySession(id);
+    return NextResponse.json({ error: MISSING_SESSION_PREVIEW_ERROR }, { status: 404 });
   }
 
   await manager.configureBridgePreview(

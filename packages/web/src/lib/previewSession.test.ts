@@ -124,6 +124,80 @@ test("discoverPreviewCandidateUrls skips bridge output without request context",
   }
 });
 
+test("discoverPreviewCandidateUrls falls back to project dev server config when session metadata lacks a loopback url", async () => {
+  const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
+  const previousFetch = global.fetch;
+
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  global.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/sessions/session-1/output?lines=400")) {
+      return new Response(JSON.stringify({ output: "" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.endsWith("/api/repositories")) {
+      return new Response(JSON.stringify({
+        repositories: [{
+          id: "demo",
+          devServerUrl: "",
+          devServerPort: "3002",
+          devServerHost: "0.0.0.0",
+          devServerPath: "/app",
+          devServerHttps: true,
+        }],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const session = buildSession({});
+    const urls = await discoverPreviewCandidateUrls(session);
+
+    assert.deepEqual(urls, [
+      "https://127.0.0.1:3002/app",
+      "https://deploy-preview.example.com/",
+    ]);
+  } finally {
+    process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
+    global.fetch = previousFetch;
+  }
+});
+
+test("discoverPreviewCandidateUrls prioritizes an explicit preview url hint", async () => {
+  const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
+  const previousFetch = global.fetch;
+
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  global.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    assert.match(url, /\/api\/sessions\/session-1\/output\?lines=400$/);
+    return new Response(JSON.stringify({ output: "" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const session = buildSession({});
+    const urls = await discoverPreviewCandidateUrls(session, { previewUrlHint: "http://localhost:3002" });
+
+    assert.deepEqual(urls, [
+      "http://localhost:3002/",
+      "https://deploy-preview.example.com/",
+    ]);
+  } finally {
+    process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
+    global.fetch = previousFetch;
+  }
+});
 test("loadPreviewSessionContext captures backend lookup failures without throwing", async () => {
   const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
 
