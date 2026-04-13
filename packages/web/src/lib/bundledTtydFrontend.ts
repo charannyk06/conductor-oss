@@ -10,6 +10,8 @@ const BUNDLED_TTYD_FRONTEND_PATH = join(
 
 const BUNDLED_TTYD_RESPONSE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
+  "content-disposition": "inline; filename=ttyd.html",
+  "x-content-type-options": "nosniff",
   "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
   pragma: "no-cache",
   expires: "0",

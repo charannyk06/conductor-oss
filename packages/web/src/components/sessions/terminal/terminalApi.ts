@@ -165,6 +165,44 @@ function appendBridgeIdToTerminalUrl(
   }
 }
 
+function buildEmbeddedProxyTerminalUrl(
+  sessionId: string,
+  dashboardOrigin: string,
+  bridgeId?: string | null,
+  token?: string | null,
+  resolvedTerminalUrl?: string | null,
+): string {
+  let proxySessionId = sessionId;
+
+  if (resolvedTerminalUrl) {
+    try {
+      const resolved = new URL(resolvedTerminalUrl);
+      const match = resolved.pathname.match(/^\/api\/sessions\/([^/]+)\/terminal\/ttyd(?:\/)?$/);
+      if (match?.[1]) {
+        proxySessionId = decodeURIComponent(match[1]);
+      }
+    } catch {
+    }
+  }
+
+  const url = new URL(
+    `/api/sessions/${encodeURIComponent(proxySessionId)}/terminal/ttyd`,
+    dashboardOrigin,
+  );
+
+  const normalizedBridgeId = bridgeId?.trim();
+  if (normalizedBridgeId) {
+    url.searchParams.set("bridgeId", normalizedBridgeId);
+  }
+
+  const normalizedToken = token?.trim();
+  if (normalizedToken) {
+    url.searchParams.set("token", normalizedToken);
+  }
+
+  return url.toString();
+}
+
 type ResolveTerminalConnectionOptions = {
   bridgeId?: string | null;
   signal?: AbortSignal;
@@ -308,9 +346,10 @@ export async function resolveTerminalConnection(
     };
   }
 
-  // Keep the embedded iframe on the shimmed proxy path so auth sync, resize
-  // coordination, touch, and lifecycle hardening always stay in play. Tunnel
-  // URLs are exposed only as direct-open links for non-bridge sessions.
+  // Keep the embedded iframe on the dashboard ttyd proxy path even when older
+  // backends still advertise a direct ttyd origin. That route applies the HTML
+  // hardening and prevents Safari from treating the terminal shell like a
+  // downloadable file.
   const resolvedTerminalUrl = resolveProvidedTtydHttpUrl(
     auth.ttydHttpUrl,
     auth.ttydWsUrl,
@@ -327,7 +366,13 @@ export async function resolveTerminalConnection(
     };
   }
 
-  const embeddedTerminalUrl = appendBridgeIdToTerminalUrl(resolvedTerminalUrl, options?.bridgeId);
+  const embeddedTerminalUrl = buildEmbeddedProxyTerminalUrl(
+    sessionId,
+    dashboardOrigin,
+    options?.bridgeId,
+    extractResolvedTerminalToken(resolvedTerminalUrl),
+    resolvedTerminalUrl,
+  );
   const terminalLinkUrl = buildDirectTerminalLinkUrl(embeddedTerminalUrl, auth, options?.bridgeId);
 
   return {
