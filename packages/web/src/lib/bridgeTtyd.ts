@@ -78,6 +78,8 @@ export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): R
     headers.delete(headerName);
   }
   headers.set("content-type", "text/html; charset=utf-8");
+  headers.set("content-disposition", "inline; filename=ttyd.html");
+  headers.set("x-content-type-options", "nosniff");
   headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
   headers.set("pragma", "no-cache");
   headers.set("expires", "0");
