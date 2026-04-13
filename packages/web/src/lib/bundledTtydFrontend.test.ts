@@ -19,6 +19,8 @@ test("buildBundledTtydHtmlResponse serves html with no-store headers", async () 
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), "inline; filename=ttyd.html");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("cache-control"), "no-store, no-cache, must-revalidate, max-age=0");
   assert.equal(await response.text(), "<html><body>ok</body></html>");
 });
