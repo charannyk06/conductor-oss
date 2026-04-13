@@ -7,6 +7,7 @@ import {
   isPrivateNetworkHostname,
   normalizeNavigationHostname,
   normalizeNavigationInput,
+  resolvePreviewNavigationMode,
 } from "./security.js";
 
 const env = process.env as Record<string, string | undefined>;
@@ -82,4 +83,15 @@ test("assertSafeDirectNavigationTarget skips checks when unsafe preview hosts ar
 
 test("assertSafeDirectNavigationTarget allows public http when DNS resolves to public addresses", async () => {
   await assertSafeDirectNavigationTarget("http://example.com/");
+});
+
+
+test("resolvePreviewNavigationMode keeps allowed bridge origins on the relay path", () => {
+  const bridgePreview = {
+    allowedOrigins: ["http://127.0.0.1:3000"],
+  };
+
+  assert.equal(resolvePreviewNavigationMode("http://127.0.0.1:3000/", bridgePreview), "bridge");
+  assert.equal(resolvePreviewNavigationMode("https://preview.example.com/app", bridgePreview), "direct");
+  assert.equal(resolvePreviewNavigationMode("http://localhost:3000/", bridgePreview), "blocked");
 });

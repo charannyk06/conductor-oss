@@ -86,6 +86,18 @@ export type PreviewCommandRequest =
   | { command: "selectAtPoint"; x: number; y: number }
   | { command: "selectBySelector"; selector: string; frameId?: string | null };
 
+export interface BridgePreviewSessionConfig {
+  bridgeId: string;
+  sessionId: string;
+  allowedOrigins: string[];
+  relayUrl: string;
+  forwardedHeaders: Record<string, string>;
+}
+
+export interface CreatePreviewSessionRequest {
+  bridgePreview?: BridgePreviewSessionConfig | null;
+}
+
 export type WorkerCommandRequest =
   | PreviewCommandRequest
   | { command: "status"; candidateUrls: string[] }
@@ -118,6 +130,7 @@ export interface PreviewSession {
   tunnelUrl: string | null;
   tunnelProcess: ChildProcessByStdio<null, Readable, Readable> | null;
   tunnelLocalOrigin: string | null;
+  bridgePreview: BridgePreviewSessionConfig | null;
   status: "active" | "closing";
   activeFrameId: string | null;
   selectedElement: PreviewElementSelection | null;
@@ -151,6 +164,45 @@ function isNullableString(value: unknown): value is string | null {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+export function parseCreatePreviewSessionRequest(value: unknown): CreatePreviewSessionRequest | null {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (value.bridgePreview === undefined || value.bridgePreview === null) {
+    return { bridgePreview: null };
+  }
+  const bridgePreview = value.bridgePreview;
+  if (!isRecord(bridgePreview)) {
+    return null;
+  }
+  if (
+    typeof bridgePreview.bridgeId !== "string"
+    || typeof bridgePreview.sessionId !== "string"
+    || typeof bridgePreview.relayUrl !== "string"
+    || !Array.isArray(bridgePreview.allowedOrigins)
+    || !bridgePreview.allowedOrigins.every((entry) => typeof entry === "string")
+    || !isStringRecord(bridgePreview.forwardedHeaders)
+  ) {
+    return null;
+  }
+  return {
+    bridgePreview: {
+      bridgeId: bridgePreview.bridgeId,
+      sessionId: bridgePreview.sessionId,
+      relayUrl: bridgePreview.relayUrl,
+      allowedOrigins: bridgePreview.allowedOrigins,
+      forwardedHeaders: bridgePreview.forwardedHeaders,
+    },
+  };
 }
 
 export function parseWorkerCommandRequest(value: unknown): WorkerCommandRequest | null {

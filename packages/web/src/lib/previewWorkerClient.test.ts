@@ -5,6 +5,7 @@ import { getPreviewWorkerClient } from "./previewWorkerClient";
 const env = process.env as Record<string, string | undefined>;
 const originalWorkerUrl = env.CONDUCTOR_PREVIEW_WORKER_URL;
 const originalWorkerKey = env.CONDUCTOR_PREVIEW_WORKER_KEY;
+const originalRelayUrl = env.CONDUCTOR_BRIDGE_RELAY_URL;
 const originalFetch = global.fetch;
 
 function resetWorkerSingleton(): void {
@@ -24,6 +25,11 @@ function restoreEnv(): void {
     delete env.CONDUCTOR_PREVIEW_WORKER_KEY;
   } else {
     env.CONDUCTOR_PREVIEW_WORKER_KEY = originalWorkerKey;
+  }
+  if (originalRelayUrl === undefined) {
+    delete env.CONDUCTOR_BRIDGE_RELAY_URL;
+  } else {
+    env.CONDUCTOR_BRIDGE_RELAY_URL = originalRelayUrl;
   }
 }
 
@@ -87,4 +93,58 @@ test("runCommand creates a remote session and posts the command to the worker", 
 
   assert.ok(calls.some((c) => c.includes("POST") && c.endsWith("/sessions")));
   assert.ok(calls.some((c) => c.includes("POST") && c.includes("/sessions/remote-1/command")));
+});
+
+
+test("configureBridgePreview forwards bridge relay metadata when creating a remote session", async () => {
+  env.CONDUCTOR_PREVIEW_WORKER_URL = "http://127.0.0.1:3099";
+  env.CONDUCTOR_PREVIEW_WORKER_KEY = "unit-test-key";
+  env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
+
+  let createBody = null as null | Record<string, unknown>;
+
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+
+    if (url.endsWith("/sessions") && init?.method === "POST") {
+      createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ sessionId: "remote-bridge-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.includes("/sessions/remote-bridge-1/command")) {
+      return new Response(JSON.stringify({ kind: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+
+  const client = getPreviewWorkerClient();
+  await client.configureBridgePreview(
+    "session-bridge",
+    {
+      bridgeId: "bridge-1",
+      sessionId: "session-1",
+      allowedOrigins: ["http://127.0.0.1:3000"],
+    },
+    { Authorization: "Bearer relay-token", "x-bridge-user-id": "local-admin" },
+  );
+
+  await client.runCommand("session-bridge", { command: "reload" });
+
+  assert.ok(createBody);
+  assert.deepEqual(createBody, {
+    bridgePreview: {
+      bridgeId: "bridge-1",
+      sessionId: "session-1",
+      allowedOrigins: ["http://127.0.0.1:3000"],
+      relayUrl: "https://relay.example.com/",
+      forwardedHeaders: { authorization: "Bearer relay-token", "x-bridge-user-id": "local-admin" },
+    },
+  });
 });
