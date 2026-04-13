@@ -4,17 +4,11 @@ import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 import {
   BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
-  buildPatchedTtydHtmlResponse,
   createBridgeTtydRelayWebSocketUrl,
   injectBridgeTtydRelayShim,
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
-import {
-  buildBundledTtydHtmlResponse,
-  loadBundledTtydFrontendHtml,
-} from "@/lib/bundledTtydFrontend";
-import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -23,15 +17,30 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+/**
+ * Inject the resize coordination shim into a proxied HTML response.
+ * Falls back to the original response if the content is not HTML or
+ * reading the body fails.
+ */
 async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
-  const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return buildBundledTtydHtmlResponse(
-      injectTtydResizeShim(loadBundledTtydFrontendHtml()),
-    );
+  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.startsWith("text/html")) {
+    return proxied;
   }
 
-  return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
+  let html: string;
+  try {
+    html = await proxied.text();
+  } catch {
+    return proxied;
+  }
+
+  const patched = injectTtydResizeShim(html);
+  return new Response(patched, {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers: new Headers(proxied.headers),
+  });
 }
 
 export async function GET(
@@ -73,6 +82,11 @@ export async function GET(
     },
   );
 
+  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.startsWith("text/html")) {
+    return proxied;
+  }
+
   let relayTtydWsUrl = new URL(request.url).searchParams.get(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM)?.trim() ?? "";
   if (!relayTtydWsUrl) {
     relayTtydWsUrl = await createBridgeTtydRelayWebSocketUrl(
@@ -82,16 +96,13 @@ export async function GET(
     );
   }
 
-  const html = await readTtydHtmlResponse(proxied);
-  const ttydHtml = html ?? loadBundledTtydFrontendHtml();
+  let html = await proxied.text();
+  html = injectBridgeTtydRelayShim(html, relayTtydWsUrl);
+  html = injectTtydResizeShim(html);
 
-  const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(ttydHtml, relayTtydWsUrl),
-  );
-
-  if (html === null) {
-    return buildBundledTtydHtmlResponse(patchedHtml);
-  }
-
-  return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
+  return new Response(html, {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers: new Headers(proxied.headers),
+  });
 }
