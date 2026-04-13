@@ -4,11 +4,13 @@ import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 import {
   BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
+  buildPatchedTtydHtmlResponse,
   createBridgeTtydRelayWebSocketUrl,
   injectBridgeTtydRelayShim,
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
+import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -17,30 +19,18 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+
 /**
  * Inject the resize coordination shim into a proxied HTML response.
- * Falls back to the original response if the content is not HTML or
- * reading the body fails.
+ * Falls back to the original response if the content is not HTML.
  */
 async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
-  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.startsWith("text/html")) {
+  const html = await readTtydHtmlResponse(proxied);
+  if (html === null) {
     return proxied;
   }
 
-  let html: string;
-  try {
-    html = await proxied.text();
-  } catch {
-    return proxied;
-  }
-
-  const patched = injectTtydResizeShim(html);
-  return new Response(patched, {
-    status: proxied.status,
-    statusText: proxied.statusText,
-    headers: new Headers(proxied.headers),
-  });
+  return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
 }
 
 export async function GET(
@@ -82,11 +72,6 @@ export async function GET(
     },
   );
 
-  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.startsWith("text/html")) {
-    return proxied;
-  }
-
   let relayTtydWsUrl = new URL(request.url).searchParams.get(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM)?.trim() ?? "";
   if (!relayTtydWsUrl) {
     relayTtydWsUrl = await createBridgeTtydRelayWebSocketUrl(
@@ -96,13 +81,14 @@ export async function GET(
     );
   }
 
-  let html = await proxied.text();
-  html = injectBridgeTtydRelayShim(html, relayTtydWsUrl);
-  html = injectTtydResizeShim(html);
+  const html = await readTtydHtmlResponse(proxied);
+  if (html === null) {
+    return proxied;
+  }
 
-  return new Response(html, {
-    status: proxied.status,
-    statusText: proxied.statusText,
-    headers: new Headers(proxied.headers),
-  });
+  const patchedHtml = injectTtydResizeShim(
+    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
+  );
+
+  return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
 }

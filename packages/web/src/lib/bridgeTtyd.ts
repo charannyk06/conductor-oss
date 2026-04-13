@@ -35,15 +35,59 @@ export function resolveBridgeSessionTarget(
   return { bridgeId, sessionId };
 }
 
+function buildBridgeTtydProxyPath(
+  routeSessionId: string,
+  bridgeId: string,
+  relayTtydWsUrl?: string,
+): string {
+  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
+  url.searchParams.set("bridgeId", bridgeId);
+  if (relayTtydWsUrl) {
+    url.searchParams.set(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM, relayTtydWsUrl);
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 export function buildBridgeTtydProxyUrl(
   routeSessionId: string,
   bridgeId: string,
   relayTtydWsUrl: string,
 ): string {
-  const url = new URL(`/api/sessions/${encodeURIComponent(routeSessionId)}/terminal/ttyd`, "http://dashboard.local");
-  url.searchParams.set("bridgeId", bridgeId);
-  url.searchParams.set(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM, relayTtydWsUrl);
-  return `${url.pathname}${url.search}`;
+  return buildBridgeTtydProxyPath(routeSessionId, bridgeId, relayTtydWsUrl);
+}
+
+export function buildStableBridgeTtydProxyUrl(
+  routeSessionId: string,
+  bridgeId: string,
+): string {
+  return buildBridgeTtydProxyPath(routeSessionId, bridgeId);
+}
+
+const PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP = [
+  "content-length",
+  "content-encoding",
+  "content-disposition",
+  "etag",
+  "last-modified",
+  "transfer-encoding",
+] as const;
+
+export function buildPatchedTtydHtmlResponse(proxied: Response, html: string): Response {
+  const headers = new Headers(proxied.headers);
+  for (const headerName of PATCHED_TTYD_RESPONSE_HEADERS_TO_DROP) {
+    headers.delete(headerName);
+  }
+  headers.set("content-type", "text/html; charset=utf-8");
+  headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
+  headers.set("pragma", "no-cache");
+  headers.set("expires", "0");
+
+  const body = new TextEncoder().encode(html);
+  return new Response(body, {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers,
+  });
 }
 
 function injectBridgeTtydHtmlFragmentEarly(html: string, marker: string, fragment: string): string {
@@ -228,6 +272,9 @@ export async function ensureBridgeTtydSession(
  *
  * Additionally, it attempts a direct xterm fit+refresh if the terminal
  * instance can be located, providing a belt-and-suspenders approach.
+ *
+ * `dispatchResize` preserves xterm scroll position (or stick-to-bottom), matching
+ * `TTYD_RESIZE_SHIM` in `crates/conductor-server/src/routes/terminal.rs`.
  */
 export function injectTtydResizeShim(html: string): string {
   const marker = "conductor-ttyd-resize-shim";
@@ -244,28 +291,23 @@ export function injectTtydResizeShim(html: string): string {
 
   var RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
   var pendingRaf = null;
+  var pendingBurstRaf = null;
   var burstTimers = [];
 
   function clearBurstTimers() {
+    if (pendingBurstRaf !== null) {
+      window.cancelAnimationFrame(pendingBurstRaf);
+      pendingBurstRaf = null;
+    }
     for (var i = 0; i < burstTimers.length; i++) {
       window.clearTimeout(burstTimers[i]);
     }
     burstTimers = [];
   }
 
-  function dispatchResize() {
-    window.dispatchEvent(new Event("resize"));
-  }
-
-  function scheduleResizeBurst() {
-    clearBurstTimers();
-    if (typeof window.requestAnimationFrame === "function") {
-      window.requestAnimationFrame(dispatchResize);
-    } else {
-      dispatchResize();
-    }
-    burstTimers.push(window.setTimeout(dispatchResize, 120));
-    burstTimers.push(window.setTimeout(dispatchResize, 360));
+  function findXtermScrollHost() {
+    return document.querySelector(".xterm-viewport")
+      || document.querySelector(".xterm-scrollable-element");
   }
 
   function findXtermTerminal() {
@@ -292,6 +334,55 @@ export function injectTtydResizeShim(html: string): string {
         if (rows > 0) terminal.refresh(0, rows - 1);
       } catch(e) {}
     });
+  }
+
+  function dispatchResize() {
+    var scrollHost = findXtermScrollHost();
+    if (!scrollHost) {
+      window.dispatchEvent(new Event("resize"));
+      queueXtermFit();
+      return;
+    }
+
+    var maxScroll = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+    var atBottom = maxScroll <= 0 || maxScroll - scrollHost.scrollTop < 12;
+    var scrollRatio = maxScroll > 0 ? scrollHost.scrollTop / maxScroll : 1;
+
+    window.dispatchEvent(new Event("resize"));
+
+    function restore() {
+      var sh = findXtermScrollHost();
+      if (!sh) return;
+      var newMax = Math.max(0, sh.scrollHeight - sh.clientHeight);
+      if (newMax <= 0) return;
+      if (atBottom) {
+        sh.scrollTop = newMax;
+      } else {
+        sh.scrollTop = Math.round(scrollRatio * newMax);
+      }
+      queueXtermFit();
+    }
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(function() {
+        window.requestAnimationFrame(restore);
+      });
+    } else {
+      restore();
+    }
+  }
+
+  function scheduleResizeBurst() {
+    clearBurstTimers();
+    if (typeof window.requestAnimationFrame === "function") {
+      pendingBurstRaf = window.requestAnimationFrame(function() {
+        pendingBurstRaf = null;
+        dispatchResize();
+      });
+    } else {
+      dispatchResize();
+    }
+    burstTimers.push(window.setTimeout(dispatchResize, 120));
+    burstTimers.push(window.setTimeout(dispatchResize, 360));
   }
 
   function handleResizeMessage(event) {
@@ -342,6 +433,8 @@ export function injectTtydResizeShim(html: string): string {
     void document.fonts.ready.then(function() { scheduleResizeBurst(); queueXtermFit(); }).catch(function() {});
   }
   syncViewportSizeEmbedded();
+  // Match TTYD_RESIZE_SHIM boot in terminal.rs (initial sync + scheduleResizeBurst).
+  scheduleResizeBurst();
 
   window.addEventListener("message", handleResizeMessage, false);
 
@@ -372,14 +465,61 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   if (window.__conductorBridgeTtydRelayPatched) return;
   window.__conductorBridgeTtydRelayPatched = true;
 
-  const RELAY_TTYD_WS_URL = ${relayWsLiteral};
-  if (!RELAY_TTYD_WS_URL) return;
-
+  const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';
+  const READY_MESSAGE_TYPE = 'conductor-ttyd-ready';
+  const RELAY_UPDATE_MESSAGE_TYPE = 'conductor-ttyd-relay-url';
+  const TOKEN_REQUEST_THROTTLE_MS = 1500;
   const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
   const previousWebSocket = window.WebSocket;
   if (typeof previousWebSocket !== 'function') return;
 
-  const patchedWebSocket = function(url, protocols) {
+  let currentRelayTtydWsUrl = ${relayWsLiteral};
+  if (!currentRelayTtydWsUrl) return;
+
+  let lastTokenRequestAt = 0;
+  let unloading = false;
+
+  function notifyReady() {
+    if (unloading || !window.parent || window.parent === window) return;
+    try {
+      window.parent.postMessage({ type: READY_MESSAGE_TYPE }, '*');
+    } catch {
+    }
+  }
+
+  function requestFreshRelay(reason) {
+    if (unloading || !window.parent || window.parent === window) return;
+
+    const now = Date.now();
+    if (now - lastTokenRequestAt < TOKEN_REQUEST_THROTTLE_MS) return;
+    lastTokenRequestAt = now;
+
+    try {
+      window.parent.postMessage({
+        type: REQUEST_MESSAGE_TYPE,
+        reason,
+      }, '*');
+    } catch {
+    }
+  }
+
+  function attachSocketListeners(socket) {
+    if (!socket || socket.__conductorTokenRefreshHookAttached) return socket;
+
+    socket.__conductorTokenRefreshHookAttached = true;
+    socket.addEventListener('open', function() {
+      notifyReady();
+    });
+    socket.addEventListener('close', function() {
+      requestFreshRelay('bridge-websocket-close');
+    });
+    socket.addEventListener('error', function() {
+      requestFreshRelay('bridge-websocket-error');
+    });
+    return socket;
+  }
+
+  function normalizedRelayUrl(url) {
     let normalizedUrl = String(url);
     try {
       const candidate = new URL(normalizedUrl, window.location.href);
@@ -389,20 +529,47 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
         candidate.pathname === '/ws' ||
         candidate.pathname.endsWith('/ws')
       ) {
-        normalizedUrl = RELAY_TTYD_WS_URL;
+        normalizedUrl = currentRelayTtydWsUrl;
       }
     } catch {
     }
+    return normalizedUrl;
+  }
 
+  const patchedWebSocket = function(url, protocols) {
+    const normalizedUrl = normalizedRelayUrl(url);
     if (arguments.length > 1) {
-      return new previousWebSocket(normalizedUrl, protocols);
+      return attachSocketListeners(new previousWebSocket(normalizedUrl, protocols));
     }
-    return new previousWebSocket(normalizedUrl);
+    return attachSocketListeners(new previousWebSocket(normalizedUrl));
   };
 
   Object.setPrototypeOf(patchedWebSocket, previousWebSocket);
   patchedWebSocket.prototype = previousWebSocket.prototype;
   window.WebSocket = patchedWebSocket;
+
+  const trustedParentOrigin = window.location.origin;
+
+  function handleMessage(event) {
+    if (event.source !== window.parent || event.origin !== trustedParentOrigin) {
+      return;
+    }
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data.type !== RELAY_UPDATE_MESSAGE_TYPE) {
+      return;
+    }
+    const nextRelayUrl = typeof data.relayTtydWsUrl === 'string' ? data.relayTtydWsUrl.trim() : '';
+    if (!nextRelayUrl) {
+      return;
+    }
+    currentRelayTtydWsUrl = nextRelayUrl;
+  }
+
+  window.addEventListener('message', handleMessage);
+  window.addEventListener('beforeunload', function() {
+    unloading = true;
+    window.removeEventListener('message', handleMessage);
+  }, { once: true });
 })();
 </script>`;
 
