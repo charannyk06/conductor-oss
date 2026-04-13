@@ -94,17 +94,9 @@ type TerminalTokenResult =
     ttydHttpUrl: string | null;
     ttydWsUrl: string | null;
     tunnelUrl: string | null;
-    relayTtydWsUrl: string | null;
     expiresInSeconds: number | null;
   }
-  | {
-    interactive: false;
-    ttydHttpUrl: null;
-    ttydWsUrl: null;
-    tunnelUrl: null;
-    relayTtydWsUrl: null;
-    reason: string | null;
-  };
+  | { interactive: false; ttydHttpUrl: null; ttydWsUrl: null; tunnelUrl: null; reason: string | null };
 
 function resolveProvidedTtydHttpUrl(
   ttydHttpUrl: string | null,
@@ -165,19 +157,6 @@ function appendBridgeIdToTerminalUrl(
   }
 }
 
-function buildEmbeddedTerminalUrl(
-  sessionId: string,
-  dashboardOrigin: string,
-  bridgeId?: string | null,
-): string {
-  const url = new URL(`/embed/terminal/${encodeURIComponent(sessionId)}`, dashboardOrigin);
-  const normalizedBridgeId = bridgeId?.trim();
-  if (normalizedBridgeId) {
-    url.searchParams.set("bridgeId", normalizedBridgeId);
-  }
-  return url.toString();
-}
-
 type ResolveTerminalConnectionOptions = {
   bridgeId?: string | null;
   signal?: AbortSignal;
@@ -191,7 +170,6 @@ async function fetchTerminalToken(
     withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, options?.bridgeId),
     {
       cache: "no-store",
-      credentials: "same-origin",
       signal: options?.signal,
     },
   );
@@ -201,7 +179,6 @@ async function fetchTerminalToken(
       ttydHttpUrl?: string;
       ttydWsUrl?: string;
       tunnelUrl?: string;
-      relayTtydWsUrl?: string;
       expiresInSeconds?: number | string | null;
       error?: string;
     }
@@ -217,10 +194,6 @@ async function fetchTerminalToken(
   const tunnelUrl =
     typeof data?.tunnelUrl === "string" && data.tunnelUrl.trim().length > 0
       ? data.tunnelUrl.trim()
-      : null;
-  const relayTtydWsUrl =
-    typeof data?.relayTtydWsUrl === "string" && data.relayTtydWsUrl.trim().length > 0
-      ? data.relayTtydWsUrl.trim()
       : null;
   const expiresInSeconds = (() => {
     const raw = data?.expiresInSeconds;
@@ -242,7 +215,6 @@ async function fetchTerminalToken(
       ttydHttpUrl: null,
       ttydWsUrl: null,
       tunnelUrl: null,
-      relayTtydWsUrl: null,
       reason: data?.error ?? "Terminal access denied",
     };
   }
@@ -253,7 +225,6 @@ async function fetchTerminalToken(
       ttydHttpUrl: null,
       ttydWsUrl: null,
       tunnelUrl: null,
-      relayTtydWsUrl: null,
       reason: data?.error ?? "Terminal unavailable",
     };
   }
@@ -263,43 +234,8 @@ async function fetchTerminalToken(
     ttydHttpUrl,
     ttydWsUrl,
     tunnelUrl,
-    relayTtydWsUrl,
     expiresInSeconds,
   };
-}
-
-function extractResolvedTerminalToken(terminalUrl: string | null): string | null {
-  if (!terminalUrl) {
-    return null;
-  }
-
-  try {
-    return new URL(terminalUrl).searchParams.get("token");
-  } catch {
-    return null;
-  }
-}
-
-function buildDirectTerminalLinkUrl(
-  embeddedTerminalUrl: string,
-  auth: Extract<TerminalTokenResult, { interactive: true }>,
-  bridgeId?: string | null,
-): string {
-  if (bridgeId?.trim() || !auth.tunnelUrl) {
-    return embeddedTerminalUrl;
-  }
-
-  try {
-    const directUrl = new URL(auth.tunnelUrl);
-    const token = extractResolvedTerminalToken(embeddedTerminalUrl);
-    if (!token) {
-      return embeddedTerminalUrl;
-    }
-    directUrl.searchParams.set("token", token);
-    return directUrl.toString();
-  } catch {
-    return embeddedTerminalUrl;
-  }
 }
 
 export async function resolveTerminalConnection(
@@ -309,11 +245,9 @@ export async function resolveTerminalConnection(
   const backendOrigin = resolveBackendOrigin();
   const dashboardOrigin = resolveDashboardOrigin();
   const auth = await fetchTerminalToken(sessionId, options);
-  if (auth.interactive === false) {
+  if (!auth.interactive) {
     return {
       terminalUrl: null,
-      terminalLinkUrl: null,
-      relayTtydWsUrl: null,
       interactive: false,
       reason: auth.reason,
       expiresInSeconds: null,
@@ -321,53 +255,50 @@ export async function resolveTerminalConnection(
     };
   }
 
-  // Keep the embedded iframe on the shimmed proxy path so auth sync, resize
-  // coordination, touch, and lifecycle hardening always stay in play. Tunnel
-  // URLs are exposed only as direct-open links for non-bridge sessions.
+  // When a cloudflare tunnel URL is available, use it directly instead of the
+  // proxied path. Tunnel URLs bypass the Next.js proxy entirely and connect
+  // the browser straight to ttyd through the tunnel, eliminating proxy
+  // latency and resize coordination overhead.
+  if (auth.tunnelUrl) {
+    try {
+      const tunnelTerminalUrl = new URL(auth.tunnelUrl);
+      // Preserve any token parameter from the backend response.
+      const ttydUrl = new URL(auth.ttydHttpUrl ?? auth.ttydWsUrl ?? "", backendOrigin);
+      const token = ttydUrl.searchParams.get("token");
+      if (token) {
+        tunnelTerminalUrl.searchParams.set("token", token);
+      }
+      return {
+        terminalUrl: appendBridgeIdToTerminalUrl(tunnelTerminalUrl.toString(), options?.bridgeId),
+        interactive: true,
+        reason: null,
+        expiresInSeconds: auth.expiresInSeconds,
+        tunnelUrl: auth.tunnelUrl,
+      };
+    } catch {
+      // If tunnel URL is malformed, fall through to the proxy path.
+    }
+  }
+
+  // Keep dashboard proxy ttyd routes on the dashboard origin so hosted auth
+  // and bridge-aware Next.js proxying stay in the request path. Only direct
+  // backend ttyd URLs should resolve against the backend origin.
   const resolvedTerminalUrl = resolveProvidedTtydHttpUrl(
     auth.ttydHttpUrl,
     auth.ttydWsUrl,
     backendOrigin,
     dashboardOrigin,
   );
-
-  // Frontend-only iframe path: when the backend exposes only the native terminal
-  // websocket contract, render the existing iframe page instead of trying to open a
-  // ttyd HTML route that does not exist on the current backend.
-  if (!auth.ttydHttpUrl && auth.ttydWsUrl) {
-    const embeddedTerminalUrl = buildEmbeddedTerminalUrl(
-      sessionId,
-      dashboardOrigin,
-      options?.bridgeId,
-    );
-    return {
-      terminalUrl: embeddedTerminalUrl,
-      terminalLinkUrl: embeddedTerminalUrl,
-      relayTtydWsUrl: auth.relayTtydWsUrl,
-      interactive: true,
-      reason: null,
-      expiresInSeconds: auth.expiresInSeconds,
-      tunnelUrl: auth.tunnelUrl,
-    };
-  }
-
   if (!resolvedTerminalUrl) {
     return {
       terminalUrl: null,
-      terminalLinkUrl: null,
-      relayTtydWsUrl: null,
       interactive: false,
       reason: "Failed to resolve the ttyd terminal URL.",
     };
   }
 
-  const embeddedTerminalUrl = appendBridgeIdToTerminalUrl(resolvedTerminalUrl, options?.bridgeId);
-  const terminalLinkUrl = buildDirectTerminalLinkUrl(embeddedTerminalUrl, auth, options?.bridgeId);
-
   return {
-    terminalUrl: embeddedTerminalUrl,
-    terminalLinkUrl,
-    relayTtydWsUrl: auth.relayTtydWsUrl,
+    terminalUrl: appendBridgeIdToTerminalUrl(resolvedTerminalUrl, options?.bridgeId),
     interactive: true,
     reason: null,
     expiresInSeconds: auth.expiresInSeconds,

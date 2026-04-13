@@ -1,15 +1,10 @@
 "use client";
 
-/**
- * Supported live terminal: one iframe to the ttyd HTML/WebSocket facade. Wired from
- * `SessionDetail` via `sessionTerminalRouting` (same-origin embed; Polyscope and similar hosts depend on this path).
- */
-
 import {
   AlertCircle,
   Clipboard,
-  FileUp,
   Loader2,
+  Paperclip,
   RefreshCw,
   Send,
   SquareStop,
@@ -19,8 +14,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { Button } from "@/components/ui/Button";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { buildSessionHref } from "@/lib/dashboardHref";
-import { LIVE_TERMINAL_STATUSES } from "./terminal/terminalConstants";
+import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import { extractTerminalAuthToken } from "./terminal/terminalToken";
 import { terminalUrlNeedsReload } from "./terminal/terminalUrl";
@@ -28,16 +22,14 @@ import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
-const TOKEN_REFRESH_LEAD_SECONDS = 30;
+const TOKEN_REFRESH_LEAD_SECONDS = 10;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
-const TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE = "conductor-ttyd-auth-token-request";
-const TTYD_READY_MESSAGE_TYPE = "conductor-ttyd-ready";
-const TTYD_RELAY_URL_MESSAGE_TYPE = "conductor-ttyd-relay-url";
 const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 /** Staggered fits so xterm catches up after ttyd boot, layout, and fonts. */
 const TERMINAL_RESIZE_BURST_DELAYS_MS = [0, 50, 150, 400, 1000] as const;
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
+const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 300_000; // 5 minutes - only reload if hidden for 5+ minutes
 const TERMINAL_IFRAME_LOAD_TIMEOUT_MS = 25_000;
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
@@ -153,34 +145,6 @@ function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined)
   }
 }
 
-function postBridgeRelayUrl(
-  iframe: HTMLIFrameElement | null | undefined,
-  relayTtydWsUrl: string | null,
-): void {
-  if (!iframe?.contentWindow || !relayTtydWsUrl) {
-    return;
-  }
-
-  let targetOrigin: string;
-  try {
-    targetOrigin = new URL(iframe.src).origin;
-  } catch {
-    targetOrigin = typeof window !== "undefined" ? window.location.origin : "";
-  }
-  if (!targetOrigin || targetOrigin === "null") {
-    return;
-  }
-
-  try {
-    iframe.contentWindow.postMessage(
-      { type: TTYD_RELAY_URL_MESSAGE_TYPE, relayTtydWsUrl },
-      targetOrigin,
-    );
-  } catch {
-    // Iframe may have navigated or origin may be opaque.
-  }
-}
-
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
@@ -204,15 +168,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const frameLoadedRef = useRef(false);
   const pageHiddenAtRef = useRef<number | null>(null);
   const lastLifecycleRefreshAtRef = useRef(0);
-  const mountedAtRef = useRef(Date.now());
-  const firstFrameLoadedAtRef = useRef<number | null>(null);
-  const lastFrameLoadedAtRef = useRef<number | null>(null);
-  const iframeLoadCountRef = useRef(0);
-  const silentRefreshCountRef = useRef(0);
-  const resolvingRefreshCountRef = useRef(0);
-  const iframeRefreshRequestCountRef = useRef(0);
-  const retryCountRef = useRef(0);
-  const refreshTimerRef = useRef<number | null>(null);
 
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
@@ -223,17 +178,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const expectsLiveTerminal = ttydBacked
     ? !TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus)
     : LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
-  const showPromptBar = false;
-
-  /** Read inside async token resolution so SSE churn does not abort in-flight fetches. */
-  const expectsLiveTerminalRef = useRef(expectsLiveTerminal);
-  expectsLiveTerminalRef.current = expectsLiveTerminal;
-  const terminalTokenFetchAbortRef = useRef<AbortController | null>(null);
-  const prevExpectsLiveTerminalRef = useRef<boolean | null>(null);
+  const showPromptBar =
+    !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
 
   const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
   const [terminalLinkUrl, setTerminalLinkUrl] = useState<string | null>(null);
-  const [terminalRelayWsUrl, setTerminalRelayWsUrl] = useState<string | null>(null);
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [frameLoaded, setFrameLoaded] = useState(false);
@@ -246,7 +195,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
-  const terminalRelayWsUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
   /** Last host box we told the ttyd iframe to fit to — avoids spamming resize (xterm refit jumps scroll). */
@@ -310,69 +258,19 @@ function SessionTerminalView(props: SessionTerminalProps) {
     postTerminalAuthToken(iframe, token);
   }, [terminalLinkUrl]);
 
-  const syncBridgeRelayUrl = useCallback(() => {
-    const iframe = ttydIframeRef.current;
-    postBridgeRelayUrl(iframe, terminalRelayWsUrl);
-  }, [terminalRelayWsUrl]);
-
-  const requestSilentConnectionRefresh = useCallback((options?: {
-    force?: boolean;
-    resetResizeCache?: boolean;
-    syncCurrentToken?: boolean;
-    resolveConnection?: boolean;
-  }) => {
-    if (!expectsLiveTerminal || typeof window === "undefined") {
-      return;
-    }
-
-    const now = window.Date.now();
-    const force = options?.force === true;
-    if (!force && now - lastLifecycleRefreshAtRef.current < TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS) {
-      return;
-    }
-
-    lastLifecycleRefreshAtRef.current = now;
-
-    if (options?.resetResizeCache) {
-      lastPostedTerminalHostSizeRef.current = null;
-      resizeSuppressUntilRef.current = now + 120;
-    }
-
-    if (options?.syncCurrentToken !== false) {
-      syncTerminalAuthToken();
-      syncBridgeRelayUrl();
-      scheduleTerminalResizeBurst();
-    }
-
-    if (options?.resolveConnection) {
-      resolvingRefreshCountRef.current += 1;
-      setConnectionRefreshTick((current) => current + 1);
-    } else {
-      silentRefreshCountRef.current += 1;
-    }
-  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncBridgeRelayUrl, syncTerminalAuthToken]);
-
   useEffect(() => {
     terminalUrlRef.current = terminalUrl;
   }, [terminalUrl]);
 
   useEffect(() => {
-    terminalRelayWsUrlRef.current = terminalRelayWsUrl;
-  }, [terminalRelayWsUrl]);
-
-  useEffect(() => {
     frameLoadedRef.current = frameLoaded;
   }, [frameLoaded]);
 
-  // Reset only when navigating to a different session. Including `expectsLiveTerminal`
-  // here caused full iframe teardown whenever status/metadata flickered during SSE
-  // updates — wiping the live ttyd attach and showing a false "reconnecting" state.
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
     setTerminalUrl(null);
     setTerminalLinkUrl(null);
-    setTerminalRelayWsUrl(null);
     setResolvingConnection(expectsLiveTerminal);
     setConnectionError(null);
     setFrameLoaded(false);
@@ -389,28 +287,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
     lastPostedTerminalHostSizeRef.current = null;
-    firstFrameLoadedAtRef.current = null;
-    lastFrameLoadedAtRef.current = null;
-    iframeLoadCountRef.current = 0;
-    silentRefreshCountRef.current = 0;
-    resolvingRefreshCountRef.current = 0;
-    iframeRefreshRequestCountRef.current = 0;
-    retryCountRef.current = 0;
-    mountedAtRef.current = Date.now();
     clearBurstResizeTimers();
-  }, [clearBurstResizeTimers, sessionId]);
-
-  useEffect(() => {
-    if (!TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus)) {
-      return;
-    }
-    setTerminalUrl(null);
-    setTerminalLinkUrl(null);
-    setTerminalRelayWsUrl(null);
-    setFrameLoaded(false);
-    setConnectionError(null);
-    forceTerminalReloadRef.current = false;
-  }, [normalizedSessionStatus, sessionId]);
+  }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
     lastPostedTerminalHostSizeRef.current = null;
@@ -420,32 +298,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => clearBurstResizeTimers();
   }, [clearBurstResizeTimers]);
 
-  // When the session stops being live, abort token fetch; when it becomes live again, refetch.
-  // Debounced so rapid SSE status flickers don't tear down/rebuild the terminal connection.
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      // Seed the ref on the very first invocation so the debounce logic
-      // always has a valid previous value to compare against.
-      if (prevExpectsLiveTerminalRef.current === null || prevExpectsLiveTerminalRef.current === undefined) {
-        prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
-      }
-      const prev = prevExpectsLiveTerminalRef.current;
-      prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
-      if (!expectsLiveTerminal && prev === true) {
-        terminalTokenFetchAbortRef.current?.abort();
-        setResolvingConnection(false);
-        setConnectionError(null);
-      }
-      if (expectsLiveTerminal && prev === false) {
-        setConnectionRefreshTick((current) => current + 1);
-      }
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [expectsLiveTerminal]);
-
-  useEffect(() => {
-    if (!expectsLiveTerminalRef.current) {
+    if (!expectsLiveTerminal) {
       setResolvingConnection(false);
+      setConnectionError(null);
       return;
     }
 
@@ -453,7 +309,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
     let retryTimer: number | null = null;
     let refreshTimer: number | null = null;
     const abortController = new AbortController();
-    terminalTokenFetchAbortRef.current = abortController;
     const showBlockingConnectionUi =
       !terminalUrlRef.current || forceTerminalReloadRef.current;
     if (showBlockingConnectionUi) {
@@ -466,48 +321,42 @@ function SessionTerminalView(props: SessionTerminalProps) {
       bridgeId,
     })
       .then((connection) => {
-        if (cancelled || !expectsLiveTerminalRef.current) return;
+        if (cancelled) return;
         retryAttemptRef.current = 0;
         if (connection.interactive && connection.terminalUrl) {
-          const nextTerminalLinkUrl = connection.terminalLinkUrl ?? connection.terminalUrl;
-          const nextRelayTtydWsUrl = connection.relayTtydWsUrl ?? null;
-          const relayUrlChanged = terminalRelayWsUrlRef.current !== nextRelayTtydWsUrl;
           const shouldReloadTerminal =
             forceTerminalReloadRef.current ||
             terminalUrlNeedsReload(terminalUrlRef.current, connection.terminalUrl);
           forceTerminalReloadRef.current = false;
 
-          // Always update the external link URL and relay metadata.
-          setTerminalLinkUrl(nextTerminalLinkUrl);
-          setTerminalRelayWsUrl(nextRelayTtydWsUrl);
+          // Always update the external link URL
+          setTerminalLinkUrl(connection.terminalUrl);
 
-          // Check if only the token changed - we can sync without iframe reload.
+          // Check if only the token changed - we can sync without iframe reload
           const onlyTokenChanged = !shouldReloadTerminal &&
             terminalUrlRef.current &&
             isOnlyTokenChanged(terminalUrlRef.current, connection.terminalUrl);
 
           if (shouldReloadTerminal || !terminalUrlRef.current) {
-            // Full reload needed - either first load, forced reload, or structural URL change.
+            // Full reload needed - either first load, forced reload, or structural URL change
             if (!terminalUrlRef.current) {
               setFrameLoaded(false);
             }
             setTerminalUrl(connection.terminalUrl);
-          } else {
-            const iframe = ttydIframeRef.current;
-            if (onlyTokenChanged && iframe) {
-              const newToken = (() => {
-                try {
-                  return new URL(connection.terminalUrl).searchParams.get("token");
-                } catch {
-                  return null;
-                }
-              })();
-              if (newToken) {
+          } else if (onlyTokenChanged) {
+            // Token-only refresh: sync via postMessage without reloading iframe
+            const newToken = (() => {
+              try {
+                return new URL(connection.terminalUrl).searchParams.get("token");
+              } catch {
+                return null;
+              }
+            })();
+            if (newToken) {
+              const iframe = ttydIframeRef.current;
+              if (iframe) {
                 postTerminalAuthToken(iframe, newToken);
               }
-            }
-            if (relayUrlChanged && iframe) {
-              postBridgeRelayUrl(iframe, nextRelayTtydWsUrl);
             }
           }
           setConnectionError(null);
@@ -515,25 +364,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
           const delayMs = computeTokenRefreshDelayMs(connection.expiresInSeconds);
           if (delayMs !== null) {
             refreshTimer = window.setTimeout(() => {
-              refreshTimerRef.current = null;
               setConnectionRefreshTick((current) => current + 1);
             }, delayMs);
-            refreshTimerRef.current = refreshTimer;
           }
           return;
         }
 
-        if (!expectsLiveTerminalRef.current) return;
         if (!terminalUrlRef.current) {
           setTerminalUrl(null);
           setTerminalLinkUrl(null);
-          setTerminalRelayWsUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(connection.reason ?? "Live ttyd terminal is unavailable.");
       })
       .catch((error) => {
-        if (cancelled || !expectsLiveTerminalRef.current) return;
+        if (cancelled) return;
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
@@ -541,7 +386,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
         if (!hasTerminal) {
           setTerminalUrl(null);
           setTerminalLinkUrl(null);
-          setTerminalRelayWsUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(
@@ -555,7 +399,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         }, delay);
       })
       .finally(() => {
-        if (!cancelled && expectsLiveTerminalRef.current) {
+        if (!cancelled) {
           setResolvingConnection(false);
         }
       });
@@ -563,21 +407,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => {
       cancelled = true;
       abortController.abort();
-      if (terminalTokenFetchAbortRef.current === abortController) {
-        terminalTokenFetchAbortRef.current = null;
-      }
       if (retryTimer !== null) {
         window.clearTimeout(retryTimer);
       }
       if (refreshTimer !== null) {
         window.clearTimeout(refreshTimer);
       }
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = null;
-      }
     };
-  }, [bridgeId, connectionRefreshTick, sessionId]);
+  }, [bridgeId, connectionRefreshTick, expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
     const previous = prevPanelVisibleRef.current;
@@ -585,34 +422,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
     if (!panelVisible) {
       return;
     }
-    // When the terminal panel becomes visible again, silently refresh auth/cookie state
-    // instead of showing a blocking reload path. This keeps reconnects feeling attached
-    // to the same terminal surface.
-    let outerRaf = 0;
-    let innerRaf = 0;
+    // Radix keeps inactive tabs mounted but hidden (0×0). Cached host size would skip
+    // maybePostTerminalResize when the user returns — clear and refit after layout.
     if (previous === false) {
-      requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
-      // Radix tabs keep inactive panels mounted (`forceMount`) with opacity/pointer-events
-      // toggles; layout can settle after the first paint. A double-rAF gives ttyd's
-      // FitAddon a stable host box instead of a transient zero or collapsed size.
-      outerRaf = requestAnimationFrame(() => {
-        innerRaf = requestAnimationFrame(() => {
-          lastPostedTerminalHostSizeRef.current = null;
+      lastPostedTerminalHostSizeRef.current = null;
+      if (typeof window !== "undefined") {
+        resizeSuppressUntilRef.current = window.Date.now() + 120;
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          syncTerminalAuthToken();
           scheduleTerminalResizeBurst();
-          maybePostTerminalResize();
         });
       });
     }
-    return () => {
-      cancelAnimationFrame(outerRaf);
-      cancelAnimationFrame(innerRaf);
-    };
-  }, [
-    maybePostTerminalResize,
-    panelVisible,
-    requestSilentConnectionRefresh,
-    scheduleTerminalResizeBurst,
-  ]);
+  }, [panelVisible, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
   const requestLifecycleRefresh = useCallback(() => {
     if (!expectsLiveTerminal || typeof window === "undefined") {
@@ -620,20 +444,30 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     const now = window.Date.now();
+    if (now - lastLifecycleRefreshAtRef.current < TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS) {
+      return;
+    }
+    lastLifecycleRefreshAtRef.current = now;
+
     const hiddenDuration = pageHiddenAtRef.current === null
       ? 0
       : now - pageHiddenAtRef.current;
     pageHiddenAtRef.current = null;
 
-    // Passive lifecycle events should keep the current terminal identity hot without
-    // minting a brand-new ttyd/relay target. If the embedded terminal actually lost
-    // its websocket, the iframe shim will request an active refresh explicitly.
-    requestSilentConnectionRefresh({
-      force: hiddenDuration > 0,
-      resetResizeCache: hiddenDuration > 0,
-      resolveConnection: false,
-    });
-  }, [expectsLiveTerminal, requestSilentConnectionRefresh]);
+    // Do not bump connectionRefreshTick here: refetching the token endpoint on every
+    // focus/visibility event causes resolving-state flicker and fights the iframe.
+    // Token rotation stays on its timer; we only re-sync the known token and refit xterm.
+    syncTerminalAuthToken();
+    scheduleTerminalResizeBurst();
+    if (
+      hiddenDuration >= TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS
+      && frameLoadedRef.current
+      && terminalUrlRef.current
+    ) {
+      forceTerminalReloadRef.current = true;
+      setConnectionRefreshTick((current) => current + 1);
+    }
+  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -643,25 +477,16 @@ function SessionTerminalView(props: SessionTerminalProps) {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
         pageHiddenAtRef.current = window.Date.now();
-        // Suppress resize to avoid ResizeObserver fitting while the browser/webview
-        // reports zero or intermediate sizes during tab or window transitions.
-        resizeSuppressUntilRef.current = window.Date.now() + 320;
-        // Pause token refresh while the page is hidden to avoid wasted fetches.
-        if (refreshTimerRef.current !== null) {
-          window.clearTimeout(refreshTimerRef.current);
-          refreshTimerRef.current = null;
-        }
+        // Suppress resize for 250ms to avoid ResizeObserver firing with
+        // zero/intermediate heights during tab switch transitions.
+        resizeSuppressUntilRef.current = window.Date.now() + 250;
         return;
       }
 
       if (document.visibilityState === "visible") {
-        // Let layout settle (Radix tabs, split view, embedded webviews) before xterm fit.
-        resizeSuppressUntilRef.current = window.Date.now() + 200;
+        // Briefly suppress on visible too so layout settles before we fit.
+        resizeSuppressUntilRef.current = window.Date.now() + 100;
         requestLifecycleRefresh();
-        // Bump connectionRefreshTick to force a fresh token resolve and
-        // re-establish the proactive refresh schedule that was cancelled
-        // when the page went hidden.
-        setConnectionRefreshTick((current) => current + 1);
       }
     };
     const handlePageShow = () => {
@@ -669,7 +494,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     };
 
     const handleOnline = () => {
-      requestLifecycleRefresh();
+      // Network back: refresh token URL from the server (silent if already connected).
+      setConnectionRefreshTick((current) => current + 1);
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -682,61 +508,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
       window.removeEventListener("online", handleOnline);
     };
   }, [requestLifecycleRefresh]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !panelVisible || !expectsLiveTerminal) {
-      return;
-    }
-
-    const handleWindowFocus = () => {
-      resizeSuppressUntilRef.current = window.Date.now() + 120;
-      lastPostedTerminalHostSizeRef.current = null;
-      scheduleTerminalResizeBurst();
-      requestAnimationFrame(() => {
-        maybePostTerminalResize();
-      });
-    };
-
-    window.addEventListener("focus", handleWindowFocus);
-    return () => {
-      window.removeEventListener("focus", handleWindowFocus);
-    };
-  }, [expectsLiveTerminal, maybePostTerminalResize, panelVisible, scheduleTerminalResizeBurst]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const handleMessage = (event: MessageEvent) => {
-      if (!event.data || typeof event.data !== "object") {
-        return;
-      }
-      if (event.source !== ttydIframeRef.current?.contentWindow) {
-        return;
-      }
-
-      const type = (event.data as { type?: string }).type;
-      if (type === TTYD_READY_MESSAGE_TYPE) {
-        setFrameLoaded(true);
-        setConnectionError(null);
-        scheduleTerminalResizeBurst();
-        maybePostTerminalResize();
-        return;
-      }
-      if (type !== TTYD_AUTH_TOKEN_REQUEST_MESSAGE_TYPE) {
-        return;
-      }
-
-      iframeRefreshRequestCountRef.current += 1;
-      requestSilentConnectionRefresh({ force: true, resetResizeCache: true, resolveConnection: true });
-    };
-
-    window.addEventListener("message", handleMessage);
-    return () => {
-      window.removeEventListener("message", handleMessage);
-    };
-  }, [maybePostTerminalResize, requestSilentConnectionRefresh, scheduleTerminalResizeBurst]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -776,8 +547,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     syncTerminalAuthToken();
-    syncBridgeRelayUrl();
-  }, [frameLoaded, syncBridgeRelayUrl, syncTerminalAuthToken]);
+  }, [frameLoaded, syncTerminalAuthToken]);
 
   useEffect(() => {
     if (!expectsLiveTerminal || !terminalUrl || frameLoaded) {
@@ -1003,27 +773,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
         ttydBacked,
         terminalUrl,
         terminalLinkUrl,
-        terminalRelayWsUrl,
         frameLoaded,
         resolvingConnection,
         connectionError,
         promptError,
         queuedInsertError,
-        metrics: {
-          mountedAt: new Date(mountedAtRef.current).toISOString(),
-          mountedAgeMs: Date.now() - mountedAtRef.current,
-          firstFrameLoadLatencyMs: firstFrameLoadedAtRef.current === null
-            ? null
-            : firstFrameLoadedAtRef.current - mountedAtRef.current,
-          lastFrameLoadAt: lastFrameLoadedAtRef.current === null
-            ? null
-            : new Date(lastFrameLoadedAtRef.current).toISOString(),
-          iframeLoadCount: iframeLoadCountRef.current,
-          silentRefreshCount: silentRefreshCountRef.current,
-          resolvingRefreshCount: resolvingRefreshCountRef.current,
-          iframeRequestedRefreshCount: iframeRefreshRequestCountRef.current,
-          retryCount: retryCountRef.current,
-        },
       }),
     };
 
@@ -1043,12 +797,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
     sessionId,
     terminalUrl,
     terminalLinkUrl,
-    terminalRelayWsUrl,
     ttydBacked,
   ]);
 
   const handleRetry = useCallback(() => {
-    retryCountRef.current += 1;
     setConnectionError(null);
     retryAttemptRef.current = 0;
     forceTerminalReloadRef.current = true;
@@ -1069,8 +821,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       : showPromptBar
         ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
         : `Session status is \`${normalizedSessionStatus}\`. Interactive ttyd terminals only run while the agent is active.`);
-  const terminalDirectHref = terminalLinkUrl ?? terminalUrl ?? undefined;
-  const terminalSessionHref = buildSessionHref(sessionId, { bridgeId, tab: "terminal" });
+  const terminalHref = terminalLinkUrl ?? terminalUrl ?? undefined;
 
   return (
     <div
@@ -1078,7 +829,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         ? "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[#060404]"
         : "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
-      <div className="absolute right-2 top-2 z-20 flex items-center gap-2 sm:right-3 sm:top-3">
+      <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
         <input
           ref={attachmentInputRef}
           type="file"
@@ -1105,7 +856,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           {attachmentUploading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            <FileUp className="h-3.5 w-3.5" />
+            <Paperclip className="h-3.5 w-3.5" />
           )}
         </Button>
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
@@ -1178,17 +929,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
               }}
               onLoad={() => {
-                const now = Date.now();
-                iframeLoadCountRef.current += 1;
-                lastFrameLoadedAtRef.current = now;
-                if (firstFrameLoadedAtRef.current === null) {
-                  firstFrameLoadedAtRef.current = now;
-                }
                 setFrameLoaded(true);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
                 syncTerminalAuthToken();
-                syncBridgeRelayUrl();
                 scheduleTerminalResizeBurst();
               }}
             />
@@ -1207,21 +951,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[14px] font-medium">{emptyStateTitle}</div>
                   <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">{emptyStateDescription}</div>
-                  {terminalDirectHref ? (
-                    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  {terminalHref ? (
+                    <div className="mt-3">
                       <a
-                        href={terminalSessionHref}
+                        href={terminalHref}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[12px] text-[#d7c6b7] underline underline-offset-4"
-                      >
-                        Open the full terminal page
-                      </a>
-                      <a
-                        href={terminalDirectHref}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[12px] text-[#a79c94] underline underline-offset-4"
                       >
                         Open the ttyd terminal directly
                       </a>
@@ -1363,30 +1099,15 @@ function sessionTerminalPropsEqual(
   previous: SessionTerminalProps,
   next: SessionTerminalProps,
 ): boolean {
-  const previousPanelVisible = previous.panelVisible ?? true;
-  const nextPanelVisible = next.panelVisible ?? true;
-
-  if (
-    previous.sessionId !== next.sessionId
-    || previous.projectId !== next.projectId
-    || previous.bridgeId !== next.bridgeId
-    || previousPanelVisible !== nextPanelVisible
-    || !arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
-  ) {
-    return false;
-  }
-
-  // Keep inactive terminal surfaces stable so tab switches do not thrash the embedded iframe.
-  // background session-status churn. Apply the latest runtime/status only when it becomes
-  // visible again.
-  if (!previousPanelVisible && !nextPanelVisible) {
-    return true;
-  }
-
   return (
-    previous.sessionState === next.sessionState
+    previous.sessionId === next.sessionId
+    && previous.projectId === next.projectId
+    && previous.bridgeId === next.bridgeId
+    && previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
+    && (previous.panelVisible ?? true) === (next.panelVisible ?? true)
+    && arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
   );
 }
 
