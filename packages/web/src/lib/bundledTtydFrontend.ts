@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_TTYD_FRONTEND_PATH = join(
   MODULE_DIRECTORY,
-  "../../../../crates/conductor-server/src/routes/ttyd_frontend_v1.7.7.html",
+  "ttyd_frontend_v1.7.7.html",
 );
 
 const BUNDLED_TTYD_RESPONSE_HEADERS = {
