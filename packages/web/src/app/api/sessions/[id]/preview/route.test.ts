@@ -315,3 +315,88 @@ test("GET resolves bridge-backed preview session context via the paired device a
     global.fetch = originalFetch;
   }
 });
+
+test("GET uses an explicit previewUrlHint for bridge sessions that did not report a local dev server", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
+  const seenPaths: string[] = [];
+
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+
+    assert.equal(url, "https://relay.example.com/api/devices/bridge-1/proxy");
+    assert.equal(init?.method, "POST");
+
+    const body = JSON.parse(String(init?.body)) as { path: string };
+    seenPaths.push(body.path);
+
+    if (body.path === "/api/sessions/session-1") {
+      return new Response(JSON.stringify({
+        id: "session-1",
+        projectId: "demo",
+        status: "working",
+        activity: "active",
+        branch: "feature/demo",
+        issueId: null,
+        summary: null,
+        createdAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        pr: null,
+        metadata: {},
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (body.path === "/api/sessions/session-1/output?lines=400") {
+      return new Response(JSON.stringify({ output: "" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (body.path === "/api/repositories") {
+      return new Response(JSON.stringify({ repositories: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: "not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await GET(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/preview?previewUrlHint=http%3A%2F%2Flocalhost%3A3002%2F"),
+      { params: Promise.resolve({ id: "bridge:bridge-1:session-1" }) },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(seenPaths, [
+      "/api/sessions/session-1",
+      "/api/sessions/session-1/output?lines=400",
+    ]);
+
+    const payload = await response.json() as {
+      connected: boolean;
+      candidateUrls: string[];
+      currentUrl: string | null;
+      lastError: string | null;
+    };
+
+    assert.equal(payload.connected, false);
+    assert.deepEqual(payload.candidateUrls, ["http://localhost:3002/"]);
+    assert.equal(payload.currentUrl, null);
+    assert.equal(payload.lastError, null);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});

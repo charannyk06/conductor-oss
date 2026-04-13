@@ -25,6 +25,94 @@ function getBackendUrl(): string {
   return resolveRustBackendUrl() ?? "";
 }
 
+function normalizeConfiguredDevServerHost(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return "127.0.0.1";
+  }
+  return trimmed === "0.0.0.0" ? "127.0.0.1" : trimmed;
+}
+
+function normalizeConfiguredDevServerPath(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "/") {
+    return "";
+  }
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function readRecordString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readRecordBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
+}
+
+function resolveProjectConfiguredPreviewUrl(record: Record<string, unknown>): string | null {
+  const explicitUrl = readRecordString(record, "devServerUrl")?.trim();
+  if (explicitUrl) {
+    return explicitUrl;
+  }
+
+  const port = readRecordString(record, "devServerPort")?.trim();
+  if (!port) {
+    return null;
+  }
+
+  const scheme = readRecordBoolean(record, "devServerHttps") ? "https" : "http";
+  const host = normalizeConfiguredDevServerHost(readRecordString(record, "devServerHost"));
+  const path = normalizeConfiguredDevServerPath(readRecordString(record, "devServerPath"));
+  return `${scheme}://${host}:${port}${path}`;
+}
+
+async function fetchProjectPreviewCandidateUrls(
+  session: DashboardSession,
+  options: PreviewFetchOptions = {},
+): Promise<string[]> {
+  const bridgeId = session.bridgeId?.trim() || decodeBridgeSessionId(session.id)?.bridgeId || null;
+  let response: Response;
+
+  try {
+    if (bridgeId) {
+      if (!options.request) {
+        return [];
+      }
+      response = await proxyToBridgeDevice(options.request, bridgeId, "/api/repositories", {
+        pathOverride: "/api/repositories",
+      });
+    } else {
+      const backendUrl = requireRustBackendUrl();
+      response = await fetch(new URL("/api/repositories", backendUrl), {
+        cache: "no-store",
+        headers: options.headers,
+      });
+    }
+  } catch {
+    return [];
+  }
+
+  if (!response.ok) {
+    return [];
+  }
+
+  const payload = await response.json().catch(() => null) as { repositories?: unknown } | null;
+  const repositories = Array.isArray(payload?.repositories) ? payload.repositories : [];
+  const repository = repositories.find((candidate) => (
+    candidate
+    && typeof candidate === "object"
+    && readRecordString(candidate as Record<string, unknown>, "id") === session.projectId
+  ));
+
+  if (!repository || typeof repository !== "object") {
+    return [];
+  }
+
+  const configuredPreviewUrl = resolveProjectConfiguredPreviewUrl(repository as Record<string, unknown>);
+  return configuredPreviewUrl ? [configuredPreviewUrl] : [];
+}
+
 export interface PreviewSessionContext {
   session: DashboardSession | null;
   candidateUrls: string[];
@@ -35,6 +123,7 @@ export interface PreviewSessionContext {
 type PreviewFetchOptions = {
   headers?: HeadersInit;
   request?: Request;
+  previewUrlHint?: string | null;
 };
 
 export interface BridgePreviewConfig {
@@ -298,6 +387,10 @@ export async function discoverPreviewCandidateUrls(
   const backendUrl = getBackendUrl();
   const candidates = new Map<string, number>();
 
+  if (options.previewUrlHint?.trim()) {
+    pushCandidate(candidates, options.previewUrlHint, -10, backendUrl, true);
+  }
+
   if (session.pr?.previewUrl?.trim()) {
     pushCandidate(candidates, session.pr.previewUrl, 50, backendUrl, true);
   }
@@ -306,17 +399,21 @@ export async function discoverPreviewCandidateUrls(
     pushCandidate(candidates, session.metadata.devServerUrl, 0, backendUrl, true);
   }
 
-  for (const [key, value] of Object.entries(session.metadata)) {
-    if (DIRECT_URL_METADATA_KEYS.has(key) && value.trim()) {
+  for (const [key, rawValue] of Object.entries(session.metadata)) {
+    if (typeof rawValue !== "string") {
+      continue;
+    }
+
+    if (DIRECT_URL_METADATA_KEYS.has(key) && rawValue.trim()) {
       pushCandidate(
         candidates,
-        value,
+        rawValue,
         DIRECT_URL_METADATA_PRIORITY[key] ?? 30,
         backendUrl,
         true,
       );
     }
-    for (const candidate of extractUrlsFromText(value)) {
+    for (const candidate of extractUrlsFromText(rawValue)) {
       pushCandidate(candidates, candidate, 60, backendUrl);
     }
   }
@@ -334,6 +431,13 @@ export async function discoverPreviewCandidateUrls(
 
   for (const candidate of extractUrlsFromText(await fetchSessionOutputForPreview(session.id, options))) {
     pushCandidate(candidates, candidate, 80, backendUrl);
+  }
+
+  const hasLoopbackCandidate = [...candidates.keys()].some((candidate) => isLoopbackUrl(candidate));
+  if (!hasLoopbackCandidate) {
+    for (const candidate of await fetchProjectPreviewCandidateUrls(session, options)) {
+      pushCandidate(candidates, candidate, 20, backendUrl, true);
+    }
   }
 
   const orderedCandidates = [...candidates.entries()]

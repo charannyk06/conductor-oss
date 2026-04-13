@@ -374,6 +374,16 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const showMobileInspector = mobileViewport && mobileInspectorOpen;
   const showCandidateChips = !mobileViewport || mobileInspectorOpen;
 
+  const buildPreviewRequestPath = useCallback((previewUrlHint?: string | null) => {
+    const searchParams = new URLSearchParams();
+    const trimmedHint = previewUrlHint?.trim();
+    if (trimmedHint) {
+      searchParams.set("previewUrlHint", trimmedHint);
+    }
+    const query = searchParams.toString();
+    return `/api/sessions/${encodeURIComponent(sessionId)}/preview${query ? `?${query}` : ""}`;
+  }, [sessionId]);
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       setPageVisible(!document.hidden);
@@ -425,7 +435,26 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     autoConnectAttemptCountRef.current = 0;
     screenshotLoadCountRef.current = 0;
     setMobileInspectorOpen(false);
+
+    if (typeof window === "undefined") {
+      return;
+    }
+    const stored = window.sessionStorage.getItem(`conductor-preview-url:${sessionId}`)?.trim();
+    setUrlInput(stored ?? "");
   }, [sessionId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const key = `conductor-preview-url:${sessionId}`;
+    const trimmed = urlInput.trim();
+    if (trimmed) {
+      window.sessionStorage.setItem(key, trimmed);
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  }, [sessionId, urlInput]);
 
   useEffect(() => {
     if (!mobileViewport) {
@@ -440,7 +469,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     }
 
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
+      const response = await fetch(buildPreviewRequestPath(urlInput), {
         cache: "no-store",
       });
       const payload = await response.json().catch(() => null) as
@@ -472,14 +501,17 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       statusLoadFailureCountRef.current += 1;
       throw error;
     }
-  }, [sessionId]);
+  }, [buildPreviewRequestPath, urlInput]);
 
   const runCommand = useCallback(async (command: PreviewCommandRequest): Promise<PreviewStatusResponse> => {
     commandCountRef.current += 1;
     setBusy(true);
     setCommandError(null);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
+      const previewUrlHint = command.command === "connect" || command.command === "navigate"
+        ? command.url
+        : urlInput;
+      const response = await fetch(buildPreviewRequestPath(previewUrlHint), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -507,7 +539,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     } finally {
       setBusy(false);
     }
-  }, [sessionId]);
+  }, [buildPreviewRequestPath, urlInput]);
 
   const queuePreviewCommand = useCallback((command: PreviewCommandRequest, fallbackMessage: string) => {
     previewCommandQueueRef.current = previewCommandQueueRef.current
