@@ -10,10 +10,6 @@ import {
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
-import {
-  buildBundledTtydHtmlResponse,
-  loadBundledTtydFrontendHtml,
-} from "@/lib/bundledTtydFrontend";
 import { readTtydHtmlResponse } from "@/lib/ttydHtmlResponse";
 
 export const dynamic = "force-dynamic";
@@ -23,12 +19,15 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+
+/**
+ * Inject the resize coordination shim into a proxied HTML response.
+ * Falls back to the original response if the content is not HTML.
+ */
 async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
   const html = await readTtydHtmlResponse(proxied);
   if (html === null) {
-    return buildBundledTtydHtmlResponse(
-      injectTtydResizeShim(loadBundledTtydFrontendHtml()),
-    );
+    return proxied;
   }
 
   return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
@@ -83,15 +82,13 @@ export async function GET(
   }
 
   const html = await readTtydHtmlResponse(proxied);
-  const ttydHtml = html ?? loadBundledTtydFrontendHtml();
+  if (html === null) {
+    return proxied;
+  }
 
   const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(ttydHtml, relayTtydWsUrl),
+    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
   );
-
-  if (html === null) {
-    return buildBundledTtydHtmlResponse(patchedHtml);
-  }
 
   return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
 }

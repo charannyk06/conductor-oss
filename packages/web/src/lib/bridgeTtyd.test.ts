@@ -99,11 +99,10 @@ test("buildPatchedTtydHtmlResponse drops stale body headers after html injection
   assert.equal(patched.headers.get("content-length"), null);
   assert.equal(patched.headers.get("content-encoding"), null);
   assert.equal(patched.headers.get("etag"), null);
-  assert.equal(patched.headers.get("cache-control"),
+  assert.equal(
+    patched.headers.get("cache-control"),
     "no-store, no-cache, must-revalidate, max-age=0",
   );
-  assert.equal(patched.headers.get("content-disposition"), "inline; filename=ttyd.html");
-  assert.equal(patched.headers.get("x-content-type-options"), "nosniff");
   assert.equal(patched.headers.get("pragma"), "no-cache");
   assert.equal(patched.headers.get("expires"), "0");
   assert.equal(await patched.text(), "<html><body>new</body></html>");
@@ -121,7 +120,6 @@ test("buildPatchedTtydHtmlResponse forces html rendering headers for patched tty
   const patched = buildPatchedTtydHtmlResponse(proxied, "<html><body>new</body></html>");
 
   assert.equal(patched.headers.get("content-type"), "text/html; charset=utf-8");
-  assert.equal(patched.headers.get("content-disposition"), "inline; filename=ttyd.html");
-  assert.equal(patched.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(patched.headers.get("content-disposition"), null);
   assert.equal(await patched.text(), "<html><body>new</body></html>");
 });

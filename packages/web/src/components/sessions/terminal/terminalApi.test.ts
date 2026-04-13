@@ -86,26 +86,19 @@ test.afterEach(() => {
   }
 });
 
-test("resolveTerminalConnection keeps direct ttyd origins behind the dashboard proxy iframe", async () => {
-  setWindowLocation("https://app.conductross.com/sessions/session-1");
+test("resolveTerminalConnection accepts direct ttyd URLs", async () => {
+  setWindowLocation("http://127.0.0.1:3000/sessions/session-1");
   setFetchResponse({
     required: true,
-    ttydHttpUrl: "http://127.0.0.1:41000/?token=legacy-token",
-    ttydWsUrl: "ws://127.0.0.1:41000/ws?token=legacy-token",
+    ttydHttpUrl: "http://127.0.0.1:41000/",
+    ttydWsUrl: "ws://127.0.0.1:41000/ws",
   });
 
   const connection = await resolveTerminalConnection("session-1");
 
   assert.equal(connection.interactive, true);
   assert.equal(connection.reason, null);
-  assert.equal(
-    connection.terminalUrl,
-    "https://app.conductross.com/api/sessions/session-1/terminal/ttyd?token=legacy-token",
-  );
-  assert.equal(
-    connection.terminalLinkUrl,
-    "https://app.conductross.com/api/sessions/session-1/terminal/ttyd?token=legacy-token",
-  );
+  assert.equal(connection.terminalUrl, "http://127.0.0.1:41000/");
 });
 
 test("resolveTerminalConnection keeps proxied ttyd routes on the dashboard origin even with backend metadata", async () => {

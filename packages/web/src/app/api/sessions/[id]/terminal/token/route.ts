@@ -39,8 +39,6 @@ export async function GET(
   return NextResponse.json({
     required: false,
     expiresInSeconds: null,
-    wsUrl: ensured.relayTtydWsUrl,
-    wsProtocol: "tty",
     ttydHttpUrl: buildStableBridgeTtydProxyUrl(
       ensured.routeSessionId,
       ensured.bridgeId,
