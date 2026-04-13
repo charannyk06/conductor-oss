@@ -73,3 +73,12 @@ test("preview screen restores app surface scroll ownership", () => {
   assert.match(source, /min-w-0/);
   assert.match(source, /lg:grid/);
 });
+
+test("session detail keeps active tabs above hidden live surfaces", () => {
+  const source = readFileSync(new URL("./SessionDetail.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /STANDARD_TAB_PANEL_CLASS_NAME = ".*data-\[state=active\]:relative.*data-\[state=active\]:z-10/);
+  assert.match(source, /STANDARD_TAB_PANEL_CLASS_NAME = ".*data-\[state=inactive\]:z-0/);
+  assert.match(source, /PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME = ".*data-\[state=active\]:relative.*data-\[state=active\]:z-10/);
+  assert.match(source, /PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME = ".*data-\[state=inactive\]:z-0/);
+});
