@@ -29,6 +29,15 @@ export class SessionStore {
     return [...this.sessions.values()];
   }
 
+  findByApiKeyAndClientSessionId(apiKey: string, clientSessionId: string): PreviewSession | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.apiKey === apiKey && session.clientSessionId === clientSessionId) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
   get(sessionId: string): PreviewSession | undefined {
     return this.sessions.get(sessionId);
   }
