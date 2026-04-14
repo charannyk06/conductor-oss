@@ -83,6 +83,7 @@ struct PendingDeviceClaim {
     suggested_name: Option<String>,
     expires_at: Instant,
     paired_response: Option<DevicePairResponse>,
+    pairing_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2131,6 +2132,7 @@ impl RelayState {
                     .filter(|value| !value.is_empty()),
                 expires_at,
                 paired_response: None,
+                pairing_in_progress: false,
             },
         );
 
@@ -2151,28 +2153,28 @@ impl RelayState {
             return Err((StatusCode::BAD_REQUEST, "Claim token is required."));
         }
 
-        let claim = {
+        let (claim, response, rollback, snapshot) = {
             let mut inner = self.inner.lock().await;
             inner.prune_device_claims();
 
-            let Some(claim) = inner.device_claims.get(claim_token).cloned() else {
+            let Some(stored_claim) = inner.device_claims.get_mut(claim_token) else {
                 return Err((StatusCode::NOT_FOUND, "Claim token is invalid or expired."));
             };
 
-            if let Some(response) = claim.paired_response.clone() {
+            if let Some(response) = stored_claim.paired_response.clone() {
                 return Ok(DeviceClaimCompleteResponse {
                     paired: true,
                     already_paired: true,
-                    device_id: claim.device_id.clone(),
+                    device_id: stored_claim.device_id.clone(),
                     device_name: response.device_name,
                 });
             }
+            if stored_claim.pairing_in_progress {
+                return Err((StatusCode::CONFLICT, "Claim is already being completed."));
+            }
 
-            claim
-        };
-
-        let (response, rollback, snapshot) = {
-            let mut inner = self.inner.lock().await;
+            stored_claim.pairing_in_progress = true;
+            let claim = stored_claim.clone();
             let (response, rollback) = issue_device_pairing(
                 &mut inner,
                 user_id.to_string(),
@@ -2183,13 +2185,16 @@ impl RelayState {
                 claim.suggested_name.clone(),
             );
             let snapshot = build_persisted_relay_state(&inner);
-            (response, rollback, snapshot)
+            (claim, response, rollback, snapshot)
         };
 
         if let Err(err) = persist_devices_snapshot(snapshot).await {
             warn!(error = %err, "failed to persist relay device state");
             let mut inner = self.inner.lock().await;
             rollback_device_pairing(&mut inner, rollback);
+            if let Some(stored_claim) = inner.device_claims.get_mut(claim_token) {
+                stored_claim.pairing_in_progress = false;
+            }
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to persist device state.",
@@ -2201,6 +2206,7 @@ impl RelayState {
         let mut inner = self.inner.lock().await;
         if let Some(stored_claim) = inner.device_claims.get_mut(claim_token) {
             stored_claim.paired_response = Some(response);
+            stored_claim.pairing_in_progress = false;
         }
 
         Ok(DeviceClaimCompleteResponse {
@@ -3103,6 +3109,7 @@ mod tests {
                         suggested_name: None,
                         expires_at,
                         paired_response: None,
+                        pairing_in_progress: false,
                     },
                 );
             }
