@@ -103,6 +103,7 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
     request,
+    requestBody: body,
     headers: forwardedHeaders,
     previewUrlHint: resolveCommandPreviewUrlHint(body) ?? readPreviewUrlHint(request),
   });

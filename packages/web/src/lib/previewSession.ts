@@ -81,6 +81,7 @@ async function fetchProjectPreviewCandidateUrls(
       }
       response = await proxyToBridgeDevice(options.request, bridgeId, "/api/repositories", {
         pathOverride: "/api/repositories",
+        bodyOverride: options.requestBody,
       });
     } else {
       const backendUrl = requireRustBackendUrl();
@@ -123,6 +124,7 @@ export interface PreviewSessionContext {
 type PreviewFetchOptions = {
   headers?: HeadersInit;
   request?: Request;
+  requestBody?: unknown;
   previewUrlHint?: string | null;
 };
 
@@ -151,6 +153,7 @@ async function fetchPreviewResource(
 
     return proxyToBridgeDevice(options.request, bridgeSession.bridgeId, path, {
       pathOverride: path,
+      bodyOverride: options.requestBody,
     });
   }
 

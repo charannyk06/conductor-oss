@@ -16,17 +16,15 @@ export class SessionStore {
   }
 
   countByApiKey(apiKey: string): number {
-    let count = 0;
-    for (const session of this.sessions.values()) {
-      if (session.apiKey === apiKey) {
-        count += 1;
-      }
-    }
-    return count;
+    return this.listByApiKey(apiKey).length;
   }
 
   list(): PreviewSession[] {
     return [...this.sessions.values()];
+  }
+
+  listByApiKey(apiKey: string): PreviewSession[] {
+    return this.list().filter((session) => session.apiKey === apiKey);
   }
 
   findByApiKeyAndClientSessionId(apiKey: string, clientSessionId: string): PreviewSession | undefined {

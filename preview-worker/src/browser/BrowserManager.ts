@@ -307,6 +307,17 @@ export class BrowserManager {
         existing.bridgePreview = options.bridgePreview ?? existing.bridgePreview;
         return existing;
       }
+
+      const legacySessions = this.sessionStore
+        .listByApiKey(apiKey)
+        .filter((session) => !session.clientSessionId)
+        .sort((left, right) => left.lastActivityAt - right.lastActivityAt);
+      for (const legacySession of legacySessions) {
+        await this.destroySessionInternal(legacySession);
+        if (this.sessionStore.countByApiKey(apiKey) < this.config.maxSessions) {
+          break;
+        }
+      }
     }
 
     if (this.sessionStore.countByApiKey(apiKey) >= this.config.maxSessions) {
