@@ -30,7 +30,7 @@ export function buildDashboardSessionSelection(
     tab: requestedTab ?? getDefaultSessionPrimaryTab(session),
   };
 
-  if (currentWorkspaceView === "board") {
+  if (currentWorkspaceView === "board" || currentWorkspaceView === "notes") {
     return {
       ...selection,
       workspaceView: "direct",

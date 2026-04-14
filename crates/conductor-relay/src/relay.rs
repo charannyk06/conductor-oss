@@ -409,7 +409,10 @@ async fn persist_devices_snapshot(snapshot: PersistedRelayState) -> Result<()> {
     file.flush().await?;
     file.sync_data().await?;
     drop(file);
-    fs::rename(&temp_path, &path).await?;
+    if let Err(err) = fs::rename(&temp_path, &path).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -2231,22 +2234,23 @@ impl RelayState {
             return Err((StatusCode::BAD_REQUEST, "Missing required pairing fields."));
         }
 
-        let pairing = {
+        let (code_key, pairing) = {
             let mut inner = self.inner.lock().await;
             inner.prune_pairing_codes();
             inner.prune_device_claims();
 
-            inner
+            let pairing = inner
                 .pairing_codes
                 .remove(&code)
-                .ok_or((StatusCode::NOT_FOUND, "Pairing code is invalid or expired."))?
+                .ok_or((StatusCode::NOT_FOUND, "Pairing code is invalid or expired."))?;
+            (code.clone(), pairing)
         };
 
         let (response, rollback, snapshot) = {
             let mut inner = self.inner.lock().await;
             let (response, rollback) = issue_device_pairing(
                 &mut inner,
-                pairing.owner_user_id,
+                pairing.owner_user_id.clone(),
                 request.device_id.trim().to_string(),
                 request.hostname.trim().to_string(),
                 request.os.trim().to_string(),
@@ -2260,6 +2264,7 @@ impl RelayState {
         if let Err(err) = persist_devices_snapshot(snapshot).await {
             warn!(error = %err, "failed to persist relay device state");
             let mut inner = self.inner.lock().await;
+            inner.pairing_codes.insert(code_key, pairing);
             rollback_device_pairing(&mut inner, rollback);
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

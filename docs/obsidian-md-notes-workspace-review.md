@@ -5,7 +5,7 @@
 Yes, this feature fits Conductor well.
 
 The right implementation is:
-- add a first class **Notes** workspace mode for each project
+- add a first-class **Notes** workspace mode for each project
 - treat Obsidian, Logseq, VS Code, and other filesystem-backed editors as local markdown sources
 - save files directly inside the configured notes root
 - let **Obsidian Sync** do the sync work if the vault already has it enabled
@@ -122,7 +122,7 @@ That means we have two valid insertion points:
 
 ## What is missing
 
-### 1. No first class notes workspace
+### 1. No first-class notes workspace
 
 There is no dedicated Notes surface where users can:
 - browse markdown notes from the selected notes root
@@ -187,7 +187,7 @@ Why this is better than only adding a session tab:
 - users need a stable place to browse and edit notes even before a session exists
 - send-to-agent can target either the project dispatcher or a selected session from the same screen
 
-Recommended top level workspace modes:
+Recommended top-level workspace modes:
 - Direct launch
 - Board view
 - Notes
@@ -216,14 +216,14 @@ If `markdownEditorPath` is empty:
 If `markdownEditor === "notion"`:
 - show “Local markdown notes are only available for filesystem-backed note tools”
 
-### Obsidian specific behavior
+### Obsidian-specific behavior
 
 Use Obsidian URI for open actions when possible.
 
 Official Obsidian help confirms support for:
 - `obsidian://open?...`
 - `obsidian://new?...`
-- absolute path based open actions
+- absolute-path-based open actions
 
 That means the best Obsidian external-open path is:
 - try `obsidian://open?path=...`
@@ -501,7 +501,7 @@ Deliverables:
 
 ## Exact behavior rules
 
-### Rule 1. Notes are project scoped
+### Rule 1. Notes are project-scoped
 The notes workspace should resolve from the selected project, not from the currently selected session only.
 
 ### Rule 2. Filesystem-backed editors only

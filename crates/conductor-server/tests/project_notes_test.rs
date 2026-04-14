@@ -153,8 +153,40 @@ async fn project_notes_routes_reject_stale_writes_and_outside_paths() {
         .expect("modifiedAt should be present")
         .to_string();
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(&note_path, "# Daily\n\nVersion two\n").expect("update note on disk");
+    let wait_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut observed_modified_at = stale_modified_at.clone();
+    while tokio::time::Instant::now() < wait_deadline {
+        let poll_response = harness
+            .app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/project-notes/file?projectId=demo&path={}",
+                        url::form_urlencoded::byte_serialize(
+                            note_path.to_string_lossy().as_bytes()
+                        )
+                        .collect::<String>()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("poll note read response");
+        let poll_payload = response_json(poll_response).await;
+        observed_modified_at = poll_payload["modifiedAt"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if observed_modified_at != stale_modified_at {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_ne!(
+        observed_modified_at, stale_modified_at,
+        "note modifiedAt should change before attempting stale save"
+    );
 
     let stale_save_response = harness
         .app()

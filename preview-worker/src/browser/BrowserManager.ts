@@ -55,7 +55,7 @@ const RETRYABLE_TUNNEL_ERROR_MARKERS = [
 ] as const;
 
 function sandboxDisabled(): boolean {
-  return process.env.CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX?.trim().toLowerCase() === "true";
+  return process.env.CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX?.trim().toLowerCase() !== "false";
 }
 
 export function buildChromeArgs(): string[] {
@@ -520,6 +520,7 @@ export class BrowserManager {
         await session.page.goto(targetUrl, { waitUntil: "domcontentloaded" });
         await this.syncRequestInterception(session, true);
 
+        session.selectedElement = null;
         session.lastError = null;
         session.activeFrameId = this.ensureFrameId(session, session.page.mainFrame());
         session.lastRequestedUrl = candidate;

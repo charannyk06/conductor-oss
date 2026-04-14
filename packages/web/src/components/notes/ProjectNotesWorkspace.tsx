@@ -305,6 +305,7 @@ export function ProjectNotesWorkspace({
   const [draftContent, setDraftContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [fileModifiedAt, setFileModifiedAt] = useState<string | null>(null);
+  const [fileTruncated, setFileTruncated] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -328,6 +329,7 @@ export function ProjectNotesWorkspace({
     [noteFiles, selectedPath],
   );
   const dirty = draftContent !== savedContent;
+  const readOnlyNote = fileTruncated || indexPayload?.writable === false;
   const supportedLocalNotes = indexPayload?.writable !== false;
   const sessionTargets = useMemo(
     () => sessions.filter((session) => !isProjectDispatcherSession(session)),
@@ -425,6 +427,7 @@ export function ProjectNotesWorkspace({
       setDraftContent("");
       setSavedContent("");
       setFileModifiedAt(null);
+      setFileTruncated(false);
       setFileError(null);
       return;
     }
@@ -458,11 +461,13 @@ export function ProjectNotesWorkspace({
         setDraftContent(note.content ?? "");
         setSavedContent(note.content ?? "");
         setFileModifiedAt(note.modifiedAt ?? null);
+        setFileTruncated(note.truncated === true);
       } catch (error) {
         if (cancelled || latestLoadId.current !== loadId) return;
         setDraftContent("");
         setSavedContent("");
         setFileModifiedAt(null);
+        setFileTruncated(false);
         setFileError(error instanceof Error ? error.message : "Failed to load note");
       } finally {
         if (!cancelled && latestLoadId.current === loadId) {
@@ -475,10 +480,14 @@ export function ProjectNotesWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [bridgeId, projectId, selectedPath]);
+  }, [bridgeId, projectId, refreshNonce, selectedPath]);
 
   const saveCurrentNote = useCallback(async () => {
     if (!selectedFile) {
+      return null;
+    }
+    if (fileTruncated) {
+      setSaveError("This note was truncated for safety. Open it externally to edit the full file.");
       return null;
     }
     setSaving(true);
@@ -514,7 +523,7 @@ export function ProjectNotesWorkspace({
     } finally {
       setSaving(false);
     }
-  }, [bridgeId, draftContent, fileModifiedAt, projectId, refreshIndex, selectedFile]);
+  }, [bridgeId, draftContent, fileModifiedAt, fileTruncated, projectId, refreshIndex, selectedFile]);
 
   const handleOpenExternally = useCallback(async () => {
     if (!selectedFile) {
@@ -673,8 +682,17 @@ export function ProjectNotesWorkspace({
   }, []);
 
   const selectFile = useCallback((path: string) => {
+    if (path === selectedPath) {
+      return;
+    }
+    if (dirty && typeof window !== "undefined") {
+      const discard = window.confirm("Discard unsaved note changes and switch notes?");
+      if (!discard) {
+        return;
+      }
+    }
     setSelectedPath(path);
-  }, []);
+  }, [dirty, selectedPath]);
 
   const rootLabel = indexPayload?.notesRoot
     ? indexPayload.notesRoot
@@ -735,7 +753,7 @@ export function ProjectNotesWorkspace({
             <button
               type="button"
               onClick={() => void saveCurrentNote()}
-              disabled={!selectedFile || !dirty || saving}
+              disabled={!selectedFile || !dirty || saving || fileTruncated}
               className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
             >
               {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -796,6 +814,12 @@ export function ProjectNotesWorkspace({
           <div className="mt-3 flex items-center gap-1.5 text-[12px] text-[#f6c56f]">
             <TriangleAlert className="h-3.5 w-3.5" />
             Unsaved changes
+          </div>
+        ) : null}
+        {fileTruncated ? (
+          <div className="mt-2 flex items-center gap-1.5 text-[12px] text-[#f6c56f]">
+            <TriangleAlert className="h-3.5 w-3.5" />
+            This note is too large to edit safely in Conductor. The preview is read-only.
           </div>
         ) : null}
       </div>
@@ -932,6 +956,7 @@ export function ProjectNotesWorkspace({
                     <textarea
                       value={draftContent}
                       onChange={(event) => setDraftContent(event.target.value)}
+                      readOnly={readOnlyNote}
                       placeholder="Select a note to start editing"
                       className="h-full min-h-0 w-full resize-none bg-[var(--vk-bg-main)] px-4 py-4 font-mono text-[13px] leading-6 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                     />

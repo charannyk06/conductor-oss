@@ -187,7 +187,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return Some(AccessRole::Operator);
     }
 
-    if path == "/api/workspaces/branches" {
+    if *method == Method::GET && path == "/api/workspaces/branches" {
         return Some(AccessRole::Operator);
     }
 

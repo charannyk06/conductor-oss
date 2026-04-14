@@ -3,6 +3,10 @@ import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
 import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
+import {
+  normalizePreviewBridgeSetupError,
+  resolvePreviewManagerSessionId,
+} from "@/lib/previewManagerSession";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
 
 export const runtime = "nodejs";
@@ -10,18 +14,19 @@ export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-function resolvePreviewManagerSessionId(sessionId: string, userId: string | null): string {
-  const normalizedUserId = userId?.trim().toLowerCase() || "anonymous-preview-user";
-  return `${normalizedUserId}:${sessionId}`;
-}
-
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const { id } = await context.params;
   const access = await getDashboardAccess(request);
-  const managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -33,11 +38,17 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   }
 
   const manager = getPreviewBrowserManager();
-  await manager.configureBridgePreview(
-    managerSessionId,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
+  try {
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
+
   try {
     const screenshot = await manager.takeScreenshot(managerSessionId);
     if (!screenshot) {

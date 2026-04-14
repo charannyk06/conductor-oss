@@ -3,6 +3,10 @@ import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/
 import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
+import {
+  normalizePreviewBridgeSetupError,
+  resolvePreviewManagerSessionId,
+} from "@/lib/previewManagerSession";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
 import { TERMINAL_STATUSES } from "@/lib/types";
 import type { PreviewCommandRequest, PreviewStatusResponse } from "@/lib/previewTypes";
@@ -42,18 +46,19 @@ function resolveCommandPreviewUrlHint(command: PreviewCommandRequest): string | 
   return null;
 }
 
-function resolvePreviewManagerSessionId(sessionId: string, userId: string | null): string {
-  const normalizedUserId = userId?.trim().toLowerCase() || "anonymous-preview-user";
-  return `${normalizedUserId}:${sessionId}`;
-}
-
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const { id } = await context.params;
   const access = await getDashboardAccess(request);
-  const managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -80,11 +85,17 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
     return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
   }
 
-  await manager.configureBridgePreview(
-    managerSessionId,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
+  try {
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
+
   const status = withLookupError(
     await manager.getStatus(managerSessionId, previewContext.candidateUrls),
     previewContext.error,
@@ -100,7 +111,13 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
 
   const { id } = await context.params;
   const access = await getDashboardAccess(request);
-  const managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   let body: PreviewCommandRequest;
   try {
@@ -122,11 +139,16 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
     return NextResponse.json({ error: MISSING_SESSION_PREVIEW_ERROR }, { status: 404 });
   }
 
-  await manager.configureBridgePreview(
-    managerSessionId,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
+  try {
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   try {
     await manager.runCommand(managerSessionId, body);

@@ -427,14 +427,27 @@ fn host_targets_private_network(host: &str) -> bool {
                     || v4.is_multicast()
             }
             IpAddr::V6(v6) => {
-                let segments = v6.segments();
-                let is_unique_local_v6 = (segments[0] & 0xfe00) == 0xfc00;
-                let is_link_local_v6 = (segments[0] & 0xffc0) == 0xfe80;
-                v6.is_loopback()
-                    || is_unique_local_v6
-                    || is_link_local_v6
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
+                if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                    let [first, second, ..] = mapped_v4.octets();
+                    let is_private_v4 = matches!(first, 10)
+                        || (first == 172 && (16..=31).contains(&second))
+                        || (first == 192 && second == 168);
+                    let is_link_local_v4 = first == 169 && second == 254;
+                    mapped_v4.is_loopback()
+                        || is_private_v4
+                        || is_link_local_v4
+                        || mapped_v4.is_unspecified()
+                        || mapped_v4.is_multicast()
+                } else {
+                    let segments = v6.segments();
+                    let is_unique_local_v6 = (segments[0] & 0xfe00) == 0xfc00;
+                    let is_link_local_v6 = (segments[0] & 0xffc0) == 0xfe80;
+                    v6.is_loopback()
+                        || is_unique_local_v6
+                        || is_link_local_v6
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                }
             }
         };
     }
@@ -832,6 +845,8 @@ mod tests {
         assert!(validate_git_url("git://github.com/example/repo.git").is_err());
         assert!(validate_git_url("https://10.0.0.5/repo.git").is_err());
         assert!(validate_git_url("https://192.168.1.10/repo.git").is_err());
+        assert!(validate_git_url("https://[::ffff:127.0.0.1]/repo.git").is_err());
+        assert!(validate_git_url("https://[::ffff:10.0.0.1]/repo.git").is_err());
         assert!(validate_git_url("git@localhost:example/repo.git").is_err());
     }
 }

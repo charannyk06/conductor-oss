@@ -2052,9 +2052,10 @@ export default function DashboardClient({
 
   const workspaceMainPanel = useMemo(() => {
     const projectViewToggle = selectedProject ? (
-      <div className="hidden w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:inline-flex">
+      <div role="group" aria-label="Project workspace view" className="hidden w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:inline-flex">
         <button
           type="button"
+          aria-pressed={workspaceView === "direct"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "direct"
@@ -2066,6 +2067,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "board"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "board"
@@ -2077,6 +2079,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "notes"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "notes" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "notes"
@@ -2180,9 +2183,10 @@ export default function DashboardClient({
       fullWidth?: boolean;
       compact?: boolean;
     } = {}) => (
-      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
+      <div role="group" aria-label="Project workspace view" className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
         <button
           type="button"
+          aria-pressed={workspaceView === "direct"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
           className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "direct"
@@ -2194,6 +2198,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "board"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
           className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "board"
@@ -2205,6 +2210,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "notes"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "notes" }, "replace")}
           className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "notes"

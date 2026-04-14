@@ -149,10 +149,15 @@ async fn list_project_notes(
     }
 
     files.sort_by(|left, right| {
-        source_sort_rank(left["source"].as_str().unwrap_or_default())
-            .cmp(&source_sort_rank(
-                right["source"].as_str().unwrap_or_default(),
-            ))
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+            .then_with(|| {
+                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(
+                    &source_sort_rank(right["source"].as_str().unwrap_or_default()),
+                )
+            })
             .then_with(|| {
                 left["displayPath"]
                     .as_str()
@@ -420,8 +425,14 @@ fn collect_note_files(
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() || !path_is_within_root(&path, root, false) {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
+            if file_type.is_dir() {
                 let hidden_dir = name.starts_with('.') && name != ".github";
                 if depth < max_depth
                     && !hidden_dir
@@ -434,7 +445,7 @@ fn collect_note_files(
                 }
                 continue;
             }
-            if !path.is_file() || !is_markdown_like(&path) {
+            if !file_type.is_file() || !is_markdown_like(&path) {
                 continue;
             }
             out.push(note_descriptor(&path, display_root, Some(source), None));
