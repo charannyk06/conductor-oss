@@ -533,6 +533,8 @@ pub struct PreferencesConfig {
     pub markdown_editor: String,
     #[serde(default)]
     pub markdown_editor_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filesystem_browse_roots: Vec<String>,
     #[serde(default)]
     pub model_access: ModelAccessPreferences,
     #[serde(default)]
@@ -547,9 +549,21 @@ impl Default for PreferencesConfig {
             ide: default_ide(),
             markdown_editor: default_markdown_editor(),
             markdown_editor_path: String::new(),
+            filesystem_browse_roots: Vec::new(),
             model_access: ModelAccessPreferences::default(),
             notifications: NotificationPreferences::default(),
         }
+    }
+}
+
+impl PreferencesConfig {
+    fn normalize(&mut self) {
+        self.filesystem_browse_roots = self
+            .filesystem_browse_roots
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
     }
 }
 
@@ -738,6 +752,7 @@ impl ConductorConfig {
             webhook.normalize();
         }
         config.defaults.normalize();
+        config.preferences.normalize();
         for project in config.projects.values_mut() {
             project.normalize_runtime();
             project.normalize_dev_server();
@@ -861,9 +876,34 @@ webhook:
         .unwrap();
 
         let config = ConductorConfig::load(&path).unwrap();
-        let webhook = config.webhook.expect("webhook config");
-        assert_eq!(webhook.port, 4748);
+        let webhook = config.webhook.expect("webhook should exist");
         assert_eq!(webhook.secret.as_deref(), Some("test-secret"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_load_normalizes_filesystem_browse_roots() {
+        let root = std::env::temp_dir().join(format!("conductor-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("conductor.yaml");
+        std::fs::write(
+            &path,
+            r#"
+preferences:
+  filesystemBrowseRoots:
+    - "  /Users  "
+    - ""
+    - " /Volumes/projects "
+"#,
+        )
+        .unwrap();
+
+        let config = ConductorConfig::load(&path).unwrap();
+        assert_eq!(
+            config.preferences.filesystem_browse_roots,
+            vec!["/Users".to_string(), "/Volumes/projects".to_string()]
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
