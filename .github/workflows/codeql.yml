@@ -15,8 +15,15 @@ concurrency:
 
 jobs:
   analyze:
-    name: CodeQL Analysis
+    name: CodeQL Analysis (${{ matrix.language }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - javascript-typescript
+          - go
+          - rust
     permissions:
       security-events: write
       actions: read
@@ -29,7 +36,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@e03543dad62555ecf6606aabe9724fd07e1cd632 # v3.32.6
         with:
-          languages: javascript-typescript
+          languages: ${{ matrix.language }}
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@e03543dad62555ecf6606aabe9724fd07e1cd632 # v3.32.6
@@ -37,4 +44,4 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@e03543dad62555ecf6606aabe9724fd07e1cd632 # v3.32.6
         with:
-          category: /language:javascript-typescript
+          category: /language:${{ matrix.language }}

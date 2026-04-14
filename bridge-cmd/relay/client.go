@@ -338,12 +338,12 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	}
 
 	// 2. Connect to relay.
-	relayEndpoint, err := websocketEndpoint(opts.relayURL, opts.scope, opts.refreshToken)
+	relayEndpoint, err := websocketEndpoint(opts.relayURL, opts.scope)
 	if err != nil {
 		stopTtyd()
 		return false, fmt.Errorf("build relay endpoint: %w", err)
 	}
-	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
+	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, relayAuthHeaders(opts.refreshToken))
 	if err != nil {
 		stopTtyd()
 		return false, fmt.Errorf("dial relay: %w", err)
@@ -545,7 +545,16 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	}
 }
 
-func websocketEndpoint(relayURL, scope, refreshToken string) (string, error) {
+func relayAuthHeaders(token string) http.Header {
+	header := http.Header{}
+	trimmed := strings.TrimSpace(token)
+	if trimmed != "" {
+		header.Set("Authorization", "Bearer "+trimmed)
+	}
+	return header
+}
+
+func websocketEndpoint(relayURL, scope string) (string, error) {
 	base, err := url.Parse(strings.TrimSpace(relayURL))
 	if err != nil {
 		return "", fmt.Errorf("parse relay URL: %w", err)
@@ -560,14 +569,12 @@ func websocketEndpoint(relayURL, scope, refreshToken string) (string, error) {
 		return "", fmt.Errorf("unsupported relay URL scheme %q", base.Scheme)
 	}
 	base.Path = "/bridge/" + url.PathEscape(scope)
-	q := base.Query()
-	q.Set("token", refreshToken)
-	base.RawQuery = q.Encode()
+	base.RawQuery = ""
 	base.Fragment = ""
 	return base.String(), nil
 }
 
-func terminalBridgeEndpoint(relayURL, terminalID, refreshToken string) (string, error) {
+func terminalBridgeEndpoint(relayURL, terminalID string) (string, error) {
 	base, err := url.Parse(strings.TrimSpace(relayURL))
 	if err != nil {
 		return "", fmt.Errorf("parse relay URL: %w", err)
@@ -582,9 +589,7 @@ func terminalBridgeEndpoint(relayURL, terminalID, refreshToken string) (string, 
 		return "", fmt.Errorf("unsupported relay URL scheme %q", base.Scheme)
 	}
 	base.Path = "/terminal/" + url.PathEscape(strings.TrimSpace(terminalID)) + "/bridge"
-	q := base.Query()
-	q.Set("token", refreshToken)
-	base.RawQuery = q.Encode()
+	base.RawQuery = ""
 	base.Fragment = ""
 	return base.String(), nil
 }
@@ -944,12 +949,12 @@ func proxyTerminalSession(
 	}
 	defer backendConn.Close()
 
-	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
+	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID)
 	if err != nil {
 		return err
 	}
 
-	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
+	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, relayAuthHeaders(refreshToken))
 	if err != nil {
 		return fmt.Errorf("connect relay terminal socket: %w", err)
 	}

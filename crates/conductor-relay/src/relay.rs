@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::fs as stdfs;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -28,6 +30,11 @@ use uuid::Uuid;
 #[derive(Clone, Default)]
 pub struct RelayState {
     inner: Arc<Mutex<RelayInner>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedRelayState {
+    devices: Vec<DeviceRecord>,
 }
 
 #[derive(Debug, Default)]
@@ -76,7 +83,7 @@ struct PendingDeviceClaim {
     paired_response: Option<DevicePairResponse>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DeviceRecord {
     device_id: String,
     owner_user_id: String,
@@ -346,6 +353,7 @@ enum TerminalPeerKind {
 }
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+const RELAY_STATE_FILE_ENV: &str = "RELAY_STATE_FILE";
 const DEFAULT_JWT_SECRET_ENV: &str = "RELAY_JWT_SECRET";
 const RELAY_JWT_ISSUER: &str = "conductor-dashboard";
 const RELAY_JWT_AUDIENCE: &str = "conductor-relay";
@@ -362,15 +370,65 @@ const PAIRING_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(45);
 const DEVICE_PICKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_PENDING_API_REQUESTS: usize = 256;
+const MAX_PENDING_PREVIEW_REQUESTS: usize = 128;
 const BRIDGE_PROXY_META_KEY: &str = "$bridgeProxy";
 
 fn device_claim_rate_limit_key(remote_addr: SocketAddr) -> String {
     format!("device-claims:create:{}", remote_addr.ip())
 }
 
+fn relay_state_file_path() -> Option<PathBuf> {
+    env::var(RELAY_STATE_FILE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn persist_devices_snapshot(inner: &RelayInner) -> Result<()> {
+    let Some(path) = relay_state_file_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        stdfs::create_dir_all(parent)?;
+    }
+    let snapshot = PersistedRelayState {
+        devices: inner.devices.values().cloned().collect(),
+    };
+    let payload = serde_json::to_vec_pretty(&snapshot)?;
+    stdfs::write(path, payload)?;
+    Ok(())
+}
+
+impl RelayState {
+    fn load_persisted() -> Self {
+        let Some(path) = relay_state_file_path() else {
+            return Self::default();
+        };
+        let Ok(contents) = stdfs::read_to_string(&path) else {
+            return Self::default();
+        };
+        let Ok(snapshot) = serde_json::from_str::<PersistedRelayState>(&contents) else {
+            return Self::default();
+        };
+
+        let mut inner = RelayInner::default();
+        for device in snapshot.devices {
+            inner
+                .refresh_tokens
+                .insert(device.refresh_token.clone(), device.device_id.clone());
+            inner.devices.insert(device.device_id.clone(), device);
+        }
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+}
+
 pub async fn serve() -> Result<()> {
     let bind_addr = env::var("RELAY_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
-    let state = RelayState::default();
+    let state = RelayState::load_persisted();
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(%bind_addr, "relay listening");
@@ -916,12 +974,20 @@ async fn bridge_ws(
                     version: None,
                 }),
             )
+        } else if let Some(user_id) = query
+            .jwt
+            .as_deref()
+            .and_then(|jwt| decode_relay_user_id(jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok())
+        {
+            (scope.trim().to_string(), user_id, None)
+        } else if let Ok(user_id) = decode_relay_user_id(&token, RELAY_JWT_SCOPE_DASHBOARD_API) {
+            (scope.trim().to_string(), user_id, None)
         } else {
-            (
-                scope.trim().to_string(),
-                resolve_user_id(query.jwt.as_deref(), Some(&token)),
-                None,
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing or invalid bridge relay token." })),
             )
+                .into_response();
         };
 
     ws.on_upgrade(move |socket| async move {
@@ -942,20 +1008,27 @@ async fn bridge_ws(
 }
 
 async fn resolve_browser_connection(
-    _scope: &str,
+    scope: &str,
     headers: &HeaderMap,
     token: Option<&str>,
 ) -> Result<(String, String), Response> {
-    let Some(bridge_token) = resolve_token(headers, token) else {
+    let Some(jwt) = resolve_token(headers, token) else {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing bridge token." })),
+            Json(json!({ "error": "Missing bridge relay token." })),
         )
             .into_response());
     };
 
-    let user_id = resolve_user_id(None, Some(&bridge_token));
-    Ok((bridge_token, user_id))
+    let Some(user_id) = decode_relay_user_id(&jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok() else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Invalid bridge relay token." })),
+        )
+            .into_response());
+    };
+
+    Ok((scope.trim().to_string(), user_id))
 }
 
 async fn handle_connection(
@@ -2239,6 +2312,9 @@ impl RelayState {
                 .map(|device| device.refresh_token)
                 .unwrap_or_default();
             inner.refresh_tokens.remove(&refresh_token);
+            if let Err(err) = persist_devices_snapshot(&inner) {
+                warn!(error = %err, "failed to persist relay device state");
+            }
             (refresh_token, true)
         };
 
@@ -2318,6 +2394,12 @@ impl RelayState {
                 };
 
                 let (tx, rx) = oneshot::channel();
+                if inner.pending_api_requests.len() >= MAX_PENDING_API_REQUESTS {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Too many in-flight device API requests.".to_string(),
+                    ));
+                }
                 inner.pending_api_requests.insert(
                     request_id.clone(),
                     PendingApiRequest {
@@ -2455,6 +2537,12 @@ impl RelayState {
             };
 
             let (tx, rx) = oneshot::channel();
+            if inner.pending_preview_requests.len() >= MAX_PENDING_PREVIEW_REQUESTS {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too many in-flight device preview requests.".to_string(),
+                ));
+            }
             inner.pending_preview_requests.insert(
                 request_id.clone(),
                 PendingPreviewRequest {
@@ -2713,23 +2801,6 @@ fn resolve_browser_ws_user_id(jwt: &str) -> Option<String> {
     decode_relay_user_id(jwt, RELAY_JWT_SCOPE_TERMINAL_BROWSER).ok()
 }
 
-fn resolve_user_id(jwt: Option<&str>, fallback: Option<&str>) -> String {
-    if let Some(jwt) = jwt.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    }) {
-        if let Ok(user_id) = decode_relay_user_id(jwt, RELAY_JWT_SCOPE_DASHBOARD_API) {
-            return user_id;
-        }
-    }
-
-    fallback.unwrap_or("anonymous").to_string()
-}
-
 fn host_name() -> String {
     env::var("HOSTNAME")
         .or_else(|_| env::var("COMPUTERNAME"))
@@ -2787,6 +2858,9 @@ fn issue_device_pairing(
         .refresh_tokens
         .insert(refresh_token.clone(), device.device_id.clone());
     inner.devices.insert(device.device_id.clone(), device);
+    if let Err(err) = persist_devices_snapshot(inner) {
+        warn!(error = %err, "failed to persist relay device state");
+    }
 
     DevicePairResponse {
         access_token,
@@ -2816,6 +2890,9 @@ fn generate_claim_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{LazyLock, Mutex as StdMutex};
+
+    static RELAY_STATE_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
     use axum::extract::ws::Message;
     use tokio::sync::mpsc;
 
@@ -3027,6 +3104,124 @@ mod tests {
             )
             .await
             .expect("different callers should get independent rate-limit buckets");
+    }
+
+    #[tokio::test]
+    async fn forward_device_api_request_rejects_when_too_many_requests_are_in_flight() {
+        let state = RelayState::default();
+        let (bridge_tx, _bridge_rx) = mpsc::unbounded_channel();
+        {
+            let mut inner = state.inner.lock().await;
+            inner.devices.insert(
+                "device-123".to_string(),
+                DeviceRecord {
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    name: "My Laptop".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            );
+            inner.channels.insert(
+                "device-123".to_string(),
+                BridgeChannel {
+                    bridge: Some(ConnectionRecord {
+                        id: 1,
+                        user_id: "user@example.com".to_string(),
+                        tx: bridge_tx.clone(),
+                    }),
+                    ..Default::default()
+                },
+            );
+
+            for index in 0..MAX_PENDING_API_REQUESTS {
+                let (tx, _rx) = oneshot::channel();
+                inner.pending_api_requests.insert(
+                    format!("api-{index}"),
+                    PendingApiRequest {
+                        device_id: "device-123".to_string(),
+                        tx,
+                    },
+                );
+            }
+        }
+
+        let err = state
+            .forward_device_api_request(
+                "user@example.com",
+                "device-123",
+                "GET",
+                "/api/sessions",
+                None,
+            )
+            .await
+            .expect_err("api request queue should reject overflow");
+
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.1, "Too many in-flight device API requests.");
+    }
+
+    #[tokio::test]
+    async fn forward_device_preview_request_rejects_when_too_many_requests_are_in_flight() {
+        let state = RelayState::default();
+        let (bridge_tx, _bridge_rx) = mpsc::unbounded_channel();
+        {
+            let mut inner = state.inner.lock().await;
+            inner.devices.insert(
+                "device-123".to_string(),
+                DeviceRecord {
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    name: "My Laptop".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            );
+            inner.channels.insert(
+                "device-123".to_string(),
+                BridgeChannel {
+                    bridge: Some(ConnectionRecord {
+                        id: 1,
+                        user_id: "user@example.com".to_string(),
+                        tx: bridge_tx,
+                    }),
+                    ..Default::default()
+                },
+            );
+
+            for index in 0..MAX_PENDING_PREVIEW_REQUESTS {
+                let (tx, _rx) = oneshot::channel();
+                inner.pending_preview_requests.insert(
+                    format!("preview-{index}"),
+                    PendingPreviewRequest {
+                        device_id: "device-123".to_string(),
+                        tx,
+                    },
+                );
+            }
+        }
+
+        let err = state
+            .forward_device_preview_request(
+                "user@example.com",
+                "device-123",
+                DevicePreviewRequest {
+                    session_id: "session-123".to_string(),
+                    method: "GET".to_string(),
+                    url: "http://127.0.0.1:3000".to_string(),
+                    headers: BTreeMap::new(),
+                    body_base64: None,
+                },
+            )
+            .await
+            .expect_err("preview request queue should reject overflow");
+
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.1, "Too many in-flight device preview requests.");
     }
 
     #[test]
@@ -3459,6 +3654,52 @@ mod tests {
             .await
             .expect("bridge should receive cleanup close");
         assert!(matches!(close_message, Message::Close(_)));
+    }
+
+    #[tokio::test]
+    async fn persisted_device_state_round_trips() {
+        let _guard = RELAY_STATE_ENV_LOCK.lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("conductor-relay-state-{}.json", Uuid::new_v4()));
+        unsafe {
+            std::env::set_var(RELAY_STATE_FILE_ENV, &path);
+        }
+
+        let mut inner = RelayInner::default();
+        inner.devices.insert(
+            "device-123".to_string(),
+            DeviceRecord {
+                device_id: "device-123".to_string(),
+                owner_user_id: "user@example.com".to_string(),
+                name: "Mac".to_string(),
+                hostname: "macbook-pro".to_string(),
+                os: "darwin".to_string(),
+                arch: "arm64".to_string(),
+                refresh_token: "refresh-token".to_string(),
+            },
+        );
+        inner
+            .refresh_tokens
+            .insert("refresh-token".to_string(), "device-123".to_string());
+        persist_devices_snapshot(&inner).expect("device state should persist");
+
+        let loaded = RelayState::load_persisted();
+        let loaded_inner = loaded.inner.lock().await;
+        let loaded_device = loaded_inner
+            .devices
+            .get("device-123")
+            .expect("device should reload");
+        assert_eq!(loaded_device.owner_user_id, "user@example.com");
+        assert_eq!(
+            loaded_inner.refresh_tokens.get("refresh-token"),
+            Some(&"device-123".to_string())
+        );
+        drop(loaded_inner);
+
+        unsafe {
+            std::env::remove_var(RELAY_STATE_FILE_ENV);
+        }
+        let _ = std::fs::remove_file(path);
     }
 }
 

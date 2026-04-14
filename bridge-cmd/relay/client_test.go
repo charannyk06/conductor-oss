@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+func TestRelayAuthHeadersUsesAuthorizationBearer(t *testing.T) {
+	t.Parallel()
+
+	headers := relayAuthHeaders("  refresh-token  ")
+	if got := headers.Get("Authorization"); got != "Bearer refresh-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer refresh-token")
+	}
+}
+
+func TestWebsocketEndpointOmitsTokenQuery(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := websocketEndpoint("https://relay.example.com/base/", "device-123")
+	if err != nil {
+		t.Fatalf("websocketEndpoint returned error: %v", err)
+	}
+	if endpoint != "wss://relay.example.com/bridge/device-123" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
+
+func TestTerminalBridgeEndpointOmitsTokenQuery(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := terminalBridgeEndpoint("https://relay.example.com/base/", "terminal-123")
+	if err != nil {
+		t.Fatalf("terminalBridgeEndpoint returned error: %v", err)
+	}
+	if endpoint != "wss://relay.example.com/terminal/terminal-123/bridge" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
+
 func TestShouldRetryTerminalAttach(t *testing.T) {
 	t.Parallel()
 

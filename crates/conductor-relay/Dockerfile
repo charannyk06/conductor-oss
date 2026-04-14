@@ -4,6 +4,16 @@ COPY . .
 RUN cargo build --release -p conductor-relay
 
 FROM debian:bookworm-slim
+RUN useradd --system --create-home --home-dir /var/lib/conductor-relay --shell /usr/sbin/nologin conductor \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/conductor-relay /usr/local/bin/conductor-relay
+RUN mkdir -p /var/lib/conductor-relay \
+    && chown -R conductor:conductor /var/lib/conductor-relay /usr/local/bin/conductor-relay
+USER conductor
+WORKDIR /var/lib/conductor-relay
+ENV RELAY_STATE_FILE=/var/lib/conductor-relay/state.json
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 CMD ["conductor-relay"]
