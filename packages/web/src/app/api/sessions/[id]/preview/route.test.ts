@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { GET } from "./route";
+import { GET, POST } from "./route";
 
 const originalBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
 const originalBridgeRelayUrl = process.env.CONDUCTOR_BRIDGE_RELAY_URL;
@@ -396,6 +396,99 @@ test("GET uses an explicit previewUrlHint for bridge sessions that did not repor
     assert.deepEqual(payload.candidateUrls, ["http://localhost:3002/"]);
     assert.equal(payload.currentUrl, null);
     assert.equal(payload.lastError, null);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("POST clones the bridge request before preview lookup so body reuse does not poison status", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
+  process.env.RELAY_JWT_SECRET = "preview-test-secret";
+
+  const seenPaths: string[] = [];
+  const seenBodies: Array<unknown> = [];
+
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+
+    assert.equal(url, "https://relay.example.com/api/devices/bridge-1/proxy");
+    assert.equal(init?.method, "POST");
+
+    const body = JSON.parse(String(init?.body)) as {
+      method: string;
+      path: string;
+      body?: unknown;
+    };
+    seenPaths.push(body.path);
+    seenBodies.push(body.body ?? null);
+
+    if (body.path === "/api/sessions/session-1") {
+      return new Response(JSON.stringify({
+        id: "session-1",
+        projectId: "demo",
+        status: "working",
+        activity: "active",
+        branch: "feature/demo",
+        issueId: null,
+        summary: null,
+        createdAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        pr: null,
+        metadata: {},
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (body.path === "/api/sessions/session-1/output?lines=400") {
+      return new Response(JSON.stringify({ output: "" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: "not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await POST(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/preview?previewUrlHint=http%3A%2F%2Flocalhost%3A3002%2F", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "connect", url: "http://localhost:3002/" }),
+      }),
+      { params: Promise.resolve({ id: "bridge:bridge-1:session-1" }) },
+    );
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(seenPaths, [
+      "/api/sessions/session-1",
+      "/api/sessions/session-1/output?lines=400",
+    ]);
+    assert.deepEqual(seenBodies, [
+      { command: "connect", url: "http://localhost:3002/" },
+      { command: "connect", url: "http://localhost:3002/" },
+    ]);
+
+    const payload = await response.json() as {
+      error: string;
+      status: {
+        candidateUrls: string[];
+        lastError: string | null;
+      };
+    };
+
+    assert.ok(!payload.error.includes("Body is unusable"));
+    assert.deepEqual(payload.status.candidateUrls, ["http://localhost:3002/"]);
+    assert.ok(payload.status.lastError === null || !payload.status.lastError.includes("Body is unusable"));
   } finally {
     global.fetch = originalFetch;
   }

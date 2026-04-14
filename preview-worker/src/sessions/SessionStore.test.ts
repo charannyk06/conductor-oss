@@ -41,3 +41,19 @@ test("findByApiKeyAndClientSessionId returns the matching session only for the s
   assert.equal(store.findByApiKeyAndClientSessionId("key-b", "session-1")?.id, "preview-2");
   assert.equal(store.findByApiKeyAndClientSessionId("key-a", "missing"), undefined);
 });
+
+test("listByApiKey returns all sessions for the same API key, including legacy sessions without a clientSessionId", () => {
+  const store = new SessionStore(60_000);
+  const reused = buildSession("preview-1", "key-a", "session-1");
+  const legacy = buildSession("preview-legacy", "key-a", null);
+  const otherKey = buildSession("preview-2", "key-b", "session-1");
+  store.set(reused);
+  store.set(legacy);
+  store.set(otherKey);
+
+  assert.deepEqual(
+    store.listByApiKey("key-a").map((session) => session.id).sort(),
+    ["preview-1", "preview-legacy"],
+  );
+  assert.equal(store.countByApiKey("key-a"), 2);
+});
