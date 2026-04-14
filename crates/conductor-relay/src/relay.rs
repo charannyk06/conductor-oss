@@ -16,11 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::fs as stdfs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::fs::{self, File};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tower_http::cors::{Any, CorsLayer};
@@ -386,33 +388,32 @@ fn relay_state_file_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn persist_devices_snapshot(inner: &RelayInner) -> Result<()> {
+fn build_persisted_relay_state(inner: &RelayInner) -> PersistedRelayState {
+    PersistedRelayState {
+        devices: inner.devices.values().cloned().collect(),
+    }
+}
+
+async fn persist_devices_snapshot(snapshot: PersistedRelayState) -> Result<()> {
     let Some(path) = relay_state_file_path() else {
         return Ok(());
     };
     if let Some(parent) = path.parent() {
-        stdfs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).await?;
     }
-    let snapshot = PersistedRelayState {
-        devices: inner.devices.values().cloned().collect(),
-    };
     let payload = serde_json::to_vec_pretty(&snapshot)?;
-    stdfs::write(path, payload)?;
+    let temp_path = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
+    let mut file = File::create(&temp_path).await?;
+    file.write_all(&payload).await?;
+    file.flush().await?;
+    file.sync_data().await?;
+    drop(file);
+    fs::rename(&temp_path, &path).await?;
     Ok(())
 }
 
 impl RelayState {
-    fn load_persisted() -> Self {
-        let Some(path) = relay_state_file_path() else {
-            return Self::default();
-        };
-        let Ok(contents) = stdfs::read_to_string(&path) else {
-            return Self::default();
-        };
-        let Ok(snapshot) = serde_json::from_str::<PersistedRelayState>(&contents) else {
-            return Self::default();
-        };
-
+    fn from_persisted(snapshot: PersistedRelayState) -> Self {
         let mut inner = RelayInner::default();
         for device in snapshot.devices {
             inner
@@ -424,11 +425,28 @@ impl RelayState {
             inner: Arc::new(Mutex::new(inner)),
         }
     }
+
+    async fn load_persisted() -> Result<Self> {
+        let Some(path) = relay_state_file_path() else {
+            return Ok(Self::default());
+        };
+        let contents = match fs::read_to_string(&path).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read persisted relay state from {}", path.display()))
+            }
+        };
+        let snapshot = serde_json::from_str::<PersistedRelayState>(&contents)
+            .with_context(|| format!("parse persisted relay state from {}", path.display()))?;
+        Ok(Self::from_persisted(snapshot))
+    }
 }
 
 pub async fn serve() -> Result<()> {
     let bind_addr = env::var("RELAY_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
-    let state = RelayState::load_persisted();
+    let state = RelayState::load_persisted().await?;
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(%bind_addr, "relay listening");
@@ -2133,33 +2151,54 @@ impl RelayState {
             return Err((StatusCode::BAD_REQUEST, "Claim token is required."));
         }
 
-        let mut inner = self.inner.lock().await;
-        inner.prune_device_claims();
+        let claim = {
+            let mut inner = self.inner.lock().await;
+            inner.prune_device_claims();
 
-        let Some(claim) = inner.device_claims.get(claim_token).cloned() else {
-            return Err((StatusCode::NOT_FOUND, "Claim token is invalid or expired."));
+            let Some(claim) = inner.device_claims.get(claim_token).cloned() else {
+                return Err((StatusCode::NOT_FOUND, "Claim token is invalid or expired."));
+            };
+
+            if let Some(response) = claim.paired_response.clone() {
+                return Ok(DeviceClaimCompleteResponse {
+                    paired: true,
+                    already_paired: true,
+                    device_id: claim.device_id.clone(),
+                    device_name: response.device_name,
+                });
+            }
+
+            claim
         };
 
-        if let Some(response) = claim.paired_response.clone() {
-            return Ok(DeviceClaimCompleteResponse {
-                paired: true,
-                already_paired: true,
-                device_id: claim.device_id.clone(),
-                device_name: response.device_name,
-            });
+        let (response, rollback, snapshot) = {
+            let mut inner = self.inner.lock().await;
+            let (response, rollback) = issue_device_pairing(
+                &mut inner,
+                user_id.to_string(),
+                claim.device_id.clone(),
+                claim.hostname.clone(),
+                claim.os.clone(),
+                claim.arch.clone(),
+                claim.suggested_name.clone(),
+            );
+            let snapshot = build_persisted_relay_state(&inner);
+            (response, rollback, snapshot)
+        };
+
+        if let Err(err) = persist_devices_snapshot(snapshot).await {
+            warn!(error = %err, "failed to persist relay device state");
+            let mut inner = self.inner.lock().await;
+            rollback_device_pairing(&mut inner, rollback);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist device state.",
+            ));
         }
 
-        let response = issue_device_pairing(
-            &mut inner,
-            user_id.to_string(),
-            claim.device_id.clone(),
-            claim.hostname.clone(),
-            claim.os.clone(),
-            claim.arch.clone(),
-            claim.suggested_name.clone(),
-        );
         let device_name = response.device_name.clone();
         let device_id = claim.device_id.clone();
+        let mut inner = self.inner.lock().await;
         if let Some(stored_claim) = inner.device_claims.get_mut(claim_token) {
             stored_claim.paired_response = Some(response);
         }
@@ -2186,24 +2225,43 @@ impl RelayState {
             return Err((StatusCode::BAD_REQUEST, "Missing required pairing fields."));
         }
 
-        let mut inner = self.inner.lock().await;
-        inner.prune_pairing_codes();
-        inner.prune_device_claims();
+        let pairing = {
+            let mut inner = self.inner.lock().await;
+            inner.prune_pairing_codes();
+            inner.prune_device_claims();
 
-        let pairing = inner
-            .pairing_codes
-            .remove(&code)
-            .ok_or((StatusCode::NOT_FOUND, "Pairing code is invalid or expired."))?;
+            inner
+                .pairing_codes
+                .remove(&code)
+                .ok_or((StatusCode::NOT_FOUND, "Pairing code is invalid or expired."))?
+        };
 
-        Ok(issue_device_pairing(
-            &mut inner,
-            pairing.owner_user_id,
-            request.device_id.trim().to_string(),
-            request.hostname.trim().to_string(),
-            request.os.trim().to_string(),
-            request.arch.trim().to_string(),
-            None,
-        ))
+        let (response, rollback, snapshot) = {
+            let mut inner = self.inner.lock().await;
+            let (response, rollback) = issue_device_pairing(
+                &mut inner,
+                pairing.owner_user_id,
+                request.device_id.trim().to_string(),
+                request.hostname.trim().to_string(),
+                request.os.trim().to_string(),
+                request.arch.trim().to_string(),
+                None,
+            );
+            let snapshot = build_persisted_relay_state(&inner);
+            (response, rollback, snapshot)
+        };
+
+        if let Err(err) = persist_devices_snapshot(snapshot).await {
+            warn!(error = %err, "failed to persist relay device state");
+            let mut inner = self.inner.lock().await;
+            rollback_device_pairing(&mut inner, rollback);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist device state.",
+            ));
+        }
+
+        Ok(response)
     }
 
     async fn poll_device_claim(
@@ -2298,7 +2356,7 @@ impl RelayState {
         user_id: &str,
         device_id: &str,
     ) -> std::result::Result<bool, (StatusCode, &'static str)> {
-        let (refresh_token, removed) = {
+        let (removed_device, snapshot) = {
             let mut inner = self.inner.lock().await;
             match inner.devices.get(device_id) {
                 Some(device) if device.owner_user_id == user_id => {}
@@ -2306,17 +2364,30 @@ impl RelayState {
                 None => return Ok(false),
             }
 
-            let refresh_token = inner
+            let removed_device = inner
                 .devices
                 .remove(device_id)
-                .map(|device| device.refresh_token)
-                .unwrap_or_default();
-            inner.refresh_tokens.remove(&refresh_token);
-            if let Err(err) = persist_devices_snapshot(&inner) {
-                warn!(error = %err, "failed to persist relay device state");
-            }
-            (refresh_token, true)
+                .expect("device should exist after ownership check");
+            inner.refresh_tokens.remove(&removed_device.refresh_token);
+            let snapshot = build_persisted_relay_state(&inner);
+            (removed_device, snapshot)
         };
+
+        if let Err(err) = persist_devices_snapshot(snapshot).await {
+            warn!(error = %err, "failed to persist relay device state");
+            let mut inner = self.inner.lock().await;
+            inner.refresh_tokens.insert(
+                removed_device.refresh_token.clone(),
+                removed_device.device_id.clone(),
+            );
+            inner
+                .devices
+                .insert(removed_device.device_id.clone(), removed_device);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to persist device state.",
+            ));
+        }
 
         let (bridge_closes, browser_closes, pending_requests, _) =
             self.disconnect_bridge_for_user(user_id, device_id).await;
@@ -2327,9 +2398,8 @@ impl RelayState {
             StatusCode::SERVICE_UNAVAILABLE,
             "Device disconnected.",
         );
-        let _ = refresh_token;
 
-        Ok(removed)
+        Ok(true)
     }
 
     async fn resolve_device_auth(&self, refresh_token: &str) -> Option<DeviceRecord> {
@@ -2824,6 +2894,28 @@ fn preferred_device_name(suggested_name: Option<String>, hostname: String) -> St
         .unwrap_or(hostname)
 }
 
+#[derive(Debug)]
+struct DevicePairingRollback {
+    device_id: String,
+    previous_device: Option<DeviceRecord>,
+    new_refresh_token: String,
+}
+
+fn rollback_device_pairing(inner: &mut RelayInner, rollback: DevicePairingRollback) {
+    inner.refresh_tokens.remove(&rollback.new_refresh_token);
+    if let Some(previous_device) = rollback.previous_device {
+        inner.refresh_tokens.insert(
+            previous_device.refresh_token.clone(),
+            previous_device.device_id.clone(),
+        );
+        inner
+            .devices
+            .insert(previous_device.device_id.clone(), previous_device);
+    } else {
+        inner.devices.remove(&rollback.device_id);
+    }
+}
+
 fn issue_device_pairing(
     inner: &mut RelayInner,
     owner_user_id: String,
@@ -2832,15 +2924,7 @@ fn issue_device_pairing(
     os: String,
     arch: String,
     suggested_name: Option<String>,
-) -> DevicePairResponse {
-    let previous_refresh_token = inner
-        .devices
-        .get(device_id.as_str())
-        .map(|device| device.refresh_token.clone());
-    if let Some(previous_refresh_token) = previous_refresh_token {
-        inner.refresh_tokens.remove(&previous_refresh_token);
-    }
-
+) -> (DevicePairResponse, DevicePairingRollback) {
     let access_token = Uuid::new_v4().to_string();
     let refresh_token = Uuid::new_v4().to_string();
     let device_name = preferred_device_name(suggested_name, hostname.clone());
@@ -2854,20 +2938,27 @@ fn issue_device_pairing(
         refresh_token: refresh_token.clone(),
     };
 
+    let previous_device = inner.devices.insert(device.device_id.clone(), device);
+    if let Some(previous_device) = previous_device.as_ref() {
+        inner.refresh_tokens.remove(&previous_device.refresh_token);
+    }
     inner
         .refresh_tokens
-        .insert(refresh_token.clone(), device.device_id.clone());
-    inner.devices.insert(device.device_id.clone(), device);
-    if let Err(err) = persist_devices_snapshot(inner) {
-        warn!(error = %err, "failed to persist relay device state");
-    }
+        .insert(refresh_token.clone(), device_id.clone());
 
-    DevicePairResponse {
-        access_token,
-        refresh_token,
-        expires_in: DEVICE_ACCESS_TOKEN_TTL_SECS,
-        device_name,
-    }
+    (
+        DevicePairResponse {
+            access_token,
+            refresh_token: refresh_token.clone(),
+            expires_in: DEVICE_ACCESS_TOKEN_TTL_SECS,
+            device_name,
+        },
+        DevicePairingRollback {
+            device_id,
+            previous_device,
+            new_refresh_token: refresh_token,
+        },
+    )
 }
 
 fn generate_pairing_code() -> String {
@@ -3681,9 +3772,13 @@ mod tests {
         inner
             .refresh_tokens
             .insert("refresh-token".to_string(), "device-123".to_string());
-        persist_devices_snapshot(&inner).expect("device state should persist");
+        persist_devices_snapshot(build_persisted_relay_state(&inner))
+            .await
+            .expect("device state should persist");
 
-        let loaded = RelayState::load_persisted();
+        let loaded = RelayState::load_persisted()
+            .await
+            .expect("persisted relay state should load");
         let loaded_inner = loaded.inner.lock().await;
         let loaded_device = loaded_inner
             .devices

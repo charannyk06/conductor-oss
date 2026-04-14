@@ -15,5 +15,5 @@ USER conductor
 WORKDIR /var/lib/conductor-relay
 ENV RELAY_STATE_FILE=/var/lib/conductor-relay/state.json
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD sh -ec 'target="${RELAY_BIND_ADDR:-0.0.0.0:8080}"; host="${target%:*}"; port="${target##*:}"; if [ -z "$host" ] || [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ] || [ "$host" = "[::]" ]; then host="127.0.0.1"; fi; curl -fsS "http://$host:$port/health" || exit 1'
 CMD ["conductor-relay"]
