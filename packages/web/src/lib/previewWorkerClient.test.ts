@@ -72,6 +72,8 @@ test("runCommand creates a remote session and posts the command to the worker", 
     calls.push(`${init?.method ?? "GET"} ${url}`);
 
     if (url.endsWith("/sessions") && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { clientSessionId?: string };
+      assert.equal(body.clientSessionId, "session-c");
       return new Response(JSON.stringify({ sessionId: "remote-1" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -139,6 +141,7 @@ test("configureBridgePreview forwards bridge relay metadata when creating a remo
 
   assert.ok(createBody);
   assert.deepEqual(createBody, {
+    clientSessionId: "session-bridge",
     bridgePreview: {
       bridgeId: "bridge-1",
       sessionId: "session-1",

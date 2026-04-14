@@ -26,6 +26,7 @@ type RemoteBridgePreviewConfig = BridgePreviewConfig & {
 };
 
 type CreatePreviewWorkerSessionPayload = {
+  clientSessionId: string;
   bridgePreview?: RemoteBridgePreviewConfig | null;
 };
 
@@ -281,6 +282,7 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
     }
 
     const payload: CreatePreviewWorkerSessionPayload = {
+      clientSessionId: sessionId,
       bridgePreview: this.bridgePreviewConfigs.get(sessionId) ?? null,
     };
 

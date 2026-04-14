@@ -95,6 +95,7 @@ export interface BridgePreviewSessionConfig {
 }
 
 export interface CreatePreviewSessionRequest {
+  clientSessionId?: string | null;
   bridgePreview?: BridgePreviewSessionConfig | null;
 }
 
@@ -123,6 +124,7 @@ export interface PreviewWorkerConfig {
 export interface PreviewSession {
   id: string;
   apiKey: string;
+  clientSessionId: string | null;
   createdAt: number;
   lastActivityAt: number;
   browser: Browser;
@@ -177,8 +179,15 @@ export function parseCreatePreviewSessionRequest(value: unknown): CreatePreviewS
   if (!isRecord(value)) {
     return null;
   }
+  const clientSessionId = value.clientSessionId;
+  if (clientSessionId !== undefined && clientSessionId !== null && typeof clientSessionId !== "string") {
+    return null;
+  }
+  const normalizedClientSessionId = typeof clientSessionId === "string" && clientSessionId.trim().length > 0
+    ? clientSessionId.trim()
+    : null;
   if (value.bridgePreview === undefined || value.bridgePreview === null) {
-    return { bridgePreview: null };
+    return { clientSessionId: normalizedClientSessionId, bridgePreview: null };
   }
   const bridgePreview = value.bridgePreview;
   if (!isRecord(bridgePreview)) {
@@ -195,6 +204,7 @@ export function parseCreatePreviewSessionRequest(value: unknown): CreatePreviewS
     return null;
   }
   return {
+    clientSessionId: normalizedClientSessionId,
     bridgePreview: {
       bridgeId: bridgePreview.bridgeId,
       sessionId: bridgePreview.sessionId,

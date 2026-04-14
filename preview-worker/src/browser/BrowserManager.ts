@@ -299,6 +299,16 @@ export class BrowserManager {
   }
 
   async createSession(apiKey: string, options: CreatePreviewSessionRequest = {}): Promise<PreviewSession> {
+    const clientSessionId = options.clientSessionId?.trim() || null;
+    if (clientSessionId) {
+      const existing = this.sessionStore.findByApiKeyAndClientSessionId(apiKey, clientSessionId);
+      if (existing) {
+        existing.lastActivityAt = Date.now();
+        existing.bridgePreview = options.bridgePreview ?? existing.bridgePreview;
+        return existing;
+      }
+    }
+
     if (this.sessionStore.countByApiKey(apiKey) >= this.config.maxSessions) {
       throw this.error(429, "Preview session limit exceeded for this API key.");
     }
@@ -318,6 +328,7 @@ export class BrowserManager {
     const session: PreviewSession = {
       id: randomUUID(),
       apiKey,
+      clientSessionId,
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       browser,
