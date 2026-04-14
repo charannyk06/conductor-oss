@@ -403,7 +403,7 @@ test("GET uses an explicit previewUrlHint for bridge sessions that did not repor
 
 test("POST clones the bridge request before preview lookup so body reuse does not poison status", async () => {
   resetEnv();
-  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  process.env.CONDUCTOR_BACKEND_URL = "https://api.example.com";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
   process.env.RELAY_JWT_SECRET = "preview-test-secret";
 
