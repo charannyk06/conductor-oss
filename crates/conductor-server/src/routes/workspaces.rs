@@ -108,22 +108,22 @@ async fn detect_branches(
     {
         let browse_roots = allowed_browse_roots(&state.workspace_path, &config);
         let expanded_path = expand_path(path, &state.workspace_path);
-        let candidate_path = if expanded_path.is_file() {
-            expanded_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or(expanded_path)
-        } else {
-            expanded_path
-        };
-        let Ok(allowed_path) = resolve_browse_path(&candidate_path, &browse_roots) else {
+        let Ok(allowed_path) = resolve_browse_path(&expanded_path, &browse_roots) else {
             return error(
                 StatusCode::FORBIDDEN,
                 "Access to this workspace path is not allowed",
             );
         };
+        let candidate_path = if allowed_path.is_file() {
+            allowed_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(allowed_path)
+        } else {
+            allowed_path
+        };
 
-        match detect_local_branches(&allowed_path).await {
+        match detect_local_branches(&candidate_path).await {
             Ok((branches, default_branch)) => {
                 return ok(json!({ "branches": branches, "defaultBranch": default_branch }));
             }
