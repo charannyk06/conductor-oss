@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { guardApiAccess } from "@/lib/auth";
-import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -10,11 +10,18 @@ export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
+function resolvePreviewManagerSessionId(sessionId: string, userId: string | null): string {
+  const normalizedUserId = userId?.trim().toLowerCase() || "anonymous-preview-user";
+  return `${normalizedUserId}:${sessionId}`;
+}
+
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const { id } = await context.params;
+  const access = await getDashboardAccess(request);
+  const managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -27,12 +34,12 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
 
   const manager = getPreviewBrowserManager();
   await manager.configureBridgePreview(
-    id,
+    managerSessionId,
     previewContext.bridgePreview,
     previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
   );
   try {
-    const screenshot = await manager.takeScreenshot(id);
+    const screenshot = await manager.takeScreenshot(managerSessionId);
     if (!screenshot) {
       return NextResponse.json({ error: "Preview is not connected" }, { status: 404 });
     }

@@ -211,7 +211,7 @@ function hostnameResolvesToPrivateAddress(hostname: string): boolean {
   return false;
 }
 
-async function assertSafeDirectNavigationTarget(value: string): Promise<void> {
+export async function assertSafeDirectNavigationTarget(value: string): Promise<void> {
   if (unsafePreviewHostsAllowed()) {
     return;
   }
@@ -481,12 +481,9 @@ class PreviewBrowserManager {
   private async syncRequestInterception(
     state: PreviewState,
     page: Page,
-    targetUrl?: string,
+    _targetUrl?: string,
   ): Promise<void> {
-    const shouldIntercept = resolvePreviewNavigationMode(
-      targetUrl ?? page.url(),
-      state.bridgePreview,
-    ) === "bridge";
+    const shouldIntercept = true;
     if (state.requestInterceptionEnabled === shouldIntercept) {
       return;
     }
@@ -495,12 +492,13 @@ class PreviewBrowserManager {
     state.requestInterceptionEnabled = shouldIntercept;
   }
 
-  private async handleBridgePreviewRequest(
+  private async handlePreviewRequest(
     state: PreviewState,
     request: HTTPRequest,
   ): Promise<void> {
     const bridgePreview = state.bridgePreview;
     if (!bridgePreview) {
+      await assertSafeDirectNavigationTarget(request.url());
       await request.continue();
       return;
     }
@@ -569,7 +567,7 @@ class PreviewBrowserManager {
         return;
       }
 
-      void this.handleBridgePreviewRequest(state, request).catch(async (error) => {
+      void this.handlePreviewRequest(state, request).catch(async (error) => {
         state.lastError = error instanceof Error ? error.message : "Bridge preview request failed";
         pushLog(state.networkLogs, {
           id: buildLogId("preview-request"),

@@ -130,7 +130,6 @@ async fn upload_attachments(
             .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
         uploaded.push(json!({
             "path": relative_path,
-            "absolutePath": file_path.to_string_lossy().to_string(),
             "name": file_name,
             "size": bytes.len(),
             "mimeType": content_type,

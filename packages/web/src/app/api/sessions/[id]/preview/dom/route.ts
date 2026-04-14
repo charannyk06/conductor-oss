@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { guardApiAccess } from "@/lib/auth";
-import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -10,11 +10,18 @@ export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
+function resolvePreviewManagerSessionId(sessionId: string, userId: string | null): string {
+  const normalizedUserId = userId?.trim().toLowerCase() || "anonymous-preview-user";
+  return `${normalizedUserId}:${sessionId}`;
+}
+
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const { id } = await context.params;
+  const access = await getDashboardAccess(request);
+  const managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -29,13 +36,13 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   const interactiveOnly = request.nextUrl.searchParams.get("interactiveOnly") === "1";
   const manager = getPreviewBrowserManager();
   await manager.configureBridgePreview(
-    id,
+    managerSessionId,
     previewContext.bridgePreview,
     previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
   );
 
   try {
-    const payload = await manager.inspectDom(id, frameId, interactiveOnly);
+    const payload = await manager.inspectDom(managerSessionId, frameId, interactiveOnly);
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json(
