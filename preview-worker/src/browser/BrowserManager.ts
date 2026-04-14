@@ -592,7 +592,12 @@ export class BrowserManager {
   }
 
   private shouldResetTunnel(targetUrl: string, error: unknown): boolean {
-    if (!targetUrl.includes(".trycloudflare.com")) {
+    try {
+      const hostname = new URL(targetUrl).hostname.toLowerCase();
+      if (!hostname.endsWith(".trycloudflare.com")) {
+        return false;
+      }
+    } catch {
       return false;
     }
 
