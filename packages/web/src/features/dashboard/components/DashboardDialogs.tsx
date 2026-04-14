@@ -259,6 +259,7 @@ type PreferencesPayload = {
   ide: string;
   markdownEditor: string;
   markdownEditorPath: string;
+  filesystemBrowseRoots: string[];
   modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
@@ -426,6 +427,12 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const markdownEditorPath = typeof payload["markdownEditorPath"] === "string"
     ? payload["markdownEditorPath"].trim()
     : "";
+  const filesystemBrowseRoots = Array.isArray(payload["filesystemBrowseRoots"])
+    ? payload["filesystemBrowseRoots"]
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
 
   return {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
@@ -433,6 +440,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     ide,
     markdownEditor,
     markdownEditorPath,
+    filesystemBrowseRoots,
     modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -2157,6 +2165,7 @@ export function SettingsDialog({
   const [ide, setIde] = useState(current.ide);
   const [markdownEditor, setMarkdownEditor] = useState(current.markdownEditor);
   const [markdownEditorPath, setMarkdownEditorPath] = useState<string>(current.markdownEditorPath ?? "");
+  const [filesystemBrowseRootsInput, setFilesystemBrowseRootsInput] = useState(() => current.filesystemBrowseRoots.join("\n"));
   const [modelAccess, setModelAccess] = useState<ModelAccessPreferences>(current.modelAccess);
   const [soundEnabled, setSoundEnabled] = useState(current.notifications.soundEnabled);
   const [soundFile, setSoundFile] = useState<string | null>(current.notifications.soundFile);
@@ -2172,6 +2181,7 @@ export function SettingsDialog({
   const [repositoryBranchesError, setRepositoryBranchesError] = useState<string | null>(null);
   const [repositoryFolderPickerOpen, setRepositoryFolderPickerOpen] = useState(false);
   const [notesFolderPickerOpen, setNotesFolderPickerOpen] = useState(false);
+  const [filesystemRootPickerOpen, setFilesystemRootPickerOpen] = useState(false);
   const [accessSettings, setAccessSettings] = useState<AccessSettingsPayload>(() => normalizeAccessSettings(null));
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessSaving, setAccessSaving] = useState(false);
@@ -2455,6 +2465,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setIde(current.ide);
     setMarkdownEditor(current.markdownEditor);
     setMarkdownEditorPath(current.markdownEditorPath ?? "");
+    setFilesystemBrowseRootsInput(current.filesystemBrowseRoots.join("\n"));
     setModelAccess(current.modelAccess);
     setSoundEnabled(current.notifications.soundEnabled);
     setSoundFile(current.notifications.soundFile);
@@ -2632,6 +2643,10 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     const resolvedSoundFile = soundEnabled
       ? soundFile ?? NOTIFICATION_SOUND_OPTIONS[0]?.id ?? "abstract-sound-4"
       : null;
+    const filesystemBrowseRoots = filesystemBrowseRootsInput
+      .split(/\n+/g)
+      .map((value) => value.trim())
+      .filter(Boolean);
 
     return {
       onboardingAcknowledged: acknowledgeOnboarding ? true : current.onboardingAcknowledged,
@@ -2639,6 +2654,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       ide: ide.trim(),
       markdownEditor: markdownEditor.trim(),
       markdownEditorPath: (markdownEditorPath ?? "").trim(),
+      filesystemBrowseRoots,
       modelAccess,
       notifications: {
         soundEnabled,
@@ -2689,7 +2705,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       <div
         className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center"
         onClick={() => {
-          if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen) return;
+          if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen || filesystemRootPickerOpen) return;
           onClose();
         }}
         role="presentation"
@@ -2983,6 +2999,42 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                             </label>
                           </div>
                         )}
+                        <div className="rounded-[4px] border border-[var(--vk-border)] px-3 py-3">
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                              Extra Filesystem Roots
+                            </span>
+                            <textarea
+                              value={filesystemBrowseRootsInput}
+                              onChange={(event) => setFilesystemBrowseRootsInput(event.target.value)}
+                              placeholder={"One absolute path per line\n/Applications\n/Users/Shared\n/mnt/projects"}
+                              rows={5}
+                              className="w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setFilesystemRootPickerOpen(true)}
+                                disabled={isBusy}
+                                className="inline-flex h-9 items-center gap-1 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                              >
+                                <FolderOpen className="h-4 w-4" />
+                                Add folder
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setFilesystemBrowseRootsInput("")}
+                                disabled={isBusy || filesystemBrowseRootsInput.trim().length === 0}
+                                className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                              >
+                                Clear list
+                              </button>
+                            </div>
+                            <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                              Conductor already includes sensible defaults for each OS. Add extra roots here when you want the folder picker to expose more locations on macOS, Linux, or Windows.
+                            </p>
+                          </label>
+                        </div>
                       </section>
 
                       <section className="space-y-2">
@@ -3905,6 +3957,27 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
           setNotesFolderPickerOpen(false);
           if (selectedPath === null) return;
           setMarkdownEditorPath(selectedPath);
+        }}
+      />
+      <FolderPickerDialog
+        open={filesystemRootPickerOpen}
+        bridgeId={bridgeId}
+        title="Add Filesystem Root"
+        description="Choose an extra folder root that should stay visible in the filesystem browser on this machine."
+        onClose={() => setFilesystemRootPickerOpen(false)}
+        onSelect={(selectedPath) => {
+          setFilesystemRootPickerOpen(false);
+          if (selectedPath === null) return;
+          setFilesystemBrowseRootsInput((currentValue) => {
+            const existing = currentValue
+              .split(/\n+/g)
+              .map((value) => value.trim())
+              .filter(Boolean);
+            if (existing.includes(selectedPath)) {
+              return existing.join("\n");
+            }
+            return [...existing, selectedPath].join("\n");
+          });
         }}
       />
     </>

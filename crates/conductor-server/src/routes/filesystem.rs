@@ -2,6 +2,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use conductor_core::config::ConductorConfig;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ async fn read_directory(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectoryQuery>,
 ) -> ApiResponse {
+    let config = state.config.read().await.clone();
+    let browse_roots = allowed_browse_roots(&state.workspace_path, &config);
     let requested = query
         .path
         .as_deref()
@@ -52,7 +55,7 @@ async fn read_directory(
         return error(StatusCode::NOT_FOUND, "Directory not found");
     }
 
-    let Ok(current_path) = resolve_browse_path(&current_path, &state.workspace_path) else {
+    let Ok(current_path) = resolve_browse_path(&current_path, &browse_roots) else {
         return error(
             StatusCode::FORBIDDEN,
             "Access to this directory is not allowed",
@@ -71,18 +74,17 @@ async fn read_directory(
                     let path = entry.path();
                     let file_type = entry.file_type().ok();
                     let resolved_path = resolved_entry_path(&path, file_type.as_ref());
-
-                    if let Some(resolved_path) = resolved_path.as_deref() {
-                        if !is_within_allowed_roots(resolved_path, &state.workspace_path) {
-                            return None;
-                        }
-                    }
-
                     let is_directory = resolved_path
                         .as_deref()
                         .map(Path::is_dir)
                         .or_else(|| file_type.as_ref().map(|value| value.is_dir()))
                         .unwrap_or(false);
+                    let access_path = resolved_path.as_deref().unwrap_or(path.as_path());
+
+                    if !is_visible_entry(access_path, is_directory, &browse_roots) {
+                        return None;
+                    }
+
                     Some(json!({
                         "name": entry.file_name().to_string_lossy().to_string(),
                         "path": path.to_string_lossy().to_string(),
@@ -129,14 +131,18 @@ fn resolve_user_home_dir() -> Option<PathBuf> {
 }
 
 /// Allowed root directories for filesystem browsing.
-fn allowed_browse_roots() -> Vec<PathBuf> {
+fn allowed_browse_roots(workspace_path: &Path, config: &ConductorConfig) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = resolve_user_home_dir() {
         roots.push(home);
     }
-    // On macOS, /Volumes is common for external drives.
+    roots.push(workspace_path.to_path_buf());
+    // On macOS, /Users and /Volumes are the common local roots users expect to browse.
     #[cfg(target_os = "macos")]
-    roots.push(PathBuf::from("/Volumes"));
+    {
+        roots.push(PathBuf::from("/Users"));
+        roots.push(PathBuf::from("/Volumes"));
+    }
     // On Linux, common project locations.
     #[cfg(target_os = "linux")]
     {
@@ -152,16 +158,38 @@ fn allowed_browse_roots() -> Vec<PathBuf> {
             }
         }
     }
-    roots
+    roots.extend(
+        config
+            .preferences
+            .filesystem_browse_roots
+            .iter()
+            .map(|value| expand_path(value, workspace_path)),
+    );
+    dedupe_browse_roots(roots)
+}
+
+fn dedupe_browse_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for root in roots {
+        if root.as_os_str().is_empty() {
+            continue;
+        }
+        let canonical = canonicalize_for_access(&root);
+        if deduped.iter().any(|existing| existing == &canonical) {
+            continue;
+        }
+        deduped.push(canonical);
+    }
+    deduped
 }
 
 fn canonicalize_for_access(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn resolve_browse_path(path: &Path, workspace_path: &Path) -> Result<PathBuf, ()> {
+fn resolve_browse_path(path: &Path, browse_roots: &[PathBuf]) -> Result<PathBuf, ()> {
     let resolved = std::fs::canonicalize(path).map_err(|_| ())?;
-    is_within_allowed_roots(&resolved, workspace_path)
+    is_browsable_directory(&resolved, browse_roots)
         .then_some(resolved)
         .ok_or(())
 }
@@ -172,21 +200,36 @@ fn resolved_entry_path(path: &Path, file_type: Option<&std::fs::FileType>) -> Op
         .and_then(|_| std::fs::canonicalize(path).ok())
 }
 
-fn is_within_allowed_roots(path: &Path, workspace_path: &Path) -> bool {
+fn is_path_within_root(path: &Path, root: &Path) -> bool {
     let path = canonicalize_for_access(path);
-    let workspace_path = canonicalize_for_access(workspace_path);
+    let root = canonicalize_for_access(root);
+    path.starts_with(root)
+}
 
-    // Always allow workspace path itself.
-    if path.starts_with(workspace_path) {
-        return true;
+fn is_path_ancestor_of_root(path: &Path, root: &Path) -> bool {
+    let path = canonicalize_for_access(path);
+    let root = canonicalize_for_access(root);
+    root.starts_with(path)
+}
+
+fn is_browsable_directory(path: &Path, browse_roots: &[PathBuf]) -> bool {
+    browse_roots
+        .iter()
+        .any(|root| is_path_within_root(path, root) || is_path_ancestor_of_root(path, root))
+}
+
+fn is_browsable_file(path: &Path, browse_roots: &[PathBuf]) -> bool {
+    browse_roots
+        .iter()
+        .any(|root| is_path_within_root(path, root))
+}
+
+fn is_visible_entry(path: &Path, is_directory: bool, browse_roots: &[PathBuf]) -> bool {
+    if is_directory {
+        is_browsable_directory(path, browse_roots)
+    } else {
+        is_browsable_file(path, browse_roots)
     }
-
-    // Check against allowed roots.
-    let roots = allowed_browse_roots();
-    roots
-        .into_iter()
-        .map(|root| canonicalize_for_access(&root))
-        .any(|root| path.starts_with(root))
 }
 
 fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
@@ -255,7 +298,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_within_allowed_roots, resolve_browse_path};
+    use super::{is_browsable_directory, is_browsable_file, is_visible_entry, resolve_browse_path};
     use std::fs;
 
     #[test]
@@ -267,10 +310,10 @@ mod tests {
         fs::create_dir_all(&workspace_path).unwrap();
         fs::create_dir_all(&outside_path).unwrap();
 
-        let traversal_path = workspace_path.join("..").join("outside");
+        let browse_roots = vec![workspace_path.clone()];
 
-        assert!(is_within_allowed_roots(&workspace_path, &workspace_path));
-        assert!(!is_within_allowed_roots(&traversal_path, &workspace_path));
+        assert!(is_browsable_directory(&workspace_path, &browse_roots));
+        assert!(!is_browsable_directory(&outside_path, &browse_roots));
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -289,8 +332,48 @@ mod tests {
         fs::create_dir_all(&outside_path).unwrap();
         symlink(&outside_path, &symlink_path).unwrap();
 
-        assert!(resolve_browse_path(&workspace_path, &workspace_path).is_ok());
-        assert!(resolve_browse_path(&symlink_path, &workspace_path).is_err());
+        let browse_roots = vec![workspace_path.clone()];
+
+        assert!(resolve_browse_path(&workspace_path, &browse_roots).is_ok());
+        assert!(resolve_browse_path(&symlink_path, &browse_roots).is_err());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn browse_path_allows_ancestor_directories_of_configured_roots() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let allowed_root = root.join("Users").join("charann");
+        fs::create_dir_all(&allowed_root).unwrap();
+
+        let browse_roots = vec![allowed_root.clone()];
+
+        assert!(resolve_browse_path(&root, &browse_roots).is_ok());
+        assert!(resolve_browse_path(&root.join("Users"), &browse_roots).is_ok());
+        assert!(resolve_browse_path(&allowed_root, &browse_roots).is_ok());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn visible_entries_hide_unreachable_directories_but_keep_ancestors() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let allowed_root = root.join("Users").join("charann");
+        let blocked_root = root.join("Applications");
+        let file_path = allowed_root.join("notes.txt");
+        fs::create_dir_all(&allowed_root).unwrap();
+        fs::create_dir_all(&blocked_root).unwrap();
+        fs::write(&file_path, "ok").unwrap();
+
+        let browse_roots = vec![allowed_root.clone()];
+
+        assert!(is_visible_entry(&root.join("Users"), true, &browse_roots));
+        assert!(is_visible_entry(&allowed_root, true, &browse_roots));
+        assert!(!is_visible_entry(&blocked_root, true, &browse_roots));
+        assert!(is_visible_entry(&file_path, false, &browse_roots));
+        assert!(!is_browsable_file(&blocked_root.join("app"), &browse_roots));
 
         fs::remove_dir_all(&root).unwrap();
     }

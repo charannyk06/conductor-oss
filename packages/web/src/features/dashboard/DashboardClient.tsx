@@ -398,6 +398,7 @@ type PreferencesPayload = {
   ide: string;
   markdownEditor: string;
   markdownEditorPath: string;
+  filesystemBrowseRoots: string[];
   modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
@@ -571,6 +572,12 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const markdownEditorPath = typeof payload["markdownEditorPath"] === "string"
     ? payload["markdownEditorPath"].trim()
     : "";
+  const filesystemBrowseRoots = Array.isArray(payload["filesystemBrowseRoots"])
+    ? payload["filesystemBrowseRoots"]
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
 
   return {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
@@ -578,6 +585,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     ide,
     markdownEditor,
     markdownEditorPath,
+    filesystemBrowseRoots,
     modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
