@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { guardApiAccess } from "@/lib/auth";
-import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
+import {
+  normalizePreviewBridgeSetupError,
+  resolvePreviewManagerSessionId,
+} from "@/lib/previewManagerSession";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
 
 export const runtime = "nodejs";
@@ -15,6 +19,14 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   if (denied) return denied;
 
   const { id } = await context.params;
+  const access = await getDashboardAccess(request);
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -26,13 +38,19 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   }
 
   const manager = getPreviewBrowserManager();
-  await manager.configureBridgePreview(
-    id,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
   try {
-    const screenshot = await manager.takeScreenshot(id);
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
+
+  try {
+    const screenshot = await manager.takeScreenshot(managerSessionId);
     if (!screenshot) {
       return NextResponse.json({ error: "Preview is not connected" }, { status: 404 });
     }

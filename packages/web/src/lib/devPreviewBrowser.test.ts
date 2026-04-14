@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertSafeDirectNavigationTarget,
   buildPreviewNavigationCandidates,
   isPrivateNetworkHostname,
   resolvePreviewNavigationMode,
@@ -25,6 +26,17 @@ test("buildPreviewNavigationCandidates rejects non-http schemes", () => {
     () => buildPreviewNavigationCandidates("javascript://localhost/%0aalert(1)"),
     /only http and https URLs are allowed/,
   );
+});
+
+test("assertSafeDirectNavigationTarget blocks private network requests", async () => {
+  await assert.rejects(
+    () => assertSafeDirectNavigationTarget("http://192.168.1.20/private"),
+    /private network/,
+  );
+});
+
+test("assertSafeDirectNavigationTarget allows public http requests", async () => {
+  await assertSafeDirectNavigationTarget("https://preview.example.com/app");
 });
 
 test("resolvePreviewNavigationMode bridges allowed local origins and keeps remote urls direct", () => {

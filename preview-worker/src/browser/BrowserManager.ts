@@ -53,20 +53,29 @@ const RETRYABLE_TUNNEL_ERROR_MARKERS = [
   "ERR_SSL_PROTOCOL_ERROR",
   "ERR_TUNNEL_CONNECTION_FAILED",
 ] as const;
-const CHROME_ARGS = [
-  "--disable-dev-shm-usage",
-  "--disable-background-networking",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--disable-extensions",
-  "--disable-default-apps",
-  "--disable-sync",
-  "--disable-translate",
-  "--hide-scrollbars",
-  "--mute-audio",
-  "--no-sandbox",
-  "--disable-setuid-sandbox",
-];
+
+function sandboxDisabled(): boolean {
+  return process.env.CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX?.trim().toLowerCase() !== "false";
+}
+
+export function buildChromeArgs(): string[] {
+  const args = [
+    "--disable-dev-shm-usage",
+    "--disable-background-networking",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-extensions",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--disable-translate",
+    "--hide-scrollbars",
+    "--mute-audio",
+  ];
+  if (sandboxDisabled()) {
+    args.push("--no-sandbox", "--disable-setuid-sandbox");
+  }
+  return args;
+}
 
 function commandExists(command: string): string | null {
   const checker = process.platform === "win32" ? "where" : "which";
@@ -338,7 +347,7 @@ export class BrowserManager {
       headless: true,
       executablePath: this.config.chromePath,
       defaultViewport: VIEWPORT,
-      args: CHROME_ARGS,
+      args: buildChromeArgs(),
     });
 
     const page = await browser.newPage();
@@ -507,9 +516,10 @@ export class BrowserManager {
         targetUrl = navigationMode === "bridge"
           ? candidate
           : await this.resolveNavigationTarget(session, candidate);
-        await this.syncRequestInterception(session, navigationMode === "bridge");
+        await this.syncRequestInterception(session, true);
         await session.page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-        await this.syncRequestInterception(session, navigationMode === "bridge");
+        await this.syncRequestInterception(session, true);
+
         session.selectedElement = null;
         session.lastError = null;
         session.activeFrameId = this.ensureFrameId(session, session.page.mainFrame());
@@ -742,6 +752,7 @@ export class BrowserManager {
   ): Promise<void> {
     const bridgePreview = session.bridgePreview;
     if (!bridgePreview) {
+      await assertSafeDirectNavigationTarget(request.url());
       await request.continue();
       return;
     }
@@ -785,12 +796,13 @@ export class BrowserManager {
   }
 
   private async syncRequestInterception(session: PreviewSession, enabled: boolean): Promise<void> {
-    if (session.requestInterceptionEnabled === enabled) {
+    const shouldIntercept = enabled || true;
+    if (session.requestInterceptionEnabled === shouldIntercept) {
       return;
     }
 
-    await session.page.setRequestInterception(enabled);
-    session.requestInterceptionEnabled = enabled;
+    await session.page.setRequestInterception(shouldIntercept);
+    session.requestInterceptionEnabled = shouldIntercept;
   }
 
   private collectFrames(session: PreviewSession): PreviewFrameInfo[] {

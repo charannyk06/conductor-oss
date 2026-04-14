@@ -131,33 +131,15 @@ fn resolve_user_home_dir() -> Option<PathBuf> {
 }
 
 /// Allowed root directories for filesystem browsing.
-fn allowed_browse_roots(workspace_path: &Path, config: &ConductorConfig) -> Vec<PathBuf> {
+pub(crate) fn allowed_browse_roots(
+    workspace_path: &Path,
+    config: &ConductorConfig,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = resolve_user_home_dir() {
         roots.push(home);
     }
     roots.push(workspace_path.to_path_buf());
-    // On macOS, /Users and /Volumes are the common local roots users expect to browse.
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from("/Users"));
-        roots.push(PathBuf::from("/Volumes"));
-    }
-    // On Linux, common project locations.
-    #[cfg(target_os = "linux")]
-    {
-        roots.push(PathBuf::from("/home"));
-        roots.push(PathBuf::from("/opt"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        for drive_letter in b'A'..=b'Z' {
-            let drive_root = PathBuf::from(format!("{}:\\", drive_letter as char));
-            if drive_root.exists() {
-                roots.push(drive_root);
-            }
-        }
-    }
     roots.extend(
         config
             .preferences
@@ -187,7 +169,7 @@ fn canonicalize_for_access(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn resolve_browse_path(path: &Path, browse_roots: &[PathBuf]) -> Result<PathBuf, ()> {
+pub(crate) fn resolve_browse_path(path: &Path, browse_roots: &[PathBuf]) -> Result<PathBuf, ()> {
     let resolved = std::fs::canonicalize(path).map_err(|_| ())?;
     is_browsable_directory(&resolved, browse_roots)
         .then_some(resolved)
@@ -232,7 +214,7 @@ fn is_visible_entry(path: &Path, is_directory: bool, browse_roots: &[PathBuf]) -
     }
 }
 
-fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
+pub(crate) fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
     if let Some(stripped) = value.strip_prefix("~/") {
         if let Some(home) = resolve_user_home_dir() {
             return home.join(stripped);
@@ -298,7 +280,11 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_browsable_directory, is_browsable_file, is_visible_entry, resolve_browse_path};
+    use super::{
+        allowed_browse_roots, is_browsable_directory, is_browsable_file, is_visible_entry,
+        resolve_browse_path,
+    };
+    use conductor_core::config::ConductorConfig;
     use std::fs;
 
     #[test]
@@ -374,6 +360,33 @@ mod tests {
         assert!(!is_visible_entry(&blocked_root, true, &browse_roots));
         assert!(is_visible_entry(&file_path, false, &browse_roots));
         assert!(!is_browsable_file(&blocked_root.join("app"), &browse_roots));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_browse_roots_do_not_include_system_wide_roots() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        let roots = allowed_browse_roots(&workspace_path, &ConductorConfig::default());
+        let canonical_workspace = std::fs::canonicalize(&workspace_path).unwrap();
+
+        assert!(roots.iter().any(|entry| entry == &canonical_workspace));
+        assert!(!roots
+            .iter()
+            .any(|entry| entry == std::path::Path::new("/Users")));
+        assert!(!roots
+            .iter()
+            .any(|entry| entry == std::path::Path::new("/Volumes")));
+        assert!(!roots
+            .iter()
+            .any(|entry| entry == std::path::Path::new("/home")));
+        assert!(!roots
+            .iter()
+            .any(|entry| entry == std::path::Path::new("/opt")));
 
         fs::remove_dir_all(&root).unwrap();
     }

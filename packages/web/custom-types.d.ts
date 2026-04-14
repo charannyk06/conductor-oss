@@ -22,6 +22,9 @@ type AppRouteHandlerRoutes =
   | "/api/health/sessions"
   | "/api/notifications"
   | "/api/preferences"
+  | "/api/project-notes"
+  | "/api/project-notes/file"
+  | "/api/project-notes/open"
   | "/api/repositories"
   | "/api/repositories/[id]"
   | "/api/sessions"
@@ -67,6 +70,9 @@ interface ParamMap {
   "/api/health/sessions": {}
   "/api/notifications": {}
   "/api/preferences": {}
+  "/api/project-notes": {}
+  "/api/project-notes/file": {}
+  "/api/project-notes/open": {}
   "/api/repositories": {}
   "/api/repositories/[id]": { "id": string; }
   "/api/sessions": {}

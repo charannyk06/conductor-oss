@@ -109,7 +109,7 @@ const DEFAULT_DISPATCHER_PANEL_WIDTH = 405;
 const MIN_DISPATCHER_PANEL_WIDTH = 320;
 const MAX_DISPATCHER_PANEL_WIDTH = 720;
 const DISPATCHER_PANEL_WIDTH_STORAGE_KEY = "conductor-board-dispatcher-panel-width";
-type DashboardWorkspaceView = "direct" | "board";
+type DashboardWorkspaceView = "direct" | "board" | "notes";
 type BoardMobilePane = "board" | "chat";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
@@ -119,6 +119,7 @@ function normalizeDashboardQueryValue(value: string | null): string | null {
 
 function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
   if (value === "board") return "board";
+  if (value === "notes") return "notes";
   return "direct";
 }
 
@@ -183,6 +184,17 @@ const ProjectDispatcherPanel = dynamic(
     loading: () => (
       <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
         Loading dispatcher...
+      </div>
+    ),
+  },
+);
+
+const ProjectNotesWorkspace = dynamic(
+  () => import("@/components/notes/ProjectNotesWorkspace").then((mod) => mod.ProjectNotesWorkspace),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading notes workspace...
       </div>
     ),
   },
@@ -1289,6 +1301,8 @@ export default function DashboardClient({
     if ("workspaceView" in updates) {
       if (updates.workspaceView === "board") {
         params.set("view", "board");
+      } else if (updates.workspaceView === "notes") {
+        params.set("view", "notes");
       } else {
         params.delete("view");
       }
@@ -1433,16 +1447,20 @@ export default function DashboardClient({
   }, [dockedBoardSession, searchParams]);
   const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
   const topBarTitle = useMemo(() => {
+    if (selectedProject && (workspaceView === "board" || workspaceView === "notes")) {
+      return [selectedProject.id, selectedProject.defaultBranch || "main"].filter(Boolean).join(" · ");
+    }
+
     if (selectedSession) {
-      return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
+      return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" · ");
     }
 
     if (selectedProject) {
-      return [selectedProject.id, selectedProject.defaultBranch || "main"].filter(Boolean).join(" \u00b7 ");
+      return [selectedProject.id, selectedProject.defaultBranch || "main"].filter(Boolean).join(" · ");
     }
 
     return "All Projects";
-  }, [selectedProject, selectedSession]);
+  }, [selectedProject, selectedSession, workspaceView]);
   const activeBridge = useMemo(
     () => effectiveBridgeId
       ? bridges.find((bridge) => bridge.bridgeId === effectiveBridgeId) ?? null
@@ -2034,9 +2052,10 @@ export default function DashboardClient({
 
   const workspaceMainPanel = useMemo(() => {
     const projectViewToggle = selectedProject ? (
-      <div className="hidden w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:inline-flex">
+      <div role="group" aria-label="Project workspace view" className="hidden w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:inline-flex">
         <button
           type="button"
+          aria-pressed={workspaceView === "direct"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "direct"
@@ -2048,6 +2067,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "board"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "board"
@@ -2056,6 +2076,18 @@ export default function DashboardClient({
           }`}
         >
           Board view
+        </button>
+        <button
+          type="button"
+          aria-pressed={workspaceView === "notes"}
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "notes" }, "replace")}
+          className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
+            workspaceView === "notes"
+              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Notes
         </button>
       </div>
     ) : null;
@@ -2071,6 +2103,17 @@ export default function DashboardClient({
           projectLabel={selectedProject?.id ?? selectedProjectId}
           headerAccessory={projectViewToggle}
           onOpenSession={handleSelectSession}
+        />
+      );
+    }
+
+    if (workspaceView === "notes" && selectedProjectId) {
+      return (
+        <ProjectNotesWorkspace
+          projectId={selectedProjectId}
+          bridgeId={effectiveBridgeId}
+          sessions={selectedProjectSessions}
+          selectedSessionId={selectedSessionId}
         />
       );
     }
@@ -2140,9 +2183,10 @@ export default function DashboardClient({
       fullWidth?: boolean;
       compact?: boolean;
     } = {}) => (
-      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
+      <div role="group" aria-label="Project workspace view" className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
         <button
           type="button"
+          aria-pressed={workspaceView === "direct"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
           className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "direct"
@@ -2154,6 +2198,7 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
+          aria-pressed={workspaceView === "board"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
           className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "board"
@@ -2162,6 +2207,18 @@ export default function DashboardClient({
           }`}
         >
           Board view
+        </button>
+        <button
+          type="button"
+          aria-pressed={workspaceView === "notes"}
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "notes" }, "replace")}
+          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
+            workspaceView === "notes"
+              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Notes
         </button>
       </div>
     );
@@ -2388,7 +2445,7 @@ export default function DashboardClient({
       );
     }
 
-    if (selectedSessionId && !(workspaceView === "board" && selectedProjectId !== null)) {
+    if (selectedSessionId && !(selectedProjectId !== null && (workspaceView === "board" || workspaceView === "notes"))) {
       return (
         <div className="relative min-h-0 h-full min-w-0 flex-1 overflow-hidden">
           {mountedSessionIds.map((sessionId) => {

@@ -13,6 +13,7 @@ pub mod github;
 pub mod health;
 pub mod middleware;
 pub mod notifications;
+pub mod project_notes;
 pub mod projects;
 pub mod repositories;
 pub mod session_workspace;

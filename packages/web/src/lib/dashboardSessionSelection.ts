@@ -8,7 +8,7 @@ export type DashboardSessionSelectionTab =
   | "dispatcher"
   | "terminal";
 
-export type DashboardSessionSelectionView = "direct" | "board";
+export type DashboardSessionSelectionView = "direct" | "board" | "notes";
 
 type SessionSelectionTarget = Pick<DashboardSession, "projectId" | "metadata"> | null | undefined;
 
@@ -30,7 +30,7 @@ export function buildDashboardSessionSelection(
     tab: requestedTab ?? getDefaultSessionPrimaryTab(session),
   };
 
-  if (currentWorkspaceView === "board") {
+  if (currentWorkspaceView === "board" || currentWorkspaceView === "notes") {
     return {
       ...selection,
       workspaceView: "direct",

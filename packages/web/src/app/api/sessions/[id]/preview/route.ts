@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
+import {
+  normalizePreviewBridgeSetupError,
+  resolvePreviewManagerSessionId,
+} from "@/lib/previewManagerSession";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
 import { TERMINAL_STATUSES } from "@/lib/types";
 import type { PreviewCommandRequest, PreviewStatusResponse } from "@/lib/previewTypes";
@@ -47,6 +51,14 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   if (denied) return denied;
 
   const { id } = await context.params;
+  const access = await getDashboardAccess(request);
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
@@ -56,30 +68,36 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   });
   const manager = getPreviewBrowserManager();
   if (!previewContext.session && !previewContext.error) {
-    await manager.destroySession(id);
+    await manager.destroySession(managerSessionId);
     const status = withLookupError(
-      await manager.getStatus(id, []),
+      await manager.getStatus(managerSessionId, []),
       MISSING_SESSION_PREVIEW_ERROR,
     );
     return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
   }
 
   if (previewContext.session && TERMINAL_STATUSES.has(previewContext.session.status)) {
-    await manager.destroySession(id);
+    await manager.destroySession(managerSessionId);
     const status = withLookupError(
-      await manager.getStatus(id, previewContext.candidateUrls),
+      await manager.getStatus(managerSessionId, previewContext.candidateUrls),
       previewContext.error,
     );
     return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
   }
 
-  await manager.configureBridgePreview(
-    id,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
+  try {
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
+
   const status = withLookupError(
-    await manager.getStatus(id, previewContext.candidateUrls),
+    await manager.getStatus(managerSessionId, previewContext.candidateUrls),
     previewContext.error,
   );
   return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
@@ -92,6 +110,14 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   if (deniedAction) return deniedAction;
 
   const { id } = await context.params;
+  const access = await getDashboardAccess(request);
+  let managerSessionId: string;
+  try {
+    managerSessionId = resolvePreviewManagerSessionId(id, resolveBridgeRelayUserId(access));
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   let body: PreviewCommandRequest;
   try {
@@ -109,26 +135,31 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   });
   const manager = getPreviewBrowserManager();
   if (!previewContext.session && !previewContext.error) {
-    await manager.destroySession(id);
+    await manager.destroySession(managerSessionId);
     return NextResponse.json({ error: MISSING_SESSION_PREVIEW_ERROR }, { status: 404 });
   }
 
-  await manager.configureBridgePreview(
-    id,
-    previewContext.bridgePreview,
-    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
-  );
+  try {
+    await manager.configureBridgePreview(
+      managerSessionId,
+      previewContext.bridgePreview,
+      previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+    );
+  } catch (error) {
+    const { status, message } = normalizePreviewBridgeSetupError(error);
+    return NextResponse.json({ error: message }, { status });
+  }
 
   try {
-    await manager.runCommand(id, body);
+    await manager.runCommand(managerSessionId, body);
     const status = withLookupError(
-      await manager.getStatus(id, previewContext.candidateUrls),
+      await manager.getStatus(managerSessionId, previewContext.candidateUrls),
       previewContext.error,
     );
     return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = withLookupError(
-      await manager.getStatus(id, previewContext.candidateUrls),
+      await manager.getStatus(managerSessionId, previewContext.candidateUrls),
       previewContext.error,
     );
     return NextResponse.json(

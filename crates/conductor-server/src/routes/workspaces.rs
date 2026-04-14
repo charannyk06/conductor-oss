@@ -7,12 +7,14 @@ use conductor_core::{sync_project_local_config, sync_support_files_for_directory
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::info;
 
+use crate::routes::filesystem::{allowed_browse_roots, expand_path, resolve_browse_path};
 use crate::state::AppState;
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -93,14 +95,35 @@ async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
     ok(json!({ "workspaces": projects }))
 }
 
-async fn detect_branches(Query(query): Query<BranchQuery>) -> ApiResponse {
+async fn detect_branches(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BranchQuery>,
+) -> ApiResponse {
+    let config = state.config.read().await.clone();
     if let Some(path) = query
         .path
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        match detect_local_branches(Path::new(path)).await {
+        let browse_roots = allowed_browse_roots(&state.workspace_path, &config);
+        let expanded_path = expand_path(path, &state.workspace_path);
+        let Ok(allowed_path) = resolve_browse_path(&expanded_path, &browse_roots) else {
+            return error(
+                StatusCode::FORBIDDEN,
+                "Access to this workspace path is not allowed",
+            );
+        };
+        let candidate_path = if allowed_path.is_file() {
+            allowed_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(allowed_path)
+        } else {
+            allowed_path
+        };
+
+        match detect_local_branches(&candidate_path).await {
             Ok((branches, default_branch)) => {
                 return ok(json!({ "branches": branches, "defaultBranch": default_branch }));
             }
@@ -377,6 +400,60 @@ fn repo_name_from_url(value: &str) -> Option<&str> {
         .filter(|segment| !segment.is_empty())
 }
 
+fn host_targets_private_network(host: &str) -> bool {
+    let normalized = host
+        .trim()
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+    if normalized == "localhost" || normalized == "metadata.google" {
+        return true;
+    }
+    if let Ok(ip) = normalized.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                let [first, second, ..] = v4.octets();
+                let is_private_v4 = matches!(first, 10)
+                    || (first == 172 && (16..=31).contains(&second))
+                    || (first == 192 && second == 168);
+                let is_link_local_v4 = first == 169 && second == 254;
+                v4.is_loopback()
+                    || is_private_v4
+                    || is_link_local_v4
+                    || v4.is_unspecified()
+                    || v4.is_multicast()
+            }
+            IpAddr::V6(v6) => {
+                if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                    let [first, second, ..] = mapped_v4.octets();
+                    let is_private_v4 = matches!(first, 10)
+                        || (first == 172 && (16..=31).contains(&second))
+                        || (first == 192 && second == 168);
+                    let is_link_local_v4 = first == 169 && second == 254;
+                    mapped_v4.is_loopback()
+                        || is_private_v4
+                        || is_link_local_v4
+                        || mapped_v4.is_unspecified()
+                        || mapped_v4.is_multicast()
+                } else {
+                    let segments = v6.segments();
+                    let is_unique_local_v6 = (segments[0] & 0xfe00) == 0xfc00;
+                    let is_link_local_v6 = (segments[0] & 0xffc0) == 0xfe80;
+                    v6.is_loopback()
+                        || is_unique_local_v6
+                        || is_link_local_v6
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                }
+            }
+        };
+    }
+    normalized.ends_with(".internal") || normalized.ends_with(".local")
+}
+
 /// Validate that a git URL looks like a legitimate repository URL
 /// and does not attempt to inject CLI flags or target internal services.
 fn validate_git_url(url: &str) -> Result<(), String> {
@@ -387,27 +464,33 @@ fn validate_git_url(url: &str) -> Result<(), String> {
     }
     // Only allow known protocols.
     let has_known_protocol = trimmed.starts_with("https://")
-        || trimmed.starts_with("http://")
-        || trimmed.starts_with("git://")
         || trimmed.starts_with("git@")
         || trimmed.starts_with("ssh://");
     if !has_known_protocol {
-        return Err(
-            "Invalid git URL: must use https://, http://, git://, ssh://, or git@ protocol"
-                .to_string(),
-        );
+        return Err("Invalid git URL: must use https://, ssh://, or git@ protocol".to_string());
     }
-    // Block requests to cloud metadata endpoints (SSRF).
-    let lower = trimmed.to_lowercase();
-    if lower.contains("169.254.169.254")
-        || lower.contains("metadata.google")
-        || lower.contains("[fd00:")
-        || lower.contains("localhost")
-        || lower.contains("127.0.0.1")
-        || lower.contains("[::1]")
-    {
-        return Err("Invalid git URL: internal/metadata addresses are not allowed".to_string());
+
+    if trimmed.starts_with("https://") || trimmed.starts_with("ssh://") {
+        let parsed = url::Url::parse(trimmed)
+            .map_err(|_| "Invalid git URL: failed to parse repository URL".to_string())?;
+        let Some(host) = parsed.host_str() else {
+            return Err("Invalid git URL: repository host is required".to_string());
+        };
+        if host_targets_private_network(host) {
+            return Err("Invalid git URL: internal/metadata addresses are not allowed".to_string());
+        }
     }
+
+    if let Some((_, host_part)) = trimmed.split_once('@') {
+        if let Some((host, _)) = host_part.split_once(':') {
+            if host_targets_private_network(host) {
+                return Err(
+                    "Invalid git URL: internal/metadata addresses are not allowed".to_string(),
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -722,7 +805,7 @@ fn normalize_branch_ref(ref_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_branch_ref, normalize_branch_refs};
+    use super::{normalize_branch_ref, normalize_branch_refs, validate_git_url};
 
     #[test]
     fn normalize_branch_refs_merges_local_and_remote_refs() {
@@ -751,5 +834,19 @@ mod tests {
             Some("feature/review".to_string())
         );
         assert_eq!(normalize_branch_ref("origin/HEAD"), None);
+    }
+
+    #[test]
+    fn validate_git_url_rejects_insecure_and_private_targets() {
+        assert!(validate_git_url("https://github.com/example/repo.git").is_ok());
+        assert!(validate_git_url("git@github.com:example/repo.git").is_ok());
+        assert!(validate_git_url("ssh://git@github.com/example/repo.git").is_ok());
+        assert!(validate_git_url("http://github.com/example/repo.git").is_err());
+        assert!(validate_git_url("git://github.com/example/repo.git").is_err());
+        assert!(validate_git_url("https://10.0.0.5/repo.git").is_err());
+        assert!(validate_git_url("https://192.168.1.10/repo.git").is_err());
+        assert!(validate_git_url("https://[::ffff:127.0.0.1]/repo.git").is_err());
+        assert!(validate_git_url("https://[::ffff:10.0.0.1]/repo.git").is_err());
+        assert!(validate_git_url("git@localhost:example/repo.git").is_err());
     }
 }
