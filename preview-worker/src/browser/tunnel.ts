@@ -4,6 +4,9 @@ import type { Readable } from "node:stream";
 import { isLocalHost, normalizeNavigationHostname } from "../lib/security.js";
 import { PreviewWorkerError } from "../lib/types.js";
 
+type TunnelLookup = (hostname: string, options: { all: true }) => Promise<Array<{ address: string; family: number }>>;
+type TunnelProbe = (url: string) => Promise<void>;
+
 const TRY_CLOUDFLARE_URL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi;
 const DEFAULT_TUNNEL_TIMEOUT_MS = 30_000;
 const TUNNEL_DNS_POLL_INTERVAL_MS = 500;
@@ -43,10 +46,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function probeTunnelUrl(tunnelUrl: string): Promise<void> {
+  const response = await fetch(tunnelUrl, {
+    method: "HEAD",
+    redirect: "manual",
+    signal: AbortSignal.timeout(5_000),
+  });
+
+  void response.body?.cancel().catch(() => {});
+}
+
+const lookupTunnelAddresses: TunnelLookup = async (hostname, options) => {
+  return await lookup(hostname, options) as Array<{ address: string; family: number }>;
+};
+
 export async function waitForReachableTunnelUrl(
   tunnelUrl: string,
   timeoutMs = DEFAULT_TUNNEL_TIMEOUT_MS,
-  lookupFn: typeof lookup = lookup,
+  lookupFn: TunnelLookup = lookupTunnelAddresses,
+  probeFn: TunnelProbe = probeTunnelUrl,
 ): Promise<void> {
   let hostname: string;
   try {
@@ -61,6 +79,7 @@ export async function waitForReachableTunnelUrl(
     try {
       const resolved = await lookupFn(hostname, { all: true });
       if (resolved.length > 0) {
+        await probeFn(tunnelUrl);
         return;
       }
     } catch (error) {
