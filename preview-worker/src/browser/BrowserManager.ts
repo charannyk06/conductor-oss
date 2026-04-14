@@ -43,6 +43,16 @@ const VIEWPORT = { width: 1440, height: 960 };
 const LOG_LIMIT = 150;
 const DOM_NODE_LIMIT = 250;
 const CLEANUP_INTERVAL_MS = 30_000;
+const RETRYABLE_TUNNEL_ERROR_MARKERS = [
+  "ERR_NAME_NOT_RESOLVED",
+  "ERR_CONNECTION_REFUSED",
+  "ERR_CONNECTION_RESET",
+  "ERR_CONNECTION_CLOSED",
+  "ERR_QUIC_PROTOCOL_ERROR",
+  "ERR_HTTP2_PROTOCOL_ERROR",
+  "ERR_SSL_PROTOCOL_ERROR",
+  "ERR_TUNNEL_CONNECTION_FAILED",
+] as const;
 const CHROME_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-background-networking",
@@ -491,9 +501,10 @@ export class BrowserManager {
       }
 
       const previousUrl = session.page.url();
+      let targetUrl = candidate;
 
       try {
-        const targetUrl = navigationMode === "bridge"
+        targetUrl = navigationMode === "bridge"
           ? candidate
           : await this.resolveNavigationTarget(session, candidate);
         await this.syncRequestInterception(session, navigationMode === "bridge");
@@ -505,9 +516,10 @@ export class BrowserManager {
         session.lastRequestedUrl = candidate;
         return;
       } catch (error) {
-        const targetUrl = navigationMode === "bridge"
-          ? candidate
-          : (session.lastRequestedUrl ?? candidate);
+        if (navigationMode !== "bridge" && this.shouldResetTunnel(targetUrl, error)) {
+          await this.resetTunnel(session);
+        }
+
         if (await this.navigationProducedUsablePage(session.page, targetUrl, previousUrl, error)) {
           await this.syncRequestInterception(session, navigationMode === "bridge");
           session.selectedElement = null;
@@ -579,6 +591,27 @@ export class BrowserManager {
     await Promise.all(expiredSessions.map((session) => this.destroySessionInternal(session)));
   }
 
+  private shouldResetTunnel(targetUrl: string, error: unknown): boolean {
+    try {
+      const hostname = new URL(targetUrl).hostname.toLowerCase();
+      if (!hostname.endsWith(".trycloudflare.com")) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return RETRYABLE_TUNNEL_ERROR_MARKERS.some((marker) => message.includes(marker));
+  }
+
+  private async resetTunnel(session: PreviewSession): Promise<void> {
+    await stopTunnel(session.tunnelProcess);
+    session.tunnelUrl = null;
+    session.tunnelProcess = null;
+    session.tunnelLocalOrigin = null;
+  }
+
   private async resolveNavigationTarget(
     session: PreviewSession,
     candidate: string,
@@ -596,7 +629,7 @@ export class BrowserManager {
     const normalizedOrigin = localOrigin.toString();
 
     if (!session.tunnelUrl || session.tunnelLocalOrigin !== normalizedOrigin) {
-      await stopTunnel(session.tunnelProcess);
+      await this.resetTunnel(session);
 
       let lastTunnelError: unknown = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
