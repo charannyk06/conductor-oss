@@ -575,13 +575,35 @@ export class BrowserManager {
 
     if (!session.tunnelUrl || session.tunnelLocalOrigin !== normalizedOrigin) {
       await stopTunnel(session.tunnelProcess);
-      const tunnel = await startTunnel(normalizedOrigin, this.config.cloudflaredBin);
-      session.tunnelUrl = tunnel.url;
-      session.tunnelProcess = tunnel.process;
-      session.tunnelLocalOrigin = tunnel.localOrigin;
+
+      let lastTunnelError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const tunnel = await startTunnel(normalizedOrigin, this.config.cloudflaredBin);
+          session.tunnelUrl = tunnel.url;
+          session.tunnelProcess = tunnel.process;
+          session.tunnelLocalOrigin = tunnel.localOrigin;
+          lastTunnelError = null;
+          break;
+        } catch (error) {
+          lastTunnelError = error;
+          session.tunnelUrl = null;
+          session.tunnelProcess = null;
+          session.tunnelLocalOrigin = null;
+        }
+      }
+
+      if (lastTunnelError) {
+        throw lastTunnelError;
+      }
     }
 
-    const rewritten = rewriteLoopbackUrl(candidate, session.tunnelUrl);
+    const tunnelUrl = session.tunnelUrl;
+    if (!tunnelUrl) {
+      throw this.error(500, "Failed to establish a localhost preview tunnel.");
+    }
+
+    const rewritten = rewriteLoopbackUrl(candidate, tunnelUrl);
     if (!rewritten) {
       throw this.error(500, "Failed to rewrite localhost preview URL through the tunnel.");
     }

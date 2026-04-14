@@ -148,3 +148,27 @@ test("configureBridgePreview forwards bridge relay metadata when creating a remo
     },
   });
 });
+
+test("runCommand preserves actionable worker errors instead of collapsing them to service unavailable", async () => {
+  env.CONDUCTOR_PREVIEW_WORKER_URL = "http://127.0.0.1:3099";
+  env.CONDUCTOR_PREVIEW_WORKER_KEY = "unit-test-key";
+
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+
+    if (url.endsWith("/sessions") && init?.method === "POST") {
+      return new Response(JSON.stringify({ error: "Timed out while waiting for a reachable cloudflared tunnel URL." }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+
+  const client = getPreviewWorkerClient();
+  await assert.rejects(
+    () => client.runCommand("session-error", { command: "reload" }),
+    /Timed out while waiting for a reachable cloudflared tunnel URL/,
+  );
+});

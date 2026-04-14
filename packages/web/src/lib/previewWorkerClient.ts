@@ -69,6 +69,24 @@ function buildDisconnectedStatus(
   };
 }
 
+function shouldPreserveWorkerErrorMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === "preview worker is not configured") {
+    return true;
+  }
+  return !(
+    normalized === "fetch failed"
+    || normalized.includes("econnrefused")
+    || normalized.includes("enotfound")
+    || normalized.includes("eai_again")
+    || normalized.includes("networkerror")
+    || normalized.includes("socket hang up")
+  );
+}
+
 class PreviewWorkerClient implements PreviewBrowserManagerClient {
   private readonly workerUrl = normalizeWorkerUrl(process.env.CONDUCTOR_PREVIEW_WORKER_URL);
   private readonly workerApiKey = process.env.CONDUCTOR_PREVIEW_WORKER_KEY?.trim() || null;
@@ -306,7 +324,7 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
 
   private networkErrorMessage(error: unknown): string {
     const message = error instanceof Error ? error.message : "Preview service is unavailable";
-    if (message === "Preview worker is not configured") {
+    if (shouldPreserveWorkerErrorMessage(message)) {
       return message;
     }
     return "Preview service is unavailable";

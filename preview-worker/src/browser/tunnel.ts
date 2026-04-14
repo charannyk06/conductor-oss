@@ -1,10 +1,12 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { lookup } from "node:dns/promises";
 import type { Readable } from "node:stream";
 import { isLocalHost, normalizeNavigationHostname } from "../lib/security.js";
 import { PreviewWorkerError } from "../lib/types.js";
 
 const TRY_CLOUDFLARE_URL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi;
 const DEFAULT_TUNNEL_TIMEOUT_MS = 30_000;
+const TUNNEL_DNS_POLL_INTERVAL_MS = 500;
 
 export interface TunnelHandle {
   url: string;
@@ -29,8 +31,48 @@ function normalizeLocalOrigin(value: string): string {
 }
 
 function extractTunnelUrl(buffer: string): string | null {
-  const match = [...buffer.matchAll(TRY_CLOUDFLARE_URL_PATTERN)].at(-1)?.[0] ?? null;
-  return match ? match.trim() : null;
+  const matches = buffer.match(TRY_CLOUDFLARE_URL_PATTERN);
+  if (!matches?.length) {
+    return null;
+  }
+  const latest = matches[matches.length - 1];
+  return latest ? latest.trim() : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function waitForReachableTunnelUrl(
+  tunnelUrl: string,
+  timeoutMs = DEFAULT_TUNNEL_TIMEOUT_MS,
+  lookupFn: typeof lookup = lookup,
+): Promise<void> {
+  let hostname: string;
+  try {
+    hostname = new URL(tunnelUrl).hostname;
+  } catch {
+    throw new PreviewWorkerError(500, `Invalid cloudflared tunnel URL: ${tunnelUrl}`);
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+  while (Date.now() <= deadline) {
+    try {
+      const resolved = await lookupFn(hostname, { all: true });
+      if (resolved.length > 0) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(TUNNEL_DNS_POLL_INTERVAL_MS);
+  }
+
+  const reason = lastError instanceof Error && lastError.message
+    ? ` (${lastError.message})`
+    : "";
+  throw new PreviewWorkerError(408, `Timed out while waiting for a reachable cloudflared tunnel URL${reason}.`);
 }
 
 export async function startTunnel(
@@ -43,6 +85,7 @@ export async function startTunnel(
   return await new Promise<TunnelHandle>((resolve, reject) => {
     let settled = false;
     let output = "";
+    let verifyingTunnel = false;
 
     const child = spawn(cloudflaredBin, ["--url", localOrigin], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -57,16 +100,32 @@ export async function startTunnel(
     };
 
     const inspectOutput = () => {
+      if (verifyingTunnel) {
+        return;
+      }
       const tunnelUrl = extractTunnelUrl(output);
       if (!tunnelUrl) {
         return;
       }
+      verifyingTunnel = true;
 
-      finish(() => resolve({
-        url: tunnelUrl,
-        process: child,
-        localOrigin,
-      }));
+      void (async () => {
+        try {
+          await waitForReachableTunnelUrl(tunnelUrl, timeoutMs);
+          finish(() => resolve({
+            url: tunnelUrl,
+            process: child,
+            localOrigin,
+          }));
+        } catch (error) {
+          finish(() => {
+            child.kill("SIGTERM");
+            reject(error instanceof PreviewWorkerError
+              ? error
+              : new PreviewWorkerError(500, error instanceof Error ? error.message : "Cloudflared tunnel failed"));
+          });
+        }
+      })();
     };
 
     const onData = (chunk: Buffer) => {
