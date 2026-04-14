@@ -18,12 +18,17 @@ use axum::middleware;
 use axum::Router;
 use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
+use std::fs;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
 use crate::state::AppState;
+
+const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_TERMINAL_SESSION_SECRET";
 
 pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus) -> Result<()> {
     let config_path = config
@@ -31,6 +36,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .clone()
         .unwrap_or_else(|| config.workspace.join("conductor.yaml"));
     let state = AppState::new(config_path, config.clone(), db).await;
+    ensure_terminal_token_secret(&state.workspace_path)?;
     state.discover_executors().await;
     state.start_terminal_host_watchdog();
     state.start_bridge_registry_watchdog();
@@ -71,6 +77,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::github::router())
         .merge(routes::attachments::router())
         .merge(routes::notifications::router())
+        .merge(routes::project_notes::router())
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
         .merge(routes::terminal::router())
@@ -190,4 +197,35 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
             Ok(())
         }
     }
+}
+
+fn ensure_terminal_token_secret(workspace_path: &Path) -> Result<()> {
+    if std::env::var(TERMINAL_TOKEN_SECRET_ENV)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let secret_path = workspace_path
+        .join(".conductor")
+        .join("terminal-session-secret");
+    if let Some(parent) = secret_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let secret = match fs::read_to_string(&secret_path) {
+        Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
+        _ => {
+            let generated = Uuid::new_v4().to_string();
+            fs::write(&secret_path, format!("{generated}\n"))?;
+            generated
+        }
+    };
+
+    unsafe {
+        std::env::set_var(TERMINAL_TOKEN_SECRET_ENV, secret);
+    }
+    Ok(())
 }

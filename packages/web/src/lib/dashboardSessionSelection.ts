@@ -8,7 +8,7 @@ export type DashboardSessionSelectionTab =
   | "dispatcher"
   | "terminal";
 
-export type DashboardSessionSelectionView = "direct" | "board";
+export type DashboardSessionSelectionView = "direct" | "board" | "notes";
 
 type SessionSelectionTarget = Pick<DashboardSession, "projectId" | "metadata"> | null | undefined;
 

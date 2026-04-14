@@ -83,6 +83,13 @@ async fn smoke_all_route_modules() {
         ),
         (
             Request::builder()
+                .uri("/api/project-notes?projectId=demo")
+                .body(Body::empty())
+                .unwrap(),
+            StatusCode::OK,
+        ),
+        (
+            Request::builder()
                 .uri("/api/repositories")
                 .body(Body::empty())
                 .unwrap(),

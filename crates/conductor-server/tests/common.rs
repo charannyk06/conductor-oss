@@ -307,6 +307,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::github::router())
         .merge(routes::attachments::router())
         .merge(routes::notifications::router())
+        .merge(routes::project_notes::router())
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
         .merge(routes::terminal::router())
