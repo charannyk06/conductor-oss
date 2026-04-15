@@ -2,9 +2,11 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Datelike;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use crate::state::{resolve_board_file, AppState};
 const MAX_NOTE_FILE_BYTES: usize = 1024 * 1024;
 const MAX_NOTE_COUNT: usize = 2500;
 const MAX_NOTE_DEPTH: usize = 10;
+const TAG_SCAN_BYTES: usize = 64 * 1024;
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -29,6 +32,9 @@ pub fn router() -> Router<Arc<AppState>> {
             get(get_project_note_file).put(save_project_note_file),
         )
         .route("/api/project-notes/open", post(open_project_note))
+        .route("/api/project-notes/backlinks", get(get_backlinks))
+        .route("/api/project-notes/daily", post(create_daily_note))
+        .route("/api/project-notes/graph", get(get_notes_graph))
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -167,12 +173,22 @@ async fn list_project_notes(
     });
     files.dedup_by(|left, right| left["path"] == right["path"]);
 
+    // Build tags and forwardLinks maps by scanning file contents
+    let (tags, forward_links) = {
+        let files_snapshot = files.clone();
+        tokio::task::spawn_blocking(move || build_tags_and_forward_links(&files_snapshot))
+            .await
+            .unwrap_or_default()
+    };
+
     ok(json!({
         "editor": context.editor,
         "notesRoot": context.notes_root.as_ref().map(|path| path.to_string_lossy().to_string()),
         "syncManagedByEditor": context.editor.trim().eq_ignore_ascii_case("obsidian") && context.notes_root.is_some(),
         "writable": true,
         "files": files,
+        "tags": tags,
+        "forwardLinks": forward_links,
     }))
 }
 
@@ -825,6 +841,455 @@ async fn run_open_command(program: &str, args: Vec<String>) -> anyhow::Result<()
     } else {
         anyhow::bail!("Required opener is not installed: {program}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tag & wikilink extraction helpers
+// ---------------------------------------------------------------------------
+
+/// Extract tags and wikilinks from the first 64KB of each file in the index.
+/// Returns `(tags_map, forward_links_map)` as serde_json::Value objects.
+fn build_tags_and_forward_links(files: &[Value]) -> (Value, Value) {
+    let tag_re = Regex::new(r"(?m)(?:^|[\s(])#([a-zA-Z][\w-]*)").expect("tag regex");
+    let wikilink_re = Regex::new(r"\[\[([^\]]+)\]\]").expect("wikilink regex");
+    let header_re = Regex::new(r"^#\s").expect("header regex");
+
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    let mut forward_links: HashMap<String, Vec<String>> = HashMap::new();
+
+    for file in files {
+        let path_str = match file["path"].as_str() {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        let path = PathBuf::from(&path_str);
+
+        let content = match fs::read(&path) {
+            Ok(bytes) => {
+                let limit = bytes.len().min(TAG_SCAN_BYTES);
+                String::from_utf8_lossy(&bytes[..limit]).to_string()
+            }
+            Err(_) => continue,
+        };
+
+        // Extract wikilinks
+        let mut file_links: Vec<String> = Vec::new();
+        for cap in wikilink_re.captures_iter(&content) {
+            if let Some(m) = cap.get(1) {
+                file_links.push(m.as_str().trim().to_string());
+            }
+        }
+        if !file_links.is_empty() {
+            forward_links.insert(path_str.clone(), file_links);
+        }
+
+        // Extract tags, but only from non-header lines
+        let mut file_tags: HashSet<String> = HashSet::new();
+        for line in content.lines() {
+            // Skip markdown headers (lines starting with "# ")
+            if header_re.is_match(line) {
+                continue;
+            }
+            for cap in tag_re.captures_iter(line) {
+                if let Some(m) = cap.get(1) {
+                    file_tags.insert(m.as_str().to_string());
+                }
+            }
+        }
+        for tag in file_tags {
+            tags.entry(tag).or_default().push(path_str.clone());
+        }
+    }
+
+    let tags_json = serde_json::to_value(&tags).unwrap_or(json!({}));
+    let links_json = serde_json::to_value(&forward_links).unwrap_or(json!({}));
+    (tags_json, links_json)
+}
+
+/// Read the first `limit` bytes of a file as a string. Returns None on error.
+fn read_file_head(path: &Path, limit: usize) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let end = bytes.len().min(limit);
+    Some(String::from_utf8_lossy(&bytes[..end]).to_string())
+}
+
+/// Extract wikilink targets from markdown content.
+fn extract_wikilinks(content: &str) -> Vec<String> {
+    let re = Regex::new(r"\[\[([^\]]+)\]\]").expect("wikilink regex");
+    re.captures_iter(content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().trim().to_string()))
+        .collect()
+}
+
+/// Extract tags from markdown content (excluding headers).
+fn extract_tags(content: &str) -> Vec<String> {
+    let tag_re = Regex::new(r"(?:^|[\s(])#([a-zA-Z][\w-]*)").expect("tag regex");
+    let header_re = Regex::new(r"^#\s").expect("header regex");
+    let mut tags = HashSet::new();
+    for line in content.lines() {
+        if header_re.is_match(line) {
+            continue;
+        }
+        for cap in tag_re.captures_iter(line) {
+            if let Some(m) = cap.get(1) {
+                tags.insert(m.as_str().to_string());
+            }
+        }
+    }
+    tags.into_iter().collect()
+}
+
+/// Get the note name without extension from a file path.
+fn note_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Build a file index mapping lowercase note name → absolute path.
+fn build_note_name_index(files: &[Value]) -> HashMap<String, PathBuf> {
+    let mut index: HashMap<String, PathBuf> = HashMap::new();
+    for file in files {
+        if let Some(p) = file["path"].as_str() {
+            let path = PathBuf::from(p);
+            let name = note_name_from_path(&path);
+            if !name.is_empty() {
+                index.entry(name.to_ascii_lowercase()).or_insert(path);
+            }
+        }
+    }
+    index
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/project-notes/backlinks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BacklinksQuery {
+    project_id: String,
+    path: String,
+}
+
+async fn get_backlinks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BacklinksQuery>,
+) -> ApiResponse {
+    let context = match resolve_project_notes_context(&state, &query.project_id).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+
+    if !context.writable {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The selected markdown editor does not support local notes.",
+        );
+    }
+
+    let current_path = match resolve_requested_note_path(&context, &query.path, false) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+
+    let note_name = note_name_from_path(&current_path);
+    if note_name.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Cannot determine note name from path",
+        );
+    }
+
+    // Read forward links from current file
+    let current_content = read_file_head(&current_path, MAX_NOTE_FILE_BYTES);
+    let forward_links: Vec<String> = current_content
+        .as_deref()
+        .map(extract_wikilinks)
+        .unwrap_or_default();
+
+    // Collect all note files and scan for backlinks
+    let backlinks = {
+        let note_name_clone = note_name.clone();
+        let current_path_str = current_path.to_string_lossy().to_string();
+        let mut files = Vec::new();
+        if let Some(notes_root) = context.notes_root.as_deref() {
+            collect_note_files(
+                notes_root,
+                Some(notes_root),
+                context.source_label,
+                &mut files,
+                MAX_NOTE_COUNT,
+                MAX_NOTE_DEPTH,
+            );
+        }
+        let files_clone = files.clone();
+        tokio::task::spawn_blocking(move || {
+            scan_backlinks(&files_clone, &note_name_clone, &current_path_str)
+        })
+        .await
+        .unwrap_or_default()
+    };
+
+    ok(json!({
+        "backlinks": backlinks,
+        "forwardLinks": forward_links,
+    }))
+}
+
+/// Scan files for backlinks to the given note name. Returns backlink entries
+/// with ~100 chars of context around each match.
+fn scan_backlinks(files: &[Value], note_name: &str, current_path: &str) -> Vec<Value> {
+    let wikilink_re = Regex::new(r"\[\[([^\]]+)\]\]").expect("wikilink regex");
+    let note_name_lower = note_name.to_ascii_lowercase();
+    let mut results: Vec<Value> = Vec::new();
+
+    for file in files {
+        let path_str = match file["path"].as_str() {
+            Some(p) => p,
+            None => continue,
+        };
+        // Skip self-referencing
+        if path_str == current_path {
+            continue;
+        }
+
+        let display_path = file["displayPath"].as_str().unwrap_or_default().to_string();
+        let name = file["name"].as_str().unwrap_or_default().to_string();
+
+        let content = match read_file_head(&PathBuf::from(path_str), MAX_NOTE_FILE_BYTES) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        for cap in wikilink_re.captures_iter(&content) {
+            let target = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            if target.to_ascii_lowercase() != note_name_lower {
+                continue;
+            }
+
+            let full_match = cap.get(0).unwrap();
+            let match_start = full_match.start();
+            let match_end = full_match.end();
+
+            // Get ~100 chars of context around the match
+            let ctx_start = match_start.saturating_sub(50);
+            let ctx_end = (match_end + 50).min(content.len());
+            let context = content[ctx_start..ctx_end].replace('\n', " ");
+
+            results.push(json!({
+                "path": path_str,
+                "displayPath": display_path,
+                "name": name,
+                "context": context,
+            }));
+            // Only one backlink entry per file
+            break;
+        }
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/project-notes/daily
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateDailyNoteBody {
+    project_id: String,
+}
+
+async fn create_daily_note(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateDailyNoteBody>,
+) -> ApiResponse {
+    let context = match resolve_project_notes_context(&state, &body.project_id).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+
+    if !context.writable {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The selected markdown editor does not support local notes.",
+        );
+    }
+
+    let now = chrono::Utc::now();
+    let date_str = format!("{}-{:02}-{:02}", now.year(), now.month(), now.day());
+    let relative_path = format!("daily/{}.md", date_str);
+    let seed_content = format!("# {}\n\n", date_str);
+
+    let full_path = match resolve_requested_note_path(&context, &relative_path, true) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+
+    let created = if full_path.exists() {
+        false
+    } else {
+        let parent = match full_path.parent() {
+            Some(p) => p,
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "Daily note path must be inside a writable notes folder.",
+                )
+            }
+        };
+        if let Err(err) = fs::create_dir_all(parent) {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        }
+        if let Err(err) = atomic_write_text_file(&full_path, &seed_content) {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        }
+        true
+    };
+
+    ok(json!({
+        "path": full_path.to_string_lossy().to_string(),
+        "displayPath": display_path_for_note(&context, &full_path),
+        "created": created,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/project-notes/graph
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQuery {
+    project_id: String,
+}
+
+async fn get_notes_graph(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GraphQuery>,
+) -> ApiResponse {
+    let context = match resolve_project_notes_context(&state, &query.project_id).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+
+    if !context.writable {
+        return ok(json!({ "nodes": [], "edges": [] }));
+    }
+
+    let mut files = Vec::new();
+    if let Some(notes_root) = context.notes_root.as_deref() {
+        collect_note_files(
+            notes_root,
+            Some(notes_root),
+            context.source_label,
+            &mut files,
+            MAX_NOTE_COUNT,
+            MAX_NOTE_DEPTH,
+        );
+    }
+
+    let graph_data = {
+        let files_snapshot = files;
+        tokio::task::spawn_blocking(move || build_graph_data(&files_snapshot))
+            .await
+            .unwrap_or_else(|_| (json!([]), json!([])))
+    };
+
+    ok(json!({
+        "nodes": graph_data.0,
+        "edges": graph_data.1,
+    }))
+}
+
+/// Build graph nodes and edges from the file index.
+fn build_graph_data(files: &[Value]) -> (Value, Value) {
+    let note_name_index = build_note_name_index(files);
+    let wikilink_re = Regex::new(r"\[\[([^\]]+)\]\]").expect("wikilink regex");
+
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut edges: Vec<Value> = Vec::new();
+
+    for file in files {
+        let path_str = match file["path"].as_str() {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        let path = PathBuf::from(&path_str);
+        let name = file["name"].as_str().unwrap_or_default().to_string();
+
+        // Read content for tags and wikilinks
+        let content = read_file_head(&path, TAG_SCAN_BYTES);
+        let tags: Vec<String> = content.as_deref().map(extract_tags).unwrap_or_default();
+
+        nodes.push(json!({
+            "id": path_str,
+            "name": name,
+            "tags": tags,
+        }));
+
+        // Extract wikilinks and resolve to actual paths
+        if let Some(ref content) = content {
+            for cap in wikilink_re.captures_iter(content) {
+                let target = match cap.get(1) {
+                    Some(m) => m.as_str().trim().to_string(),
+                    None => continue,
+                };
+
+                // Try to resolve: first by exact path match in files, then by name match
+                let resolved = resolve_wikilink_target(&target, files, &note_name_index);
+                if let Some(resolved_path) = resolved {
+                    edges.push(json!({
+                        "source": path_str,
+                        "target": resolved_path,
+                    }));
+                }
+            }
+        }
+    }
+
+    (json!(nodes), json!(edges))
+}
+
+/// Resolve a wikilink target to an actual file path. Tries:
+/// 1. Direct match against file paths (if the target looks like a relative path)
+/// 2. Case-insensitive match by note name (stem without extension)
+fn resolve_wikilink_target(
+    target: &str,
+    files: &[Value],
+    name_index: &HashMap<String, PathBuf>,
+) -> Option<String> {
+    let target_lower = target.to_ascii_lowercase();
+
+    // Try direct path suffix match against known files
+    for file in files {
+        if let Some(p) = file["path"].as_str() {
+            let p_lower = p.to_ascii_lowercase();
+            // Check if target matches the end of a path (with or without .md extension)
+            if p_lower.ends_with(&format!("/{}", target_lower))
+                || p_lower.ends_with(&format!("/{}.md", target_lower))
+                || p_lower == target_lower
+                || p_lower == format!("{}.md", target_lower)
+            {
+                return Some(p.to_string());
+            }
+        }
+    }
+
+    // Try name-based lookup (stem only)
+    let stem = if target_lower.ends_with(".md") {
+        target_lower.trim_end_matches(".md").to_string()
+    } else {
+        target_lower.clone()
+    };
+
+    if let Some(resolved) = name_index.get(&stem) {
+        return Some(resolved.to_string_lossy().to_string());
+    }
+
+    None
 }
 
 #[cfg(test)]
