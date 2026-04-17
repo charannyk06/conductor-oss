@@ -2,31 +2,36 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("project notes workspace restores a mobile scroll owner", () => {
+test("project notes workspace keeps a compact mobile mode with dedicated file and share sheets", () => {
   const source = readFileSync(new URL("./ProjectNotesWorkspace.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /overflow-y-auto/);
-  assert.match(source, /overscroll-contain/);
-  assert.match(source, /touch-pan-y/);
-  assert.match(source, /-webkit-overflow-scrolling:touch/);
+  assert.match(source, /window\.matchMedia\("\(max-width: 1279px\)"\)/);
+  assert.match(source, /mobileSidebarOpen/);
+  assert.match(source, /mobileShareOpen/);
+  assert.match(source, /compactViewport/);
+  assert.match(source, /<Dialog\.Root open=\{mobileSidebarOpen\}/);
+  assert.match(source, /<Dialog\.Root open=\{mobileShareOpen\}/);
 });
 
-test("project notes workspace keeps a stacked mobile fallback before switching to the desktop grid", () => {
-  const source = readFileSync(new URL("./ProjectNotesWorkspace.tsx", import.meta.url), "utf8");
+test("notes toolbar exposes a compact actions menu for mobile", () => {
+  const source = readFileSync(new URL("./NotesToolbar.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /flex min-h-0 flex-1 flex-col/);
-  assert.match(source, /xl:grid xl:grid-cols-\[280px_minmax\(0,1fr\)\]/);
+  assert.match(source, /@radix-ui\/react-dropdown-menu/);
+  assert.match(source, /compact/);
+  assert.match(source, /Files/);
+  assert.match(source, /More/);
+  assert.match(source, /Share note/);
 });
 
-test("notes sidebar constrains its mobile height so the tree can scroll inside the tab", () => {
-  const source = readFileSync(new URL("./NotesSidebar.tsx", import.meta.url), "utf8");
-
-  assert.match(source, /max-h-\[min\(42dvh,360px\)\]/);
-  assert.match(source, /xl:border-r/);
-});
-
-test("notes graph keeps a usable mobile canvas height", () => {
+test("notes graph exposes obsidian-style search, groups, local graph, and force controls", () => {
   const source = readFileSync(new URL("./NotesGraph.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /min-h-\[min\(560px,70dvh\)\]/);
+  assert.match(source, /Search files/);
+  assert.match(source, /Groups/);
+  assert.match(source, /Local graph/);
+  assert.match(source, /Link distance/);
+  assert.match(source, /Repel force/);
+  assert.match(source, /Node size/);
+  assert.match(source, /showArrows/);
+  assert.match(source, /Zoom in/);
 });
