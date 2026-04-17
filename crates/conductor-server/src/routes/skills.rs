@@ -843,7 +843,7 @@ fn scan_skill_installs(
         let installed_workspace = !workspace_paths.is_empty();
         let install_paths = user_paths
             .into_iter()
-            .chain(workspace_paths.into_iter())
+            .chain(workspace_paths)
             .map(|path| path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         results.push(InstalledSkillStatus {

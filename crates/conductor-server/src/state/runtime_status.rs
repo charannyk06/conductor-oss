@@ -205,35 +205,33 @@ fn read_codex_runtime_status_from_home(home: &Path, cwd: &str) -> Option<Session
 
     for value in lines.iter().rev() {
         match value.get("type").and_then(Value::as_str) {
-            Some("turn_context") => {
-                if model.is_none() {
-                    model = value
-                        .pointer("/payload/model")
-                        .and_then(Value::as_str)
-                        .and_then(trimmed_or_none);
-                }
+            Some("turn_context") if model.is_none() => {
+                model = value
+                    .pointer("/payload/model")
+                    .and_then(Value::as_str)
+                    .and_then(trimmed_or_none);
             }
+            Some("turn_context") => {}
             Some("event_msg")
                 if value.pointer("/payload/type").and_then(Value::as_str)
-                    == Some("token_count") =>
+                    == Some("token_count")
+                    && usage.total_tokens.is_none() =>
             {
-                if usage.total_tokens.is_none() {
-                    if let Some(info) = value.pointer("/payload/info") {
-                        if let Some(total_usage) = info.get("total_token_usage") {
-                            usage.input_tokens = json_u64(total_usage.get("input_tokens"));
-                            usage.output_tokens = json_u64(total_usage.get("output_tokens"));
-                            usage.cached_input_tokens =
-                                json_u64(total_usage.get("cached_input_tokens"));
-                            usage.reasoning_tokens =
-                                json_u64(total_usage.get("reasoning_output_tokens"));
-                            usage.total_tokens = json_u64(total_usage.get("total_tokens"));
-                        }
-                        if let Some(max_tokens) = json_u64(info.get("model_context_window")) {
-                            context_window.max_tokens = Some(max_tokens);
-                            context_window.source = "cli".to_string();
-                            context_window.note =
-                                Some("Reported directly by the active Codex session.".to_string());
-                        }
+                if let Some(info) = value.pointer("/payload/info") {
+                    if let Some(total_usage) = info.get("total_token_usage") {
+                        usage.input_tokens = json_u64(total_usage.get("input_tokens"));
+                        usage.output_tokens = json_u64(total_usage.get("output_tokens"));
+                        usage.cached_input_tokens =
+                            json_u64(total_usage.get("cached_input_tokens"));
+                        usage.reasoning_tokens =
+                            json_u64(total_usage.get("reasoning_output_tokens"));
+                        usage.total_tokens = json_u64(total_usage.get("total_tokens"));
+                    }
+                    if let Some(max_tokens) = json_u64(info.get("model_context_window")) {
+                        context_window.max_tokens = Some(max_tokens);
+                        context_window.source = "cli".to_string();
+                        context_window.note =
+                            Some("Reported directly by the active Codex session.".to_string());
                     }
                 }
             }

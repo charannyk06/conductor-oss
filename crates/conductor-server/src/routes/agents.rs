@@ -631,7 +631,7 @@ fn collect_recent_file_contents(
 ) -> Vec<String> {
     let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     collect_files_recursive(root, extensions, 0, max_depth, &mut files, 64);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     files
         .into_iter()
         .take(max_files)
