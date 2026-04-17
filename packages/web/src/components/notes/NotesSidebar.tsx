@@ -25,6 +25,8 @@ interface NotesSidebarProps {
   onTagClick?: (tag: string) => void;
 }
 
+const NOTES_SIDEBAR_CLASS_NAME = "flex min-h-0 max-h-[min(42dvh,360px)] flex-col border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/35 xl:max-h-none xl:border-b-0 xl:border-r";
+
 function NotesTree({
   nodes,
   expandedFolders,
@@ -138,7 +140,7 @@ export function NotesSidebar({
   );
 
   return (
-    <aside className="flex min-h-0 flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/35">
+    <aside className={NOTES_SIDEBAR_CLASS_NAME}>
       {/* Search + header */}
       <div className="flex items-center justify-between border-b border-[var(--vk-border)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
         <span>
@@ -163,7 +165,7 @@ export function NotesSidebar({
       </div>
 
       {/* File tree */}
-      <div className="min-h-0 flex-1 overflow-auto py-2">
+      <div className="min-h-0 flex-1 overflow-auto overscroll-contain [-webkit-overflow-scrolling:touch] py-2">
         <NotesTree
           nodes={filteredTree}
           expandedFolders={folderPathsSet}

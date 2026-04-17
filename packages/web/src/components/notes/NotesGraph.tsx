@@ -24,6 +24,7 @@ interface SimEdge {
 }
 
 const NODE_RADIUS = 6;
+const NOTES_GRAPH_SURFACE_CLASS_NAME = "flex h-full min-h-[min(560px,70dvh)] flex-col overflow-hidden bg-[var(--vk-bg-main)] xl:min-h-0";
 const COLORS = [
   "#8b5cf6", // purple
   "#06b6d4", // cyan
@@ -193,7 +194,7 @@ export function NotesGraph({ projectId, bridgeId, onNavigate }: NotesGraphProps)
   const centerY = svgHeight / 2 + transform.y;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+    <div className={NOTES_GRAPH_SURFACE_CLASS_NAME}>
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-2">
         <span className="text-[12px] text-[var(--vk-text-muted)]">

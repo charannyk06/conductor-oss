@@ -46,6 +46,12 @@ interface ProjectNotesWorkspaceProps {
   selectedSessionId?: string | null;
 }
 
+const NOTES_WORKSPACE_ROOT_CLASS_NAME = "flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch] bg-[var(--vk-bg-main)]";
+const NOTES_WORKSPACE_LAYOUT_CLASS_NAME = "flex min-h-0 flex-1 flex-col xl:grid xl:grid-cols-[280px_minmax(0,1fr)] xl:overflow-hidden";
+const NOTES_MAIN_PANEL_CLASS_NAME = "flex min-h-[min(560px,70dvh)] flex-1 flex-col overflow-hidden xl:min-h-0";
+const NOTES_EDITOR_PANEL_CLASS_NAME = "min-h-[320px] overflow-hidden xl:min-h-0";
+const NOTES_PREVIEW_PANEL_CLASS_NAME = "min-h-[280px] overflow-auto bg-[var(--vk-bg-panel)]/25 px-4 py-4 xl:min-h-0";
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -555,7 +561,7 @@ export function ProjectNotesWorkspace({
 
   // -- Render --------------------------------------------------------------
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+    <div className={NOTES_WORKSPACE_ROOT_CLASS_NAME}>
       {/* Toolbar */}
       <NotesToolbar
         viewMode={viewMode}
@@ -675,7 +681,7 @@ export function ProjectNotesWorkspace({
         />
       ) : (
         /* Normal view: sidebar + editor/preview */
-        <div className="min-h-0 flex-1 overflow-hidden xl:grid xl:grid-cols-[280px_minmax(0,1fr)]">
+        <div className={NOTES_WORKSPACE_LAYOUT_CLASS_NAME}>
           {/* Sidebar */}
           <NotesSidebar
             noteFiles={noteFiles}
@@ -691,7 +697,7 @@ export function ProjectNotesWorkspace({
           />
 
           {/* Main panel */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className={NOTES_MAIN_PANEL_CLASS_NAME}>
             {/* File info + send-to bar */}
             <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/45 px-3 py-2">
               <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
@@ -760,7 +766,7 @@ export function ProjectNotesWorkspace({
             {/* Editor / Preview area */}
             <div className={`grid min-h-0 flex-1 ${viewMode === "split" ? "xl:grid-cols-2" : "grid-cols-1"}`}>
               {viewMode !== "preview" ? (
-                <div className={`min-h-0 overflow-hidden ${viewMode === "split" ? "border-b border-[var(--vk-border)] xl:border-b-0 xl:border-r" : ""}`}>
+                <div className={`${NOTES_EDITOR_PANEL_CLASS_NAME} ${viewMode === "split" ? "border-b border-[var(--vk-border)] xl:border-b-0 xl:border-r" : ""}`}>
                   {fileLoading ? (
                     <div className="flex h-full items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -781,7 +787,7 @@ export function ProjectNotesWorkspace({
               ) : null}
 
               {viewMode !== "edit" ? (
-                <div className="min-h-0 overflow-auto bg-[var(--vk-bg-panel)]/25 px-4 py-4">
+                <div className={NOTES_PREVIEW_PANEL_CLASS_NAME}>
                   <NotesPreview
                     content={draftContent}
                     onWikilinkClick={handleWikilinkClick}

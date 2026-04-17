@@ -106,72 +106,7 @@ async fn list_project_notes(
         }));
     }
 
-    let mut files = Vec::new();
-    if let Some(board_path) = context.board_path.as_deref().filter(|path| path.exists()) {
-        files.push(note_descriptor(
-            board_path,
-            board_path.parent(),
-            Some("board"),
-            Some("Board/CONDUCTOR.md"),
-        ));
-    }
-
-    if let Some(notes_root) = context.notes_root.as_deref() {
-        collect_note_files(
-            notes_root,
-            Some(notes_root),
-            context.source_label,
-            &mut files,
-            MAX_NOTE_COUNT,
-            MAX_NOTE_DEPTH,
-        );
-    } else {
-        let mut seen_roots = HashSet::new();
-        for root in [
-            context.project_workspace_root.as_ref(),
-            Some(&context.project_root),
-            context.board_parent.as_ref(),
-            Some(&context.workspace_root),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let dedupe_key = canonicalize_for_access(root).to_string_lossy().to_string();
-            if !seen_roots.insert(dedupe_key) {
-                continue;
-            }
-            collect_note_files(
-                root,
-                Some(root),
-                context.source_label,
-                &mut files,
-                MAX_NOTE_COUNT,
-                MAX_NOTE_DEPTH,
-            );
-            if files.len() >= MAX_NOTE_COUNT {
-                break;
-            }
-        }
-    }
-
-    files.sort_by(|left, right| {
-        left["path"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["path"].as_str().unwrap_or_default())
-            .then_with(|| {
-                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(
-                    &source_sort_rank(right["source"].as_str().unwrap_or_default()),
-                )
-            })
-            .then_with(|| {
-                left["displayPath"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["displayPath"].as_str().unwrap_or_default())
-            })
-    });
-    files.dedup_by(|left, right| left["path"] == right["path"]);
+    let files = collect_indexed_note_files(&context);
 
     // Build tags and forwardLinks maps by scanning file contents
     let (tags, forward_links) = {
@@ -418,6 +353,58 @@ fn source_sort_rank(source: &str) -> usize {
     }
 }
 
+fn collect_indexed_note_files(context: &ProjectNotesContext) -> Vec<Value> {
+    let mut files = Vec::new();
+    if let Some(board_path) = context.board_path.as_deref().filter(|path| path.exists()) {
+        files.push(note_descriptor(
+            board_path,
+            board_path.parent(),
+            Some("board"),
+            Some("Board/CONDUCTOR.md"),
+        ));
+    }
+
+    let discovery_roots: Vec<PathBuf> = if let Some(notes_root) = context.notes_root.as_ref() {
+        vec![notes_root.clone()]
+    } else {
+        allowed_note_roots(context)
+    };
+
+    for root in discovery_roots {
+        collect_note_files(
+            &root,
+            Some(&root),
+            context.source_label,
+            &mut files,
+            MAX_NOTE_COUNT,
+            MAX_NOTE_DEPTH,
+        );
+        if files.len() >= MAX_NOTE_COUNT {
+            break;
+        }
+    }
+
+    files.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+            .then_with(|| {
+                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(
+                    &source_sort_rank(right["source"].as_str().unwrap_or_default()),
+                )
+            })
+            .then_with(|| {
+                left["displayPath"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["displayPath"].as_str().unwrap_or_default())
+            })
+    });
+    files.dedup_by(|left, right| left["path"] == right["path"]);
+    files
+}
+
 fn collect_note_files(
     root: &Path,
     display_root: Option<&Path>,
@@ -478,24 +465,28 @@ fn note_descriptor(
     source: Option<&str>,
     display_override: Option<&str>,
 ) -> Value {
+    let canonical_path = canonicalize_for_access(path);
     let display_path = display_override
         .map(str::to_string)
         .or_else(|| {
             display_root.map(|root| {
-                path.strip_prefix(root)
+                let canonical_root = canonicalize_for_access(root);
+                canonical_path
+                    .strip_prefix(&canonical_root)
+                    .or_else(|_| path.strip_prefix(root))
                     .map(|value| value.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| canonical_path.to_string_lossy().to_string())
             })
         })
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
+        .unwrap_or_else(|| canonical_path.to_string_lossy().to_string());
 
     json!({
-        "path": path.to_string_lossy().to_string(),
+        "path": canonical_path.to_string_lossy().to_string(),
         "displayPath": display_path,
-        "name": path.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
+        "name": canonical_path.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
         "source": source,
-        "sizeBytes": fs::metadata(path).ok().map(|value| value.len()),
-        "modifiedAt": file_modified_at(path),
+        "sizeBytes": fs::metadata(&canonical_path).ok().map(|value| value.len()),
+        "modifiedAt": file_modified_at(&canonical_path),
         "kind": "file",
     })
 }
@@ -1013,18 +1004,7 @@ async fn get_backlinks(
     let backlinks = {
         let note_name_clone = note_name.clone();
         let current_path_str = current_path.to_string_lossy().to_string();
-        let mut files = Vec::new();
-        if let Some(notes_root) = context.notes_root.as_deref() {
-            collect_note_files(
-                notes_root,
-                Some(notes_root),
-                context.source_label,
-                &mut files,
-                MAX_NOTE_COUNT,
-                MAX_NOTE_DEPTH,
-            );
-        }
-        let files_clone = files.clone();
+        let files_clone = collect_indexed_note_files(&context);
         tokio::task::spawn_blocking(move || {
             scan_backlinks(&files_clone, &note_name_clone, &current_path_str)
         })
@@ -1179,20 +1159,8 @@ async fn get_notes_graph(
         return ok(json!({ "nodes": [], "edges": [] }));
     }
 
-    let mut files = Vec::new();
-    if let Some(notes_root) = context.notes_root.as_deref() {
-        collect_note_files(
-            notes_root,
-            Some(notes_root),
-            context.source_label,
-            &mut files,
-            MAX_NOTE_COUNT,
-            MAX_NOTE_DEPTH,
-        );
-    }
-
     let graph_data = {
-        let files_snapshot = files;
+        let files_snapshot = collect_indexed_note_files(&context);
         tokio::task::spawn_blocking(move || build_graph_data(&files_snapshot))
             .await
             .unwrap_or_else(|_| (json!([]), json!([])))
