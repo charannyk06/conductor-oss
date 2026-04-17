@@ -219,6 +219,46 @@ async fn dispatcher_task_routes_create_update_and_handoff_deterministically() {
 }
 
 #[tokio::test]
+async fn dispatcher_task_routes_reject_unknown_explicit_thread_scope() {
+    let harness = TestHarness::new("dispatcher-task-lifecycle-missing-thread", "direct").await;
+    fs::write(
+        &harness.board_path,
+        ["## To do", "", "## Ready", "", "## In review", ""].join("\n"),
+    )
+    .unwrap();
+    let app = build_app(harness.state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher/tasks?threadId=missing-dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "title": "Broken scoped task",
+                        "objective": "This should fail before mutating the board.",
+                        "executionMode": "worktree",
+                        "surfaces": ["crates/conductor-server/src/routes/dispatcher.rs"],
+                        "acceptance": ["No board mutation occurs when the dispatcher thread is missing."],
+                        "skills": ["rust", "dispatcher orchestration"],
+                        "deliverables": ["no-op"],
+                        "role": "intake"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let board_contents = fs::read_to_string(&harness.board_path).unwrap();
+    assert!(!board_contents.contains("Broken scoped task"));
+}
+
+#[tokio::test]
 async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
     let harness = TestHarness::new("dispatcher-bindings-route-test", "direct").await;
     let app = build_app(harness.state.clone());
@@ -236,6 +276,7 @@ async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
                         "threadId": "discord-thread-42",
                         "sessionId": "openclaw-session-9",
                         "channelId": "discord-channel-7",
+                        "bridgeId": "bridge-openclaw",
                         "createDispatcher": true,
                         "implementationAgent": "codex",
                         "title": "OpenClaw project thread"
@@ -265,13 +306,44 @@ async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
     assert_eq!(binding["sessionId"], "openclaw-session-9");
     assert_eq!(binding["channelId"], "discord-channel-7");
     assert_eq!(binding["dispatcherThread"]["id"], dispatcher_thread_id);
+    let binding_bridge_query = format!(
+        "threadId={}&bridgeId={}",
+        dispatcher_thread_id, "bridge-openclaw"
+    );
+    assert_eq!(
+        binding["dispatcherEndpoints"]["dispatcher"],
+        format!("/api/projects/demo/dispatcher?{binding_bridge_query}")
+    );
+    assert_eq!(
+        binding["dispatcherEndpoints"]["feed"],
+        format!("/api/projects/demo/dispatcher/feed?{binding_bridge_query}")
+    );
+    assert_eq!(
+        binding["dispatcherEndpoints"]["stream"],
+        format!("/api/projects/demo/dispatcher/feed/stream?{binding_bridge_query}")
+    );
+    assert_eq!(
+        binding["dispatcherEndpoints"]["send"],
+        format!("/api/projects/demo/dispatcher/send?{binding_bridge_query}")
+    );
     assert_eq!(
         binding["dispatcherEndpoints"]["tasks"],
-        format!(
-            "/api/projects/demo/dispatcher/tasks?threadId={}",
-            dispatcher_thread_id
-        )
+        format!("/api/projects/demo/dispatcher/tasks?{binding_bridge_query}")
     );
+
+    let dispatcher_feed_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/feed?{binding_bridge_query}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dispatcher_feed_response.status(), StatusCode::OK);
 
     let get_response = app
         .clone()
@@ -305,10 +377,7 @@ async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
     );
     assert_eq!(
         get_payload["binding"]["dispatcherEndpoints"]["tasks"],
-        format!(
-            "/api/projects/demo/dispatcher/tasks?threadId={}",
-            dispatcher_thread_id
-        )
+        format!("/api/projects/demo/dispatcher/tasks?{binding_bridge_query}")
     );
 
     let update_response = app

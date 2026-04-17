@@ -249,10 +249,14 @@ async fn serialize_dispatcher_binding(
         },
         None => Value::Null,
     };
-    let dispatcher_query = binding
-        .dispatcher_thread_id
-        .as_deref()
-        .map(|thread_id| format!("threadId={thread_id}"));
+    let dispatcher_query = binding.dispatcher_thread_id.as_deref().map(|thread_id| {
+        let mut query = format!("threadId={thread_id}");
+        if let Some(bridge_id) = binding.bridge_id.as_deref() {
+            query.push_str("&bridgeId=");
+            query.push_str(bridge_id);
+        }
+        query
+    });
     let base_path = format!("/api/projects/{project_id}/dispatcher");
     let tasks_endpoint = dispatcher_query
         .as_ref()
@@ -306,10 +310,21 @@ async fn resolve_project_dispatcher(
     thread_id: Option<&str>,
 ) -> Option<SessionRecord> {
     if let Some(thread_id) = trimmed_query_value(thread_id) {
-        return state
+        let dispatcher = state
             .get_dispatcher_thread(thread_id)
             .await
-            .filter(|dispatcher| dispatcher_matches_scope(dispatcher, project_id, bridge_id));
+            .filter(|dispatcher| {
+                dispatcher.project_id == project_id && is_project_dispatcher_session(dispatcher)
+            });
+        return match (dispatcher, bridge_id) {
+            (Some(dispatcher), Some(expected_bridge_id))
+                if dispatcher_matches_scope(&dispatcher, project_id, Some(expected_bridge_id)) =>
+            {
+                Some(dispatcher)
+            }
+            (Some(dispatcher), None) => Some(dispatcher),
+            _ => None,
+        };
     }
 
     state
@@ -635,15 +650,20 @@ async fn dispatcher_task_context(
     state: &Arc<AppState>,
     project_id: &str,
     query: &DispatcherQuery,
-) -> DispatcherTaskMutationContext {
+) -> Result<DispatcherTaskMutationContext, String> {
     let bridge_id = trimmed_query_value(query.bridge_id.as_deref());
     let dispatcher =
         resolve_project_dispatcher(state, project_id, bridge_id, query.thread_id.as_deref()).await;
-    DispatcherTaskMutationContext {
+    if trimmed_query_value(query.thread_id.as_deref()).is_some() && dispatcher.is_none() {
+        return Err(format!(
+            "Dispatcher thread for project {project_id} not found"
+        ));
+    }
+    Ok(DispatcherTaskMutationContext {
         activity_source: "dispatcher",
         caller_session: dispatcher.clone(),
         dispatcher_thread_id: dispatcher.map(|thread| thread.id),
-    }
+    })
 }
 
 async fn create_dispatcher_task_route(
@@ -652,7 +672,10 @@ async fn create_dispatcher_task_route(
     Query(query): Query<DispatcherQuery>,
     Json(mut body): Json<DispatcherTaskCreateInput>,
 ) -> ApiResponse {
-    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    let context = match dispatcher_task_context(&state, &project_id, &query).await {
+        Ok(context) => context,
+        Err(message) => return error(StatusCode::NOT_FOUND, message),
+    };
     body.project = Some(project_id);
     match create_dispatcher_task(&state, context, body).await {
         Ok(result) => created(result.response_payload()),
@@ -666,7 +689,10 @@ async fn update_dispatcher_task_route(
     Query(query): Query<DispatcherQuery>,
     Json(mut body): Json<DispatcherTaskUpdateInput>,
 ) -> ApiResponse {
-    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    let context = match dispatcher_task_context(&state, &project_id, &query).await {
+        Ok(context) => context,
+        Err(message) => return error(StatusCode::NOT_FOUND, message),
+    };
     body.project = Some(project_id);
     body.task = Some(task_lookup);
     match update_dispatcher_task(&state, context, body).await {
@@ -681,7 +707,10 @@ async fn handoff_dispatcher_task_route(
     Query(query): Query<DispatcherQuery>,
     Json(mut body): Json<DispatcherTaskUpdateInput>,
 ) -> ApiResponse {
-    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    let context = match dispatcher_task_context(&state, &project_id, &query).await {
+        Ok(context) => context,
+        Err(message) => return error(StatusCode::NOT_FOUND, message),
+    };
     body.project = Some(project_id);
     body.task = Some(task_lookup);
     match handoff_dispatcher_task(&state, context, body).await {

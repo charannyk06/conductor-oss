@@ -3223,7 +3223,7 @@ impl AppState {
     pub(crate) async fn dispatcher_runtime_attached(&self, thread_id: &str) -> bool {
         let mut runtimes = self.dispatcher_runtimes.lock().await;
         match runtimes.get(thread_id) {
-            Some(handle) if handle.accepts_input && handle.input_tx.is_closed() => {
+            Some(handle) if handle.input_tx.is_closed() => {
                 runtimes.remove(thread_id);
                 false
             }
@@ -3670,24 +3670,49 @@ impl AppState {
                     .metadata
                     .insert("exitCode".to_string(), exit_code.to_string());
                 if exit_code == 0 {
-                    if thread.status != SessionStatus::NeedsInput {
-                        thread.status = SessionStatus::NeedsInput;
-                        feed_dirty = true;
-                    }
-                    thread.activity = Some("waiting_input".to_string());
-                    thread
-                        .metadata
-                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                    if thread
-                        .summary
-                        .as_ref()
-                        .map(|value| value.trim().is_empty())
-                        .unwrap_or(true)
-                    {
-                        thread.summary = Some("Ready for follow-up".to_string());
+                    let uses_headless_turns =
+                        dispatcher_uses_headless_turns(&AgentKind::parse(&thread.agent));
+                    if uses_headless_turns {
+                        if thread.status != SessionStatus::Idle {
+                            thread.status = SessionStatus::Idle;
+                            feed_dirty = true;
+                        }
+                        thread.activity = Some("idle".to_string());
                         thread
                             .metadata
-                            .insert("summary".to_string(), "Ready for follow-up".to_string());
+                            .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                        if thread
+                            .summary
+                            .as_ref()
+                            .map(|value| value.trim().is_empty())
+                            .unwrap_or(true)
+                        {
+                            thread.summary = Some("Dispatcher ready for the next turn".to_string());
+                            thread.metadata.insert(
+                                "summary".to_string(),
+                                "Dispatcher ready for the next turn".to_string(),
+                            );
+                        }
+                    } else {
+                        if thread.status != SessionStatus::NeedsInput {
+                            thread.status = SessionStatus::NeedsInput;
+                            feed_dirty = true;
+                        }
+                        thread.activity = Some("waiting_input".to_string());
+                        thread
+                            .metadata
+                            .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                        if thread
+                            .summary
+                            .as_ref()
+                            .map(|value| value.trim().is_empty())
+                            .unwrap_or(true)
+                        {
+                            thread.summary = Some("Ready for follow-up".to_string());
+                            thread
+                                .metadata
+                                .insert("summary".to_string(), "Ready for follow-up".to_string());
+                        }
                     }
                 } else {
                     if thread.status != SessionStatus::Errored {
@@ -3754,11 +3779,11 @@ impl AppState {
 
         let should_sync_memory = should_sync_dispatcher_session_memory(thread, force_memory_sync);
         let updated = thread.clone();
-        drop(threads);
         if clear_runtime {
             self.clear_dispatcher_runtime_if(thread_id, runtime_id)
                 .await;
         }
+        drop(threads);
         self.persist_dispatcher_thread(&updated).await?;
         if should_sync_memory {
             self.sync_acp_dispatcher_state(&updated).await?;
@@ -4571,15 +4596,16 @@ mod tests {
                     entry.kind == "assistant_message"
                         && entry.text.contains("headless assistant reply")
                 });
-                if has_reply && updated.status == SessionStatus::NeedsInput {
+                if has_reply && updated.status == SessionStatus::Idle {
                     break updated;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("headless runtime should eventually emit the assistant reply and reach NeedsInput");
-        assert_eq!(updated.status, SessionStatus::NeedsInput);
+        .expect("headless runtime should eventually emit the assistant reply and reach Idle");
+        assert_eq!(updated.status, SessionStatus::Idle);
+        assert_eq!(updated.activity.as_deref(), Some("idle"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -5001,7 +5027,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_runtime_without_input_receiver_still_counts_as_attached() {
+    async fn headless_runtime_with_closed_input_is_cleared() {
         let (root, state) = build_test_state("acp-headless-runtime-attached").await;
         let thread = state
             .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
@@ -5015,9 +5041,9 @@ mod tests {
             .store_dispatcher_runtime(&thread.id, input_tx, false, kill_tx)
             .await;
 
-        assert!(state.dispatcher_runtime_attached(&thread.id).await);
+        assert!(!state.dispatcher_runtime_attached(&thread.id).await);
         assert!(state.dispatcher_runtime_input(&thread.id).await.is_none());
-        assert!(state.dispatcher_runtime_attached(&thread.id).await);
+        assert!(!state.dispatcher_runtime_attached(&thread.id).await);
 
         let _ = fs::remove_dir_all(root);
     }
