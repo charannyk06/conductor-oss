@@ -23,7 +23,10 @@ type AppRouteHandlerRoutes =
   | "/api/notifications"
   | "/api/preferences"
   | "/api/project-notes"
+  | "/api/project-notes/backlinks"
+  | "/api/project-notes/daily"
   | "/api/project-notes/file"
+  | "/api/project-notes/graph"
   | "/api/project-notes/open"
   | "/api/repositories"
   | "/api/repositories/[id]"
@@ -71,7 +74,10 @@ interface ParamMap {
   "/api/notifications": {}
   "/api/preferences": {}
   "/api/project-notes": {}
+  "/api/project-notes/backlinks": {}
+  "/api/project-notes/daily": {}
   "/api/project-notes/file": {}
+  "/api/project-notes/graph": {}
   "/api/project-notes/open": {}
   "/api/repositories": {}
   "/api/repositories/[id]": { "id": string; }
