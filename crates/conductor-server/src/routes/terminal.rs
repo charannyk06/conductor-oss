@@ -2098,35 +2098,33 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Pause) => {
             *paused = true;
         }
-        Some(ttyd_protocol::ClientMessage::Resume) => {
-            if *paused {
-                *paused = false;
-                // Replay buffered chunks collected during pause, skipping any
-                // with stale sequence numbers.
-                for chunk in pause_buffer.drain(..) {
-                    if chunk.sequence <= *last_sequence_sent {
-                        continue;
-                    }
-                    *last_sequence_sent = chunk.sequence;
-                    client_socket
-                        .send(Message::Binary(
-                            ttyd_protocol::encode_output(&chunk.bytes).into(),
-                        ))
-                        .await?;
+        Some(ttyd_protocol::ClientMessage::Resume) if *paused => {
+            *paused = false;
+            // Replay buffered chunks collected during pause, skipping any
+            // with stale sequence numbers.
+            for chunk in pause_buffer.drain(..) {
+                if chunk.sequence <= *last_sequence_sent {
+                    continue;
                 }
-                // Send the current snapshot as the authoritative terminal state.
-                // The snapshot includes all output up to this point, so it
-                // provides a smooth transition from the pause gap.
-                let bytes =
-                    render_current_restore_snapshot_bytes(state, session_id, last_sequence_sent)
-                        .await;
-                if !bytes.is_empty() {
-                    client_socket
-                        .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
-                        .await?;
-                }
+                *last_sequence_sent = chunk.sequence;
+                client_socket
+                    .send(Message::Binary(
+                        ttyd_protocol::encode_output(&chunk.bytes).into(),
+                    ))
+                    .await?;
+            }
+            // Send the current snapshot as the authoritative terminal state.
+            // The snapshot includes all output up to this point, so it
+            // provides a smooth transition from the pause gap.
+            let bytes =
+                render_current_restore_snapshot_bytes(state, session_id, last_sequence_sent).await;
+            if !bytes.is_empty() {
+                client_socket
+                    .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                    .await?;
             }
         }
+        Some(ttyd_protocol::ClientMessage::Resume) => {}
         None => {}
     }
 
