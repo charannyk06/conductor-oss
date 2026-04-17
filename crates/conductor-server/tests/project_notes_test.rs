@@ -117,6 +117,133 @@ async fn project_notes_routes_list_read_and_save_markdown_files() {
 }
 
 #[tokio::test]
+async fn project_notes_graph_and_backlinks_use_fallback_project_roots_when_notes_root_is_unset() {
+    let harness = TestHarness::new("conductor-project-notes-fallback", "direct").await;
+    let notes_dir = harness.repo.join("architecture");
+    std::fs::create_dir_all(&notes_dir).expect("create fallback notes directory");
+    let design_path = notes_dir.join("design.md");
+    let overview_path = notes_dir.join("overview.md");
+    std::fs::write(
+        &design_path,
+        "# Design\n\nThe detailed plan lives in [[overview]].\n",
+    )
+    .expect("write design note");
+    std::fs::write(
+        &overview_path,
+        "# Overview\n\nReferences [[design]] for the detailed implementation.\n",
+    )
+    .expect("write overview note");
+    let design_path = design_path
+        .canonicalize()
+        .expect("canonicalize design note path");
+    let overview_path = overview_path
+        .canonicalize()
+        .expect("canonicalize overview note path");
+
+    {
+        let mut config = harness.state.config.write().await;
+        config.preferences.markdown_editor = "obsidian".to_string();
+        config.preferences.markdown_editor_path.clear();
+    }
+
+    let list_response = harness
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/project-notes?projectId=demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("fallback project notes list response");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["notesRoot"].as_str(), None);
+    let files = list_payload["files"].as_array().expect("files array");
+    assert!(
+        files
+            .iter()
+            .any(|entry| entry["displayPath"].as_str() == Some("architecture/design.md")),
+        "expected fallback project note in list payload: {list_payload:#}"
+    );
+
+    let graph_response = harness
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/project-notes/graph?projectId=demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("fallback notes graph response");
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph_payload = response_json(graph_response).await;
+    let graph_nodes = graph_payload["nodes"]
+        .as_array()
+        .expect("graph nodes array");
+    let graph_edges = graph_payload["edges"]
+        .as_array()
+        .expect("graph edges array");
+    assert!(
+        graph_nodes
+            .iter()
+            .any(|node| node["id"].as_str() == Some(design_path.to_string_lossy().as_ref())),
+        "expected fallback graph node for design note: {graph_payload:#}"
+    );
+    assert!(
+        graph_nodes
+            .iter()
+            .any(|node| node["id"].as_str() == Some(overview_path.to_string_lossy().as_ref())),
+        "expected fallback graph node for overview note: {graph_payload:#}"
+    );
+    assert!(
+        graph_edges.iter().any(|edge| {
+            edge["source"].as_str() == Some(design_path.to_string_lossy().as_ref())
+                && edge["target"].as_str() == Some(overview_path.to_string_lossy().as_ref())
+        }),
+        "expected fallback graph edge for wikilinked notes: {graph_payload:#}"
+    );
+
+    let backlinks_response = harness
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/project-notes/backlinks?projectId=demo&path={}",
+                    url::form_urlencoded::byte_serialize(
+                        overview_path.to_string_lossy().as_bytes()
+                    )
+                    .collect::<String>()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("fallback backlinks response");
+    assert_eq!(backlinks_response.status(), StatusCode::OK);
+    let backlinks_payload = response_json(backlinks_response).await;
+    let backlinks = backlinks_payload["backlinks"]
+        .as_array()
+        .expect("backlinks array");
+    assert!(
+        backlinks
+            .iter()
+            .any(|entry| entry["path"].as_str() == Some(design_path.to_string_lossy().as_ref())),
+        "expected backlink from fallback project note: {backlinks_payload:#}"
+    );
+    let forward_links = backlinks_payload["forwardLinks"]
+        .as_array()
+        .expect("forward links array");
+    assert!(
+        forward_links
+            .iter()
+            .any(|entry| entry.as_str() == Some("design")),
+        "expected forward link extracted from fallback project note: {backlinks_payload:#}"
+    );
+}
+
+#[tokio::test]
 async fn project_notes_routes_reject_stale_writes_and_outside_paths() {
     let harness = TestHarness::new("conductor-project-notes-conflict", "direct").await;
     let notes_root = harness.repo.join("vault");
