@@ -83,6 +83,8 @@ export function AppUpdateNotice() {
   const [copied, setCopied] = useState(false);
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [compactViewport, setCompactViewport] = useState(false);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
 
   const activeBridgeId = useMemo(() => {
     if (typeof window === "undefined") {
@@ -163,8 +165,29 @@ export function AppUpdateNotice() {
     };
   }, [activeBridgeId, refreshUpdate]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(max-width: 639px)");
+    const syncViewport = () => setCompactViewport(mediaQuery.matches);
+    syncViewport();
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", syncViewport);
+      return () => mediaQuery.removeEventListener("change", syncViewport);
+    }
+    mediaQuery.addListener?.(syncViewport);
+    return () => mediaQuery.removeListener?.(syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!compactViewport) {
+      setMobileExpanded(false);
+    }
+  }, [compactViewport]);
+
   const hiddenForVersion = update?.latestVersion && dismissedVersion === update.latestVersion;
   const restarting = Boolean(update?.restarting) || reconnecting;
+  const compactNotice = compactViewport && !restarting && update?.jobStatus !== "running" && update?.jobStatus !== "failed";
+  const showDetailedBody = !compactNotice || mobileExpanded;
   const visible = useMemo(() => {
     if (!update) return false;
     if (hiddenForVersion) return false;
@@ -279,10 +302,11 @@ export function AppUpdateNotice() {
   if (!visible) return null;
 
   return (
-    <div className="pointer-events-none fixed bottom-3 right-3 z-[70] w-[min(calc(100vw-1.5rem),24rem)] sm:bottom-4 sm:right-4">
+    <div className="pointer-events-none fixed bottom-2 left-2 right-2 z-[70] sm:bottom-4 sm:left-auto sm:right-4 sm:w-[min(calc(100vw-1.5rem),24rem)]">
       <section
         className={cn(
-          "pointer-events-auto rounded-[14px] border bg-[var(--vk-bg-panel)] p-4 shadow-[0_16px_40px_rgba(0,0,0,0.35)]",
+          "pointer-events-auto rounded-[14px] border bg-[var(--vk-bg-panel)] p-3 shadow-[0_16px_40px_rgba(0,0,0,0.35)] sm:p-4",
+          compactNotice && "max-w-[min(calc(100vw-1rem),18rem)] ml-auto",
           update?.jobStatus === "failed"
             ? "border-[color:color-mix(in_srgb,var(--vk-red)_55%,var(--vk-border))]"
             : "border-[var(--vk-border)]",
@@ -306,47 +330,70 @@ export function AppUpdateNotice() {
                 {update ? noticeTitle(update) : "Conductor update"}
               </h2>
             </div>
-            <p className="mt-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-              {update ? noticeDescription(update) : "Checking for updates..."}
-            </p>
+            {compactNotice && !showDetailedBody ? null : (
+              <p className={cn(
+                "mt-2 text-[12px] leading-5 text-[var(--vk-text-muted)]",
+                compactNotice && !showDetailedBody && "line-clamp-2",
+              )}>
+                {update ? noticeDescription(update) : "Checking for updates..."}
+              </p>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={handleDismiss}
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Dismiss update notice"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {compactNotice ? (
+              <button
+                type="button"
+                onClick={() => setMobileExpanded((current) => !current)}
+                className="inline-flex min-h-[28px] items-center rounded-[7px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              >
+                {showDetailedBody ? "Hide" : "Details"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={handleDismiss}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              aria-label="Dismiss update notice"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
-        {update?.updateCommand ? (
-          <div className="mt-3 rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]">
-            {update.updateCommand}
-          </div>
+        {showDetailedBody ? (
+          <>
+            {update?.updateCommand ? (
+              <div className="mt-3 rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]">
+                {update.updateCommand}
+              </div>
+            ) : null}
+
+            {update ? (
+              <p className="mt-2 text-[11px] leading-5 text-[var(--vk-text-faint)]">
+                {installModeHint(update.installMode) ?? (update.restartRequired
+                  ? "Restart the current Conductor process after the installer completes."
+                  : "Update state streams from the running Conductor runtime.")}
+              </p>
+            ) : null}
+
+            {loadError ? (
+              <p className="mt-2 text-[11px] text-[var(--vk-red)]">{loadError}</p>
+            ) : update?.error ? (
+              <p className="mt-2 text-[11px] text-[var(--vk-red)]">{update.error}</p>
+            ) : null}
+
+            {update?.logsTail && update.jobStatus === "failed" ? (
+              <pre className="mt-2 max-h-32 overflow-auto rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-2 text-[10px] leading-4 text-[var(--vk-text-faint)]">
+                {update.logsTail}
+              </pre>
+            ) : null}
+          </>
         ) : null}
 
-        {update ? (
-          <p className="mt-2 text-[11px] leading-5 text-[var(--vk-text-faint)]">
-            {installModeHint(update.installMode) ?? (update.restartRequired
-              ? "Restart the current Conductor process after the installer completes."
-              : "Update state streams from the running Conductor runtime.")}
-          </p>
-        ) : null}
-
-        {loadError ? (
-          <p className="mt-2 text-[11px] text-[var(--vk-red)]">{loadError}</p>
-        ) : update?.error ? (
-          <p className="mt-2 text-[11px] text-[var(--vk-red)]">{update.error}</p>
-        ) : null}
-
-        {update?.logsTail && update.jobStatus === "failed" ? (
-          <pre className="mt-2 max-h-32 overflow-auto rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-2 text-[10px] leading-4 text-[var(--vk-text-faint)]">
-            {update.logsTail}
-          </pre>
-        ) : null}
-
-        <div className="mt-3 flex items-center justify-end gap-2">
+        <div className={cn(
+          "mt-3 flex items-center justify-end gap-2",
+          compactNotice && !showDetailedBody && "mt-2",
+        )}>
           {update?.jobStatus === "failed" && update.canAutoUpdate ? (
             <Button
               type="button"

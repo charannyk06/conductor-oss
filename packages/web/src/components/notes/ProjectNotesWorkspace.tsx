@@ -1,9 +1,13 @@
 "use client";
 
+import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
+  FolderOpen,
   Loader2,
+  Send,
+  X,
 } from "lucide-react";
 
 import type { DashboardSession } from "@/lib/types";
@@ -49,8 +53,11 @@ interface ProjectNotesWorkspaceProps {
 const NOTES_WORKSPACE_ROOT_CLASS_NAME = "flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch] bg-[var(--vk-bg-main)]";
 const NOTES_WORKSPACE_LAYOUT_CLASS_NAME = "flex min-h-0 flex-1 flex-col xl:grid xl:grid-cols-[280px_minmax(0,1fr)] xl:overflow-hidden";
 const NOTES_MAIN_PANEL_CLASS_NAME = "flex min-h-[min(560px,70dvh)] flex-1 flex-col overflow-hidden xl:min-h-0";
+const NOTES_MAIN_PANEL_COMPACT_CLASS_NAME = "flex min-h-0 flex-1 flex-col overflow-hidden";
 const NOTES_EDITOR_PANEL_CLASS_NAME = "min-h-[320px] overflow-hidden xl:min-h-0";
 const NOTES_PREVIEW_PANEL_CLASS_NAME = "min-h-[280px] overflow-auto bg-[var(--vk-bg-panel)]/25 px-4 py-4 xl:min-h-0";
+const NOTES_SHEET_OVERLAY_CLASS_NAME = "fixed inset-0 z-[130] bg-black/60 backdrop-blur-[2px]";
+const NOTES_SHEET_CONTENT_CLASS_NAME = "fixed inset-x-0 bottom-0 top-[10%] z-[131] flex flex-col overflow-hidden rounded-t-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_-24px_80px_rgba(0,0,0,0.42)]";
 
 // ---------------------------------------------------------------------------
 // Component
@@ -78,6 +85,9 @@ export function ProjectNotesWorkspace({
   const [graphOpen, setGraphOpen] = useState(false);
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [compactViewport, setCompactViewport] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileShareOpen, setMobileShareOpen] = useState(false);
 
   // -- File content state --------------------------------------------------
   const [draftContent, setDraftContent] = useState("");
@@ -159,6 +169,35 @@ export function ProjectNotesWorkspace({
       );
     }
   }, [selectedSessionId, sessionTargets, targetSessionId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(max-width: 1279px)");
+    const syncViewport = () => setCompactViewport(mediaQuery.matches);
+    syncViewport();
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", syncViewport);
+      return () => mediaQuery.removeEventListener("change", syncViewport);
+    }
+    mediaQuery.addListener?.(syncViewport);
+    return () => mediaQuery.removeListener?.(syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (compactViewport && viewMode === "split") {
+      setViewMode("edit");
+    }
+    if (!compactViewport) {
+      setMobileSidebarOpen(false);
+      setMobileShareOpen(false);
+    }
+  }, [compactViewport, viewMode]);
+
+  useEffect(() => {
+    if (compactViewport && sendSuccess) {
+      setMobileShareOpen(false);
+    }
+  }, [compactViewport, sendSuccess]);
 
   // -- Index loading -------------------------------------------------------
   const refreshIndex = useCallback(() => {
@@ -381,6 +420,11 @@ export function ProjectNotesWorkspace({
       const created = payload as SaveNotePayload;
       setNewNotePath("");
       setSelectedPath(created.path);
+      if (compactViewport) {
+        setMobileSidebarOpen(false);
+        setGraphOpen(false);
+        setViewMode("edit");
+      }
       setSaveSuccess("Note created.");
       refreshIndex();
     } catch (err) {
@@ -388,7 +432,7 @@ export function ProjectNotesWorkspace({
     } finally {
       setCreatingNote(false);
     }
-  }, [bridgeId, creatingNote, newNotePath, projectId, refreshIndex]);
+  }, [bridgeId, compactViewport, creatingNote, newNotePath, projectId, refreshIndex]);
 
   // -- Daily note ----------------------------------------------------------
   const handleDailyNote = useCallback(async () => {
@@ -406,6 +450,11 @@ export function ProjectNotesWorkspace({
       }
       if (payload?.path) {
         setSelectedPath(payload.path);
+        if (compactViewport) {
+          setMobileSidebarOpen(false);
+          setGraphOpen(false);
+          setViewMode("edit");
+        }
         // Expand daily folder
         setExpandedFolders((prev) =>
           prev.includes("daily") ? prev : [...prev, "daily"],
@@ -415,7 +464,7 @@ export function ProjectNotesWorkspace({
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Failed to create daily note");
     }
-  }, [bridgeId, projectId, refreshIndex]);
+  }, [bridgeId, compactViewport, projectId, refreshIndex]);
 
   // -- Send to dispatcher --------------------------------------------------
   const sendToDispatcher = useCallback(async () => {
@@ -501,15 +550,23 @@ export function ProjectNotesWorkspace({
 
   // -- File select ---------------------------------------------------------
   const selectFile = useCallback((path: string) => {
-    if (path === selectedPath) return;
+    if (path === selectedPath) {
+      if (compactViewport) setMobileSidebarOpen(false);
+      return;
+    }
     if (dirty && typeof window !== "undefined") {
       const discard = window.confirm("Discard unsaved note changes and switch notes?");
       if (!discard) return;
     }
     setSelectedPath(path);
+    if (compactViewport) {
+      setMobileSidebarOpen(false);
+      setGraphOpen(false);
+      setViewMode("edit");
+    }
     // Track recent files
     recentPaths.current = [path, ...recentPaths.current.filter((p) => p !== path)].slice(0, 20);
-  }, [dirty, selectedPath]);
+  }, [compactViewport, dirty, selectedPath]);
 
   // -- Wikilink navigation -------------------------------------------------
   const handleWikilinkClick = useCallback((target: string) => {
@@ -558,13 +615,14 @@ export function ProjectNotesWorkspace({
     : indexPayload?.editor?.trim().toLowerCase() === "notion"
       ? "Notion"
       : "Project markdown files";
+  const effectiveViewMode: ViewMode = compactViewport && viewMode === "split" ? "edit" : viewMode;
 
   // -- Render --------------------------------------------------------------
   return (
     <div className={NOTES_WORKSPACE_ROOT_CLASS_NAME}>
       {/* Toolbar */}
       <NotesToolbar
-        viewMode={viewMode}
+        viewMode={effectiveViewMode}
         onViewModeChange={setViewMode}
         onSave={() => void saveCurrentNote()}
         onRefresh={refreshIndex}
@@ -580,6 +638,9 @@ export function ProjectNotesWorkspace({
         fileTruncated={fileTruncated}
         editorName={indexPayload?.editor}
         canSave={supportedLocalNotes}
+        compact={compactViewport}
+        onOpenFiles={() => setMobileSidebarOpen(true)}
+        onOpenShare={() => setMobileShareOpen(true)}
       />
 
       {/* Header info bar */}
@@ -677,27 +738,31 @@ export function ProjectNotesWorkspace({
         <NotesGraph
           projectId={projectId}
           bridgeId={bridgeId}
+          noteFiles={noteFiles}
+          selectedPath={selectedPath}
           onNavigate={selectFile}
         />
       ) : (
         /* Normal view: sidebar + editor/preview */
-        <div className={NOTES_WORKSPACE_LAYOUT_CLASS_NAME}>
+        <div className={compactViewport ? "min-h-0 flex-1" : NOTES_WORKSPACE_LAYOUT_CLASS_NAME}>
           {/* Sidebar */}
-          <NotesSidebar
-            noteFiles={noteFiles}
-            selectedPath={selectedPath}
-            expandedFolders={expandedFolders}
-            onToggleFolder={toggleFolder}
-            onSelectFile={selectFile}
-            search={search}
-            onSearchChange={setSearch}
-            editorLabel={indexPayload?.editor}
-            tags={tags}
-            onTagClick={handleTagClick}
-          />
+          {compactViewport ? null : (
+            <NotesSidebar
+              noteFiles={noteFiles}
+              selectedPath={selectedPath}
+              expandedFolders={expandedFolders}
+              onToggleFolder={toggleFolder}
+              onSelectFile={selectFile}
+              search={search}
+              onSearchChange={setSearch}
+              editorLabel={indexPayload?.editor}
+              tags={tags}
+              onTagClick={handleTagClick}
+            />
+          )}
 
           {/* Main panel */}
-          <div className={NOTES_MAIN_PANEL_CLASS_NAME}>
+          <div className={compactViewport ? NOTES_MAIN_PANEL_COMPACT_CLASS_NAME : NOTES_MAIN_PANEL_CLASS_NAME}>
             {/* File info + send-to bar */}
             <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/45 px-3 py-2">
               <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
@@ -715,58 +780,60 @@ export function ProjectNotesWorkspace({
                 </div>
 
                 {/* Send-to controls */}
-                <div className="grid gap-2 xl:min-w-[420px]">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <input
-                      value={composerMessage}
-                      onChange={(e) => setComposerMessage(e.target.value)}
-                      placeholder="Optional message to send with this note"
-                      className="min-h-[34px] min-w-0 flex-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-                    />
-                    <select
-                      value={targetSessionId}
-                      onChange={(e) => setTargetSessionId(e.target.value)}
-                      className="min-h-[34px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none"
-                      disabled={sessionTargets.length === 0}
-                    >
-                      {sessionTargets.length === 0 ? (
-                        <option value="">No active sessions</option>
-                      ) : null}
-                      {sessionTargets.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {(s.branch || s.id.slice(0, 8)).trim()} · {s.status}
-                        </option>
-                      ))}
-                    </select>
+                {compactViewport ? null : (
+                  <div className="grid gap-2 xl:min-w-[420px]">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <input
+                        value={composerMessage}
+                        onChange={(e) => setComposerMessage(e.target.value)}
+                        placeholder="Optional message to send with this note"
+                        className="min-h-[34px] min-w-0 flex-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                      />
+                      <select
+                        value={targetSessionId}
+                        onChange={(e) => setTargetSessionId(e.target.value)}
+                        className="min-h-[34px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none"
+                        disabled={sessionTargets.length === 0}
+                      >
+                        {sessionTargets.length === 0 ? (
+                          <option value="">No active sessions</option>
+                        ) : null}
+                        {sessionTargets.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {(s.branch || s.id.slice(0, 8)).trim()} · {s.status}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void sendToDispatcher()}
+                        disabled={sendingDispatcher || (!selectedFile && composerMessage.trim().length === 0)}
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                      >
+                        {sendingDispatcher ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "✦"}
+                        Send to dispatcher
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void sendToSession()}
+                        disabled={sendingSession || !targetSessionId || (!selectedFile && composerMessage.trim().length === 0)}
+                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                      >
+                        {sendingSession ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "→"}
+                        Send to session
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void sendToDispatcher()}
-                      disabled={sendingDispatcher || (!selectedFile && composerMessage.trim().length === 0)}
-                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
-                    >
-                      {sendingDispatcher ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "✦"}
-                      Send to dispatcher
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void sendToSession()}
-                      disabled={sendingSession || !targetSessionId || (!selectedFile && composerMessage.trim().length === 0)}
-                      className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
-                    >
-                      {sendingSession ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "→"}
-                      Send to session
-                    </button>
-                  </div>
-                </div>
+                )}
               </div>
             </div>
 
             {/* Editor / Preview area */}
-            <div className={`grid min-h-0 flex-1 ${viewMode === "split" ? "xl:grid-cols-2" : "grid-cols-1"}`}>
-              {viewMode !== "preview" ? (
-                <div className={`${NOTES_EDITOR_PANEL_CLASS_NAME} ${viewMode === "split" ? "border-b border-[var(--vk-border)] xl:border-b-0 xl:border-r" : ""}`}>
+            <div className={`grid min-h-0 flex-1 ${effectiveViewMode === "split" ? "xl:grid-cols-2" : "grid-cols-1"}`}>
+              {effectiveViewMode !== "preview" ? (
+                <div className={`${NOTES_EDITOR_PANEL_CLASS_NAME} ${effectiveViewMode === "split" ? "border-b border-[var(--vk-border)] xl:border-b-0 xl:border-r" : ""}`}>
                   {fileLoading ? (
                     <div className="flex h-full items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -786,7 +853,7 @@ export function ProjectNotesWorkspace({
                 </div>
               ) : null}
 
-              {viewMode !== "edit" ? (
+              {effectiveViewMode !== "edit" ? (
                 <div className={NOTES_PREVIEW_PANEL_CLASS_NAME}>
                   <NotesPreview
                     content={draftContent}
@@ -807,6 +874,133 @@ export function ProjectNotesWorkspace({
           </div>
         </div>
       )}
+
+      <Dialog.Root open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={NOTES_SHEET_OVERLAY_CLASS_NAME} />
+          <Dialog.Content className={NOTES_SHEET_CONTENT_CLASS_NAME}>
+            <div className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-3">
+              <div>
+                <Dialog.Title className="text-[14px] font-medium text-[var(--vk-text-strong)]">
+                  Browse notes
+                </Dialog.Title>
+                <Dialog.Description className="text-[11px] text-[var(--vk-text-muted)]">
+                  Jump between files without crowding the editor on mobile.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--vk-border)] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <NotesSidebar
+                noteFiles={noteFiles}
+                selectedPath={selectedPath}
+                expandedFolders={expandedFolders}
+                onToggleFolder={toggleFolder}
+                onSelectFile={selectFile}
+                search={search}
+                onSearchChange={setSearch}
+                editorLabel={indexPayload?.editor}
+                tags={tags}
+                onTagClick={handleTagClick}
+                className="h-full max-h-none border-b-0 xl:border-r-0"
+              />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={mobileShareOpen} onOpenChange={setMobileShareOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={NOTES_SHEET_OVERLAY_CLASS_NAME} />
+          <Dialog.Content className={NOTES_SHEET_CONTENT_CLASS_NAME}>
+            <div className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-3">
+              <div>
+                <Dialog.Title className="text-[14px] font-medium text-[var(--vk-text-strong)]">
+                  Share note
+                </Dialog.Title>
+                <Dialog.Description className="text-[11px] text-[var(--vk-text-muted)]">
+                  Send the current note to the dispatcher or an active session.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--vk-border)] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto px-4 py-4">
+              <div className="rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]/35 px-3 py-3">
+                <p className="text-[13px] font-medium text-[var(--vk-text-strong)]">
+                  {selectedFile?.displayPath || "No note selected"}
+                </p>
+                {selectedFile ? (
+                  <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+                    {selectedFile.source || "notes"}
+                    {selectedFile.modifiedAt ? ` · ${new Date(selectedFile.modifiedAt).toLocaleString()}` : ""}
+                  </p>
+                ) : null}
+              </div>
+              <label className="grid gap-2 text-[12px] text-[var(--vk-text-muted)]">
+                <span>Optional message</span>
+                <input
+                  value={composerMessage}
+                  onChange={(e) => setComposerMessage(e.target.value)}
+                  placeholder="Optional message to send with this note"
+                  className="min-h-[40px] rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                />
+              </label>
+              <label className="grid gap-2 text-[12px] text-[var(--vk-text-muted)]">
+                <span>Target session</span>
+                <select
+                  value={targetSessionId}
+                  onChange={(e) => setTargetSessionId(e.target.value)}
+                  className="min-h-[40px] rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[13px] text-[var(--vk-text-normal)] outline-none"
+                  disabled={sessionTargets.length === 0}
+                >
+                  {sessionTargets.length === 0 ? (
+                    <option value="">No active sessions</option>
+                  ) : null}
+                  {sessionTargets.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {(s.branch || s.id.slice(0, 8)).trim()} · {s.status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="mt-auto flex flex-col gap-2 pb-[env(safe-area-inset-bottom)]">
+                <button
+                  type="button"
+                  onClick={() => void sendToDispatcher()}
+                  disabled={sendingDispatcher || (!selectedFile && composerMessage.trim().length === 0)}
+                  className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-[10px] border border-[var(--vk-border)] px-4 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                >
+                  {sendingDispatcher ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
+                  Send to dispatcher
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void sendToSession()}
+                  disabled={sendingSession || !targetSessionId || (!selectedFile && composerMessage.trim().length === 0)}
+                  className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-[10px] border border-[var(--vk-accent)] bg-[rgba(139,92,246,0.14)] px-4 text-[13px] text-[var(--vk-text-strong)] hover:bg-[rgba(139,92,246,0.2)] disabled:opacity-60"
+                >
+                  {sendingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Send to session
+                </button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       {/* Quick Switcher overlay */}
       <QuickSwitcher
