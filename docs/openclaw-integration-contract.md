@@ -153,6 +153,17 @@ If no dispatcher exists and `threadId` is **not** set, Conductor may **create** 
 
 **Response:** `{ "ok": true, "threadId": "<dispatcher session id>" }`
 
+### Approve or reject a pending plan
+
+These routes are the explicit approval contract for dispatcher plan-only turns. Use them instead of sending magic plain-text `approve` / `reject` messages from the client.
+
+| Method | Path |
+|--------|------|
+| `POST` | `/api/projects/{projectId}/dispatcher/approve?threadId=&bridgeId=` |
+| `POST` | `/api/projects/{projectId}/dispatcher/reject?threadId=&bridgeId=` |
+
+**Response:** `{ "ok": true, "threadId": "<dispatcher session id>" }`
+
 ### Interrupt
 
 `POST /api/projects/{projectId}/dispatcher/interrupt?threadId=&bridgeId=`

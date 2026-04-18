@@ -10,6 +10,7 @@ use conductor_core::config::ProjectConfig;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
 use conductor_core::EventBus;
+use conductor_server::state::SessionStatus;
 use serde_json::json;
 use serde_json::Value;
 use std::fs;
@@ -256,6 +257,238 @@ async fn dispatcher_task_routes_reject_unknown_explicit_thread_scope() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let board_contents = fs::read_to_string(&harness.board_path).unwrap();
     assert!(!board_contents.contains("Broken scoped task"));
+}
+
+#[tokio::test]
+async fn dispatcher_approval_routes_resume_or_revise_pending_plans() {
+    let harness = TestHarness::new("dispatcher-approval-routes", "direct").await;
+    let app = build_app(harness.state.clone());
+
+    let dispatcher_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "forceNew": true }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dispatcher_response.status(), StatusCode::CREATED);
+    let dispatcher_body = axum::body::to_bytes(dispatcher_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dispatcher_payload: Value = serde_json::from_slice(&dispatcher_body).unwrap();
+    let thread_id = dispatcher_payload["thread"]["id"]
+        .as_str()
+        .expect("dispatcher thread id should be present")
+        .to_string();
+
+    {
+        let mut threads = harness.state.dispatcher_threads.write().await;
+        let thread = threads
+            .get_mut(&thread_id)
+            .expect("dispatcher thread should exist");
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread.summary = Some("Plan ready for approval".to_string());
+        thread
+            .metadata
+            .insert("summary".to_string(), "Plan ready for approval".to_string());
+        thread.metadata.insert(
+            "acpPlanApprovalState".to_string(),
+            "approval_required".to_string(),
+        );
+        thread
+            .metadata
+            .insert("parserState".to_string(), "approval_required".to_string());
+        thread
+            .conversation
+            .push(conductor_server::state::ConversationEntry {
+                id: "assistant-plan".to_string(),
+                kind: "assistant_message".to_string(),
+                source: "runtime".to_string(),
+                text: "## Proposed plan\n\n1. Create task DEM-002\n2. Wait for approval"
+                    .to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                attachments: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+            });
+    }
+
+    let approve_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/approve?threadId={}",
+                    thread_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approve_response.status(), StatusCode::OK);
+
+    let approved_thread = wait_for_condition_with_timeout(
+        "approval action persisted",
+        std::time::Duration::from_secs(3),
+        || {
+            let state = harness.state.clone();
+            let thread_id = thread_id.clone();
+            async move {
+                let threads = state.dispatcher_threads.read().await;
+                let thread = threads.get(&thread_id).cloned()?;
+                let approved = thread
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "user_message" && entry.text == "approve");
+                approved.then_some(thread)
+            }
+        },
+    )
+    .await;
+    assert_eq!(approved_thread.status, SessionStatus::Working);
+    assert_eq!(
+        approved_thread
+            .metadata
+            .get("acpPlanApprovalState")
+            .map(String::as_str),
+        Some("approved_for_next_mutation")
+    );
+
+    let reject_dispatcher_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "forceNew": true }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reject_dispatcher_response.status(), StatusCode::CREATED);
+    let reject_dispatcher_body =
+        axum::body::to_bytes(reject_dispatcher_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+    let reject_dispatcher_payload: Value = serde_json::from_slice(&reject_dispatcher_body).unwrap();
+    let reject_thread_id = reject_dispatcher_payload["thread"]["id"]
+        .as_str()
+        .expect("reject dispatcher thread id should be present")
+        .to_string();
+
+    {
+        let mut threads = harness.state.dispatcher_threads.write().await;
+        let thread = threads
+            .get_mut(&reject_thread_id)
+            .expect("dispatcher thread should exist");
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread.summary = Some("Plan ready for approval".to_string());
+        thread
+            .metadata
+            .insert("summary".to_string(), "Plan ready for approval".to_string());
+        thread.metadata.insert(
+            "acpPlanApprovalState".to_string(),
+            "approval_required".to_string(),
+        );
+        thread
+            .metadata
+            .insert("parserState".to_string(), "approval_required".to_string());
+    }
+
+    let reject_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/reject?threadId={}",
+                    reject_thread_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reject_response.status(), StatusCode::OK);
+
+    let rejected_thread = wait_for_condition_with_timeout(
+        "reject action persisted",
+        std::time::Duration::from_secs(3),
+        || {
+            let state = harness.state.clone();
+            let thread_id = reject_thread_id.clone();
+            async move {
+                let threads = state.dispatcher_threads.read().await;
+                let thread = threads.get(&thread_id).cloned()?;
+                let rejected = thread
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "user_message" && entry.text == "reject");
+                rejected.then_some(thread)
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        rejected_thread
+            .metadata
+            .get("acpPlanApprovalState")
+            .map(String::as_str),
+        Some("approval_required")
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_approval_routes_reject_threads_without_pending_plan_review() {
+    let harness = TestHarness::new("dispatcher-approval-route-guard", "direct").await;
+    let app = build_app(harness.state.clone());
+
+    let dispatcher_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "forceNew": true }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dispatcher_response.status(), StatusCode::CREATED);
+    let dispatcher_body = axum::body::to_bytes(dispatcher_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dispatcher_payload: Value = serde_json::from_slice(&dispatcher_body).unwrap();
+    let thread_id = dispatcher_payload["thread"]["id"]
+        .as_str()
+        .expect("dispatcher thread id should be present")
+        .to_string();
+
+    let approve_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/approve?threadId={}",
+                    thread_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approve_response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]

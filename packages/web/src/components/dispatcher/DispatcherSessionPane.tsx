@@ -75,6 +75,8 @@ type DispatcherSessionPaneApiPaths = {
   stream: string;
   send: string;
   interrupt?: string | null;
+  approve?: string | null;
+  reject?: string | null;
   repositories?: string;
   /** PATCH OpenClaw (or other orchestrator) thread/session binding */
   integration?: string;
@@ -940,9 +942,13 @@ function shouldShowDispatcherApprovalBanner(
   entries: SessionFeedEntry[],
   approvalState: string | null,
   sessionStatus: string | null,
+  parserState: SessionParserState | null,
 ): boolean {
   if (approvalState !== DISPATCHER_APPROVAL_REQUIRED) {
     return false;
+  }
+  if (parserState?.kind === DISPATCHER_APPROVAL_REQUIRED) {
+    return true;
   }
   if (sessionStatus?.trim().toLowerCase() !== "needs_input") {
     return false;
@@ -1044,6 +1050,8 @@ export function DispatcherSessionPane({
     stream: apiPaths.stream,
     send: apiPaths.send,
     interrupt: apiPaths.interrupt ?? null,
+    approve: apiPaths.approve ?? null,
+    reject: apiPaths.reject ?? null,
     repositories: apiPaths.repositories ?? "/api/repositories",
   }), [apiPaths]);
 
@@ -1070,8 +1078,13 @@ export function DispatcherSessionPane({
   const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
   const awaitingApproval = useMemo(
-    () => isDispatcher && shouldShowDispatcherApprovalBanner(payload.entries, approvalState, payload.sessionStatus ?? session.status),
-    [approvalState, isDispatcher, payload.entries, payload.sessionStatus, session.status],
+    () => isDispatcher && shouldShowDispatcherApprovalBanner(
+      payload.entries,
+      approvalState,
+      payload.sessionStatus ?? session.status,
+      payload.parserState,
+    ),
+    [approvalState, isDispatcher, payload.entries, payload.parserState, payload.sessionStatus, session.status],
   );
   const showInterruptAction = Boolean(sessionApiPaths.interrupt)
     && INTERRUPTIBLE_SESSION_STATUSES.has(normalizedStatusLabel);
@@ -1477,8 +1490,29 @@ export function DispatcherSessionPane({
   }, [composerValue, sendMessage]);
 
   const handleApprovalAction = useCallback(async (action: "approve" | "reject") => {
-    await sendMessage(action);
-  }, [sendMessage]);
+    const approvalPath = action === "approve" ? sessionApiPaths.approve : sessionApiPaths.reject;
+    if (!approvalPath) {
+      await sendMessage(action);
+      return;
+    }
+
+    setSending(true);
+    setSendError(null);
+    try {
+      const response = await fetch(withBridgeQuery(approvalPath, bridgeId), {
+        method: "POST",
+      });
+      const payload = asRecord(await response.json().catch(() => null));
+      if (!response.ok) {
+        throw new Error(readString(payload.error) ?? `Failed to ${action} plan (${response.status})`);
+      }
+      setComposerValue("");
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : `Failed to ${action} plan`);
+    } finally {
+      setSending(false);
+    }
+  }, [bridgeId, sendMessage, sessionApiPaths.approve, sessionApiPaths.reject]);
 
   const handleAgentChange = useCallback(async (nextAgent: string) => {
     if (!repository || savingAgent || nextAgent === repository.agent) {

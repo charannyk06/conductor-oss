@@ -455,6 +455,8 @@ export function DispatcherPane({
           feed: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed?limit=120&${threadQuery}`,
           stream: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed/stream?limit=120&${threadQuery}`,
           send: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/send?${threadQuery}`,
+          approve: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/approve?${threadQuery}`,
+          reject: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/reject?${threadQuery}`,
           interrupt: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/interrupt?${threadQuery}`,
           integration: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/integration?${threadQuery}`,
         }}
