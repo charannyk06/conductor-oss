@@ -224,6 +224,16 @@ where
                     let sanitized = sanitize_terminal_text(&line);
                     executor.parse_output(&sanitized)
                 }
+                ExecutorOutput::Stderr(line) => {
+                    let sanitized = sanitize_terminal_text(&line);
+                    let parsed = executor.parse_output(&sanitized);
+                    match parsed {
+                        ExecutorOutput::Stdout(ref text) if text == &sanitized => {
+                            ExecutorOutput::Stderr(sanitized)
+                        }
+                        other => other,
+                    }
+                }
                 other => other,
             };
 
@@ -400,6 +410,7 @@ mod tests {
                     ExecutorOutput::Stdout(String::new()),
                     ExecutorOutput::Stdout("second".to_string()),
                 ]),
+                "stderr-structured" => ExecutorOutput::Stdout("parsed stderr".to_string()),
                 _ => ExecutorOutput::Stdout(line.to_string()),
             }
         }
@@ -435,6 +446,30 @@ mod tests {
 
         let fourth = parsed_rx.recv().await.unwrap();
         assert!(matches!(fourth, ExecutorOutput::Stderr(ref text) if text == "stderr"));
+
+        assert!(parsed_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrap_parsed_output_parses_structured_stderr_without_losing_plain_stderr() {
+        let (raw_tx, raw_rx) = mpsc::channel::<ExecutorOutput>(8);
+        let mut parsed_rx = wrap_parsed_output(DummyExecutor, raw_rx);
+
+        raw_tx
+            .send(ExecutorOutput::Stderr("stderr-structured".to_string()))
+            .await
+            .unwrap();
+        raw_tx
+            .send(ExecutorOutput::Stderr("stderr".to_string()))
+            .await
+            .unwrap();
+        drop(raw_tx);
+
+        let first = parsed_rx.recv().await.unwrap();
+        assert!(matches!(first, ExecutorOutput::Stdout(ref text) if text == "parsed stderr"));
+
+        let second = parsed_rx.recv().await.unwrap();
+        assert!(matches!(second, ExecutorOutput::Stderr(ref text) if text == "stderr"));
 
         assert!(parsed_rx.recv().await.is_none());
     }

@@ -439,6 +439,18 @@ pub async fn spawn_process_no_stdin_with_env_removals(
 
     apply_tokio_command_env(&mut cmd, env, env_remove);
 
+    #[cfg(unix)]
+    {
+        #[allow(unused_imports)]
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
+
     let mut child = cmd.spawn()?;
     let pid = child.id().unwrap_or(0);
 
@@ -571,7 +583,7 @@ fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_process_alive, spawn_process, ExecutorOutput};
+    use super::{is_process_alive, spawn_process, spawn_process_no_stdin, ExecutorOutput};
     use std::collections::HashMap;
     use std::path::Path;
     use tokio::time::{timeout, Duration};
@@ -580,6 +592,32 @@ mod tests {
         line.split("child_pid=")
             .nth(1)
             .and_then(|value| value.trim().parse::<u32>().ok())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_isolates_child_process_group() {
+        use nix::libc;
+
+        let handle = spawn_process_no_stdin(
+            Path::new("/bin/sh"),
+            &["-lc".to_string(), "sleep 5".to_string()],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("headless process should spawn");
+
+        let parent_pgid = unsafe { libc::getpgrp() };
+        let child_pgid = unsafe { libc::getpgid(handle.pid as libc::pid_t) };
+
+        let _ = handle.kill_tx.send(());
+
+        assert!(child_pgid > 0, "child process group should be valid");
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "headless runtime should not share a process group with conductor"
+        );
     }
 
     #[cfg(unix)]
