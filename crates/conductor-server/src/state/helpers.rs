@@ -1239,6 +1239,87 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     feed
 }
 
+pub fn build_dispatcher_chat_feed(session: &SessionRecord) -> Vec<Value> {
+    let mut feed = Vec::new();
+    let is_streaming = is_streaming_status(&session.status);
+    let last_runtime_assistant_id = if is_streaming {
+        session
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.kind == "assistant_message"
+                    && entry.source == "runtime"
+                    && !is_runtime_internal_noise_text(&entry.text)
+                    && !is_runtime_transport_dump(&entry.text)
+            })
+            .map(|entry| entry.id.clone())
+    } else {
+        None
+    };
+
+    for entry in &session.conversation {
+        let skip_runtime_dump = entry.source == "runtime"
+            && (is_runtime_transport_dump(&entry.text)
+                || is_runtime_internal_noise_text(&entry.text));
+        if skip_runtime_dump {
+            continue;
+        }
+
+        if entry.kind == "assistant_message" && entry.source == "runtime" {
+            push_runtime_assistant_segments(
+                &mut feed,
+                session,
+                entry,
+                last_runtime_assistant_id.as_deref() == Some(entry.id.as_str()),
+            );
+            continue;
+        }
+
+        let kind = match entry.kind.as_str() {
+            "user_message" => "user",
+            "assistant_message" => "assistant",
+            "system_message" => "system",
+            "tool_message" => "tool",
+            "status_message" => "status",
+            _ => "status",
+        };
+        let tool_kind_present = entry.metadata.contains_key("toolTitle");
+        let label = match entry.kind.as_str() {
+            "user_message" if entry.source == "feedback" => "Feedback",
+            "user_message" => "You",
+            "assistant_message" => "Assistant",
+            "system_message" if entry.source == "restore" => "Restored",
+            "system_message" => "System",
+            "tool_message" => "Tool",
+            "status_message" if tool_kind_present => "Tool",
+            "status_message" => "Session",
+            _ => "Session",
+        };
+        feed.push(json!({
+            "id": entry.id,
+            "kind": if entry.kind == "status_message" && tool_kind_present { "tool" } else { kind },
+            "label": label,
+            "text": entry.text,
+            "createdAt": entry.created_at,
+            "attachments": normalized_entry_attachments(session, entry),
+            "source": entry.source,
+            "streaming": entry.kind == "assistant_message"
+                && entry.source == "runtime"
+                && last_runtime_assistant_id.as_deref() == Some(entry.id.as_str()),
+            "metadata": entry.metadata,
+        }));
+    }
+
+    finalize_tool_statuses(&mut feed, &session.status);
+
+    if feed.len() > DEFAULT_SESSION_HISTORY_LIMIT {
+        feed = feed.split_off(feed.len() - DEFAULT_SESSION_HISTORY_LIMIT);
+    }
+
+    feed
+}
+
 fn finalize_tool_statuses(feed: &mut [Value], session_status: &SessionStatus) {
     let session_is_streaming = is_streaming_status(session_status);
     let session_failed = is_failed_session_status(session_status);
@@ -1889,6 +1970,66 @@ mod tests {
             attachments,
             &vec![Value::String("notes/spec.md".to_string())]
         );
+    }
+
+    #[test]
+    fn build_dispatcher_chat_feed_ignores_runtime_output_fallback_and_synthetic_status_rows() {
+        let mut session = SessionRecord::new(
+            "dispatcher-feed".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Plan the work".to_string(),
+            None,
+        );
+        session.status = SessionStatus::NeedsInput;
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session.output = "raw runtime fallback that should never appear".to_string();
+        session.conversation.push(ConversationEntry {
+            id: "user-turn".to_string(),
+            kind: "user_message".to_string(),
+            text: "plan this carefully".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "dispatcher_ui".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.conversation.push(ConversationEntry {
+            id: "assistant-plan".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "## Proposed plan\n\n1. Review the board.\n2. Ask for approval.".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        let feed = build_dispatcher_chat_feed(&session);
+        let ids = feed
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let texts = feed
+            .iter()
+            .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "user-turn");
+        assert!(ids[1].starts_with("assistant-plan"));
+        assert!(texts.iter().any(|text| text.contains("Proposed plan")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("raw runtime fallback that should never appear")));
+        assert!(feed
+            .iter()
+            .all(|entry| entry.get("kind").and_then(Value::as_str) != Some("status")));
     }
 
     #[test]

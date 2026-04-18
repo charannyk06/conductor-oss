@@ -45,6 +45,8 @@ const ACP_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
+const ACP_APPROVAL_READY_MESSAGE: &str =
+    "Plan ready for approval. Review the proposal, then approve it or request changes.";
 pub(crate) const ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY: &str = "acpSessionMemorySyncedAt";
 pub(crate) const ACP_ACTIVE_SKILLS_METADATA_KEY: &str = "acpActiveSkills";
 pub(crate) const ACP_IMPLEMENTATION_AGENT_METADATA_KEY: &str = "acpImplementationAgent";
@@ -835,20 +837,25 @@ fn set_parser_state(
     }
 
     let mut changed = false;
-    changed |= session
+    let previous_kind = session
         .metadata
-        .insert(PARSER_STATE_KEY.to_string(), kind.to_string())
-        .is_some_and(|value| value != kind);
-    changed |= session
-        .metadata
-        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string())
-        .is_some_and(|value| value != trimmed);
+        .insert(PARSER_STATE_KEY.to_string(), kind.to_string());
+    changed |= previous_kind.as_deref() != Some(kind);
 
-    if let Some(value) = command.filter(|value| !value.trim().is_empty()) {
-        changed |= session
+    let previous_message = session
+        .metadata
+        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string());
+    changed |= previous_message.as_deref() != Some(trimmed);
+
+    if let Some(value) = command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let previous_command = session
             .metadata
-            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value.to_string())
-            .is_some_and(|current| current != value);
+            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value.to_string());
+        changed |= previous_command.as_deref() != Some(value);
     } else {
         changed |= session.metadata.remove(PARSER_STATE_COMMAND_KEY).is_some();
     }
@@ -864,6 +871,38 @@ fn parser_state_signature(
         session.metadata.get(PARSER_STATE_MESSAGE_KEY).cloned(),
         session.metadata.get(PARSER_STATE_COMMAND_KEY).cloned(),
     )
+}
+
+fn mark_dispatcher_waiting_for_approval(session: &mut SessionRecord) -> bool {
+    let mut changed = false;
+    if session.status != SessionStatus::NeedsInput {
+        session.status = SessionStatus::NeedsInput;
+        changed = true;
+    }
+    if session.activity.as_deref() != Some("waiting_input") {
+        session.activity = Some("waiting_input".to_string());
+        changed = true;
+    }
+    if session.summary.as_deref() != Some(ACP_APPROVAL_READY_MESSAGE) {
+        session.summary = Some(ACP_APPROVAL_READY_MESSAGE.to_string());
+        changed = true;
+    }
+    if session.metadata.get("summary").map(String::as_str) != Some(ACP_APPROVAL_READY_MESSAGE) {
+        session.metadata.insert(
+            "summary".to_string(),
+            ACP_APPROVAL_READY_MESSAGE.to_string(),
+        );
+        changed = true;
+    }
+    if set_parser_state(
+        session,
+        ACP_APPROVAL_REQUIRED,
+        ACP_APPROVAL_READY_MESSAGE,
+        None,
+    ) {
+        changed = true;
+    }
+    changed
 }
 
 fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
@@ -1249,20 +1288,13 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
             .insert("role".to_string(), "orchestrator".to_string());
         changed = true;
     }
-    let should_grant_approval = thread
+    let approval_state = thread
         .metadata
         .get(ACP_APPROVAL_STATE_METADATA_KEY)
-        .map(String::as_str)
-        .is_none()
-        || (thread
-            .metadata
-            .get(ACP_APPROVAL_STATE_METADATA_KEY)
-            .map(String::as_str)
-            == Some(ACP_APPROVAL_REQUIRED)
-            && thread.status == SessionStatus::Idle
-            && thread.activity.as_deref() == Some("idle")
-            && thread.summary.as_deref() == Some("Dispatcher ready"));
-    if should_grant_approval {
+        .cloned();
+    let approval_required = approval_state.as_deref() == Some(ACP_APPROVAL_REQUIRED);
+    let should_set_default_approval = approval_state.is_none();
+    if should_set_default_approval {
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             ACP_APPROVAL_GRANTED.to_string(),
@@ -1306,6 +1338,16 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
         if thread.metadata.remove(key).is_some() {
             changed = true;
         }
+    }
+
+    if approval_required
+        && matches!(
+            thread.status,
+            SessionStatus::Idle | SessionStatus::NeedsInput
+        )
+        && mark_dispatcher_waiting_for_approval(thread)
+    {
+        changed = true;
     }
 
     if apply_dispatcher_implementation_preferences(thread, None, None, None) {
@@ -3670,48 +3712,64 @@ impl AppState {
                     .metadata
                     .insert("exitCode".to_string(), exit_code.to_string());
                 if exit_code == 0 {
-                    let uses_headless_turns =
-                        dispatcher_uses_headless_turns(&AgentKind::parse(&thread.agent));
-                    if uses_headless_turns {
-                        if thread.status != SessionStatus::Idle {
-                            thread.status = SessionStatus::Idle;
+                    let approval_required = thread
+                        .metadata
+                        .get(ACP_APPROVAL_STATE_METADATA_KEY)
+                        .map(String::as_str)
+                        == Some(ACP_APPROVAL_REQUIRED);
+                    if approval_required {
+                        if mark_dispatcher_waiting_for_approval(thread) {
                             feed_dirty = true;
                         }
-                        thread.activity = Some("idle".to_string());
                         thread
                             .metadata
                             .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                        if thread
-                            .summary
-                            .as_ref()
-                            .map(|value| value.trim().is_empty())
-                            .unwrap_or(true)
-                        {
-                            thread.summary = Some("Dispatcher ready for the next turn".to_string());
-                            thread.metadata.insert(
-                                "summary".to_string(),
-                                "Dispatcher ready for the next turn".to_string(),
-                            );
-                        }
                     } else {
-                        if thread.status != SessionStatus::NeedsInput {
-                            thread.status = SessionStatus::NeedsInput;
-                            feed_dirty = true;
-                        }
-                        thread.activity = Some("waiting_input".to_string());
-                        thread
-                            .metadata
-                            .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                        if thread
-                            .summary
-                            .as_ref()
-                            .map(|value| value.trim().is_empty())
-                            .unwrap_or(true)
-                        {
-                            thread.summary = Some("Ready for follow-up".to_string());
+                        let uses_headless_turns =
+                            dispatcher_uses_headless_turns(&AgentKind::parse(&thread.agent));
+                        if uses_headless_turns {
+                            if thread.status != SessionStatus::Idle {
+                                thread.status = SessionStatus::Idle;
+                                feed_dirty = true;
+                            }
+                            thread.activity = Some("idle".to_string());
                             thread
                                 .metadata
-                                .insert("summary".to_string(), "Ready for follow-up".to_string());
+                                .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                            if thread
+                                .summary
+                                .as_ref()
+                                .map(|value| value.trim().is_empty())
+                                .unwrap_or(true)
+                            {
+                                thread.summary =
+                                    Some("Dispatcher ready for the next turn".to_string());
+                                thread.metadata.insert(
+                                    "summary".to_string(),
+                                    "Dispatcher ready for the next turn".to_string(),
+                                );
+                            }
+                        } else {
+                            if thread.status != SessionStatus::NeedsInput {
+                                thread.status = SessionStatus::NeedsInput;
+                                feed_dirty = true;
+                            }
+                            thread.activity = Some("waiting_input".to_string());
+                            thread
+                                .metadata
+                                .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                            if thread
+                                .summary
+                                .as_ref()
+                                .map(|value| value.trim().is_empty())
+                                .unwrap_or(true)
+                            {
+                                thread.summary = Some("Ready for follow-up".to_string());
+                                thread.metadata.insert(
+                                    "summary".to_string(),
+                                    "Ready for follow-up".to_string(),
+                                );
+                            }
                         }
                     }
                 } else {
@@ -4059,11 +4117,11 @@ mod tests {
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
         CreateDispatcherThreadOptions, DispatcherPreferencesPatch, OpenClawDispatcherConfigPatch,
-        ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
-        ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
-        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
-        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
+        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
+        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
+        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
+        OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
     use anyhow::Result;
@@ -4193,7 +4251,84 @@ mod tests {
     }
 
     #[test]
-    fn prepare_dispatcher_runtime_env_removes_conflicting_color_overrides() {
+    fn set_parser_state_trims_commands_before_dirty_tracking() {
+        let mut session = SessionRecord::new(
+            "dispatcher-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "prompt".to_string(),
+            None,
+        );
+
+        assert!(super::set_parser_state(
+            &mut session,
+            ACP_APPROVAL_REQUIRED,
+            "Need approval",
+            Some(" resume-turn ".to_string()),
+        ));
+        assert_eq!(
+            session
+                .metadata
+                .get(super::PARSER_STATE_COMMAND_KEY)
+                .map(String::as_str),
+            Some("resume-turn")
+        );
+
+        assert!(!super::set_parser_state(
+            &mut session,
+            ACP_APPROVAL_REQUIRED,
+            "Need approval",
+            Some("resume-turn".to_string()),
+        ));
+    }
+
+    #[test]
+    fn mark_dispatcher_waiting_for_approval_tracks_summary_only_changes() {
+        let mut session = SessionRecord::new(
+            "dispatcher-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "prompt".to_string(),
+            None,
+        );
+        session.status = SessionStatus::NeedsInput;
+        session.activity = Some("waiting_input".to_string());
+        session.summary = Some("Old summary".to_string());
+        session
+            .metadata
+            .insert("summary".to_string(), "Old summary".to_string());
+        session.metadata.insert(
+            super::PARSER_STATE_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+        session.metadata.insert(
+            super::PARSER_STATE_MESSAGE_KEY.to_string(),
+            super::ACP_APPROVAL_READY_MESSAGE.to_string(),
+        );
+
+        assert!(super::mark_dispatcher_waiting_for_approval(&mut session));
+        assert_eq!(
+            session.summary.as_deref(),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+        assert_eq!(
+            session.metadata.get("summary").map(String::as_str),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn prepare_dispatcher_runtime_env_preserves_existing_term() {
         let mut env = HashMap::from([
             ("NO_COLOR".to_string(), "1".to_string()),
             ("FORCE_COLOR".to_string(), "1".to_string()),
@@ -4516,7 +4651,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_loaded_dispatcher_thread_restores_ready_dispatchers_to_execution_mode() {
+    fn normalize_loaded_dispatcher_thread_restores_pending_plan_reviews_to_needs_input() {
         let mut thread = SessionRecord::new(
             "dispatcher-load-approval".to_string(),
             "demo".to_string(),
@@ -4544,13 +4679,135 @@ mod tests {
         );
 
         assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert_eq!(thread.status, SessionStatus::NeedsInput);
+        assert_eq!(thread.activity.as_deref(), Some("waiting_input"));
         assert_eq!(
             thread
                 .metadata
                 .get(ACP_APPROVAL_STATE_METADATA_KEY)
                 .map(String::as_str),
-            Some(ACP_APPROVAL_GRANTED)
+            Some(ACP_APPROVAL_REQUIRED)
         );
+        assert_eq!(
+            thread.metadata.get("parserState").map(String::as_str),
+            Some("approval_required")
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_dispatcher_thread_restores_working_plan_reviews_to_needs_input() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-approval-working".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread.summary = Some("Runtime still winding down".to_string());
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+
+        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert_eq!(thread.status, SessionStatus::NeedsInput);
+        assert_eq!(thread.activity.as_deref(), Some("waiting_input"));
+        assert_eq!(
+            thread.summary.as_deref(),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+        assert_eq!(
+            thread.metadata.get("summary").map(String::as_str),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+        assert_eq!(
+            thread.metadata.get("parserState").map(String::as_str),
+            Some("approval_required")
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_plan_only_dispatcher_turn_waits_for_explicit_approval() {
+        let (root, state) = build_test_state("acp-headless-plan-only").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "## Proposed plan\n\n1. Create a task.\n2. Ask for approval."
+                    .to_string(),
+                delay: Duration::from_millis(200),
+            }),
+        );
+
+        state
+            .send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "plan only".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            )
+            .await
+            .expect("dispatcher send should succeed");
+
+        let updated = timeout(Duration::from_secs(3), async {
+            loop {
+                let updated = state
+                    .get_dispatcher_thread(&thread.id)
+                    .await
+                    .expect("dispatcher thread should still exist");
+                let has_reply = updated.conversation.iter().any(|entry| {
+                    entry.kind == "assistant_message" && entry.text.contains("Proposed plan")
+                });
+                if has_reply && updated.status == SessionStatus::NeedsInput {
+                    break updated;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("plan-only runtime should eventually wait for approval");
+
+        assert_eq!(updated.status, SessionStatus::NeedsInput);
+        assert_eq!(updated.activity.as_deref(), Some("waiting_input"));
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_APPROVAL_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some(ACP_APPROVAL_REQUIRED)
+        );
+        assert_eq!(
+            updated.metadata.get("parserState").map(String::as_str),
+            Some("approval_required")
+        );
+        assert!(updated
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("approval"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

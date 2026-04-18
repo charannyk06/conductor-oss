@@ -16,15 +16,33 @@ use crate::dispatcher_task_lifecycle::{
     DispatcherTaskCreateInput, DispatcherTaskMutationContext, DispatcherTaskUpdateInput,
 };
 use crate::state::{
-    build_normalized_chat_feed, is_project_dispatcher_session, AppState,
+    build_dispatcher_chat_feed, is_project_dispatcher_session, AppState,
     CreateDispatcherThreadOptions, DispatcherBindingLookup, DispatcherPreferencesPatch,
-    OpenClawDispatcherConfigPatch, SessionRecord, UpsertDispatcherBindingInput,
+    OpenClawDispatcherConfigPatch, SessionRecord, SessionStatus, UpsertDispatcherBindingInput,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
 
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
+const DISPATCHER_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
+const DISPATCHER_APPROVAL_REQUIRED: &str = "approval_required";
+const DISPATCHER_APPROVAL_PARSER_STATE_KEY: &str = "parserState";
+
+fn dispatcher_is_waiting_for_plan_approval(dispatcher: &SessionRecord) -> bool {
+    dispatcher
+        .metadata
+        .get(DISPATCHER_APPROVAL_STATE_METADATA_KEY)
+        .map(String::as_str)
+        == Some(DISPATCHER_APPROVAL_REQUIRED)
+        && dispatcher.status == SessionStatus::NeedsInput
+        && (dispatcher.activity.as_deref() == Some("waiting_input")
+            || dispatcher
+                .metadata
+                .get(DISPATCHER_APPROVAL_PARSER_STATE_KEY)
+                .map(String::as_str)
+                == Some(DISPATCHER_APPROVAL_REQUIRED))
+}
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -70,6 +88,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/projects/{project_id}/dispatcher/send",
             post(send_to_dispatcher),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/approve",
+            post(approve_dispatcher_plan),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/reject",
+            post(reject_dispatcher_plan),
         )
         .route(
             "/api/projects/{project_id}/dispatcher/interrupt",
@@ -760,7 +786,7 @@ async fn dispatcher_feed_payload(
             })
         });
 
-    let all_entries = build_normalized_chat_feed(dispatcher);
+    let all_entries = build_dispatcher_chat_feed(dispatcher);
     let total_entries = all_entries.len();
     let entries = if total_entries > window_limit {
         all_entries
@@ -780,7 +806,7 @@ async fn dispatcher_feed_payload(
         "approvalState": dispatcher.metadata.get("acpPlanApprovalState").cloned(),
         "parserState": parser_state,
         "runtimeStatus": Value::Null,
-        "source": if dispatcher.output.is_empty() { "conversation-only" } else { "runtime-output" },
+        "source": "dispatcher_conversation",
         "integration": dispatcher_integration_payload(dispatcher, &dispatcher.project_id),
     });
 
@@ -1140,6 +1166,73 @@ async fn send_to_dispatcher(
         }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
+}
+
+async fn dispatch_approval_action(
+    state: Arc<AppState>,
+    project_id: String,
+    query: DispatcherQuery,
+    action: &'static str,
+) -> ApiResponse {
+    let bridge_id = trimmed_query_value(query.bridge_id.as_deref());
+    let dispatcher = match resolve_project_dispatcher(
+        &state,
+        &project_id,
+        bridge_id,
+        query.thread_id.as_deref(),
+    )
+    .await
+    {
+        Some(dispatcher) => dispatcher,
+        None => {
+            return error(
+                StatusCode::NOT_FOUND,
+                format!("Dispatcher thread for project {project_id} not found"),
+            );
+        }
+    };
+
+    if !dispatcher_is_waiting_for_plan_approval(&dispatcher) {
+        return error(
+            StatusCode::CONFLICT,
+            format!(
+                "Dispatcher thread {} is not waiting for plan approval",
+                dispatcher.id
+            ),
+        );
+    }
+
+    let request = crate::state::DispatcherTurnRequest::plain(
+        action.to_string(),
+        Vec::new(),
+        None,
+        None,
+        "dispatcher_approval",
+    );
+
+    match state
+        .send_to_dispatcher_thread(&dispatcher.id, request)
+        .await
+    {
+        Ok(()) => ok(json!({ "ok": true, "threadId": dispatcher.id })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+async fn approve_dispatcher_plan(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherQuery>,
+) -> ApiResponse {
+    dispatch_approval_action(state, project_id, query, "approve").await
+}
+
+async fn reject_dispatcher_plan(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherQuery>,
+) -> ApiResponse {
+    dispatch_approval_action(state, project_id, query, "reject").await
 }
 
 async fn interrupt_dispatcher(

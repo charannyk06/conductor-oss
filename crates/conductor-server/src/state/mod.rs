@@ -40,7 +40,8 @@ pub(crate) use dispatcher_bindings::{
 pub(crate) use helpers::sanitize_terminal_text;
 pub(crate) use helpers::session_to_dashboard_value_with_bridge;
 pub use helpers::{
-    build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
+    build_dispatcher_chat_feed, build_normalized_chat_feed, resolve_board_file,
+    session_to_dashboard_value, trim_lines_tail,
 };
 pub(crate) use mcp_config::{
     build_claude_mcp_config_json, build_codex_mcp_config_args, deserialize_mcp_servers,
