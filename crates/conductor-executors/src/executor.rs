@@ -311,7 +311,9 @@ fn flatten_parsed_output(event: ExecutorOutput) -> Vec<ExecutorOutput> {
         ExecutorOutput::Composite(events) => {
             events.into_iter().flat_map(flatten_parsed_output).collect()
         }
-        ExecutorOutput::Stdout(text) if text.trim().is_empty() => Vec::new(),
+        ExecutorOutput::Stdout(text) | ExecutorOutput::Stderr(text) if text.trim().is_empty() => {
+            Vec::new()
+        }
         other => vec![other],
     }
 }
@@ -457,6 +459,10 @@ mod tests {
 
         raw_tx
             .send(ExecutorOutput::Stderr("stderr-structured".to_string()))
+            .await
+            .unwrap();
+        raw_tx
+            .send(ExecutorOutput::Stderr("   ".to_string()))
             .await
             .unwrap();
         raw_tx

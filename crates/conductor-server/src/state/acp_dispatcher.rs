@@ -837,20 +837,25 @@ fn set_parser_state(
     }
 
     let mut changed = false;
-    changed |= session
+    let previous_kind = session
         .metadata
-        .insert(PARSER_STATE_KEY.to_string(), kind.to_string())
-        .is_some_and(|value| value != kind);
-    changed |= session
-        .metadata
-        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string())
-        .is_some_and(|value| value != trimmed);
+        .insert(PARSER_STATE_KEY.to_string(), kind.to_string());
+    changed |= previous_kind.as_deref() != Some(kind);
 
-    if let Some(value) = command.filter(|value| !value.trim().is_empty()) {
-        changed |= session
+    let previous_message = session
+        .metadata
+        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string());
+    changed |= previous_message.as_deref() != Some(trimmed);
+
+    if let Some(value) = command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let previous_command = session
             .metadata
-            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value.to_string())
-            .is_some_and(|current| current != value);
+            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value.to_string());
+        changed |= previous_command.as_deref() != Some(value);
     } else {
         changed |= session.metadata.remove(PARSER_STATE_COMMAND_KEY).is_some();
     }
@@ -880,6 +885,9 @@ fn mark_dispatcher_waiting_for_approval(session: &mut SessionRecord) -> bool {
     }
     if session.summary.as_deref() != Some(ACP_APPROVAL_READY_MESSAGE) {
         session.summary = Some(ACP_APPROVAL_READY_MESSAGE.to_string());
+        changed = true;
+    }
+    if session.metadata.get("summary").map(String::as_str) != Some(ACP_APPROVAL_READY_MESSAGE) {
         session.metadata.insert(
             "summary".to_string(),
             ACP_APPROVAL_READY_MESSAGE.to_string(),
@@ -4259,7 +4267,84 @@ mod tests {
     }
 
     #[test]
-    fn prepare_dispatcher_runtime_env_removes_conflicting_color_overrides() {
+    fn set_parser_state_trims_commands_before_dirty_tracking() {
+        let mut session = SessionRecord::new(
+            "dispatcher-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "prompt".to_string(),
+            None,
+        );
+
+        assert!(super::set_parser_state(
+            &mut session,
+            ACP_APPROVAL_REQUIRED,
+            "Need approval",
+            Some(" resume-turn ".to_string()),
+        ));
+        assert_eq!(
+            session
+                .metadata
+                .get(super::PARSER_STATE_COMMAND_KEY)
+                .map(String::as_str),
+            Some("resume-turn")
+        );
+
+        assert!(!super::set_parser_state(
+            &mut session,
+            ACP_APPROVAL_REQUIRED,
+            "Need approval",
+            Some("resume-turn".to_string()),
+        ));
+    }
+
+    #[test]
+    fn mark_dispatcher_waiting_for_approval_tracks_summary_only_changes() {
+        let mut session = SessionRecord::new(
+            "dispatcher-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "prompt".to_string(),
+            None,
+        );
+        session.status = SessionStatus::NeedsInput;
+        session.activity = Some("waiting_input".to_string());
+        session.summary = Some("Old summary".to_string());
+        session
+            .metadata
+            .insert("summary".to_string(), "Old summary".to_string());
+        session.metadata.insert(
+            super::PARSER_STATE_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+        session.metadata.insert(
+            super::PARSER_STATE_MESSAGE_KEY.to_string(),
+            super::ACP_APPROVAL_READY_MESSAGE.to_string(),
+        );
+
+        assert!(super::mark_dispatcher_waiting_for_approval(&mut session));
+        assert_eq!(
+            session.summary.as_deref(),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+        assert_eq!(
+            session.metadata.get("summary").map(String::as_str),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn prepare_dispatcher_runtime_env_preserves_existing_term() {
         let mut env = HashMap::from([
             ("NO_COLOR".to_string(), "1".to_string()),
             ("FORCE_COLOR".to_string(), "1".to_string()),

@@ -164,6 +164,9 @@ These routes are the explicit approval contract for dispatcher plan-only turns. 
 
 **Response:** `{ "ok": true, "threadId": "<dispatcher session id>" }`
 
+`404` if the dispatcher thread cannot be resolved for the project/query scope.
+`409` if the dispatcher exists but is not currently waiting for plan approval.
+
 ### Interrupt
 
 `POST /api/projects/{projectId}/dispatcher/interrupt?threadId=&bridgeId=`

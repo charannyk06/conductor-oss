@@ -445,13 +445,25 @@ pub async fn spawn_process_no_stdin_with_env_removals(
         use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
     }
 
     let mut child = cmd.spawn()?;
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let result = unsafe { libc::setpgid(pid as libc::pid_t, pid as libc::pid_t) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EACCES) {
+                return Err(error.into());
+            }
+        }
+    }
     let pid = child.id().unwrap_or(0);
 
     let stdout = child
@@ -608,6 +620,7 @@ mod tests {
         .await
         .expect("headless process should spawn");
 
+        assert_ne!(handle.pid, 0, "headless process should expose a valid pid");
         let parent_pgid = unsafe { libc::getpgrp() };
         let child_pgid = unsafe { libc::getpgid(handle.pid as libc::pid_t) };
 
