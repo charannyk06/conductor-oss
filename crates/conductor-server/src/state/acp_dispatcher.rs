@@ -1288,26 +1288,17 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
             .insert("role".to_string(), "orchestrator".to_string());
         changed = true;
     }
-    let should_set_default_approval = thread
+    let approval_state = thread
         .metadata
         .get(ACP_APPROVAL_STATE_METADATA_KEY)
-        .map(String::as_str)
-        .is_none();
+        .cloned();
+    let approval_required = approval_state.as_deref() == Some(ACP_APPROVAL_REQUIRED);
+    let should_set_default_approval = approval_state.is_none();
     if should_set_default_approval {
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             ACP_APPROVAL_GRANTED.to_string(),
         );
-        changed = true;
-    } else if thread
-        .metadata
-        .get(ACP_APPROVAL_STATE_METADATA_KEY)
-        .map(String::as_str)
-        == Some(ACP_APPROVAL_REQUIRED)
-        && thread.status == SessionStatus::Idle
-        && thread.activity.as_deref() == Some("idle")
-        && mark_dispatcher_waiting_for_approval(thread)
-    {
         changed = true;
     }
 
@@ -1349,19 +1340,12 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
         }
     }
 
-    if thread
-        .metadata
-        .get(ACP_APPROVAL_STATE_METADATA_KEY)
-        .map(String::as_str)
-        == Some(ACP_APPROVAL_REQUIRED)
-        && thread.status == SessionStatus::NeedsInput
-        && thread.activity.as_deref() == Some("waiting_input")
-        && set_parser_state(
-            thread,
-            ACP_APPROVAL_REQUIRED,
-            ACP_APPROVAL_READY_MESSAGE,
-            None,
+    if approval_required
+        && matches!(
+            thread.status,
+            SessionStatus::Idle | SessionStatus::NeedsInput
         )
+        && mark_dispatcher_waiting_for_approval(thread)
     {
         changed = true;
     }
@@ -4703,6 +4687,51 @@ mod tests {
                 .get(ACP_APPROVAL_STATE_METADATA_KEY)
                 .map(String::as_str),
             Some(ACP_APPROVAL_REQUIRED)
+        );
+        assert_eq!(
+            thread.metadata.get("parserState").map(String::as_str),
+            Some("approval_required")
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_dispatcher_thread_restores_working_plan_reviews_to_needs_input() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-approval-working".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread.summary = Some("Runtime still winding down".to_string());
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+
+        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert_eq!(thread.status, SessionStatus::NeedsInput);
+        assert_eq!(thread.activity.as_deref(), Some("waiting_input"));
+        assert_eq!(
+            thread.summary.as_deref(),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
+        );
+        assert_eq!(
+            thread.metadata.get("summary").map(String::as_str),
+            Some(super::ACP_APPROVAL_READY_MESSAGE)
         );
         assert_eq!(
             thread.metadata.get("parserState").map(String::as_str),
