@@ -1272,7 +1272,7 @@ impl AppState {
             spawn_env.insert("CONDUCTOR_SESSION_KIND".to_string(), session_kind);
         }
         if executor.kind() == AgentKind::ClaudeCode {
-            spawn_env.insert("CLAUDECODE".to_string(), String::new());
+            spawn_env.insert("CLAUDECODE".to_string(), "1".to_string());
             // Mirror the JS Claude launcher behavior so the local Claude login
             // is used instead of any inherited API key billing context.
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
@@ -2337,7 +2337,7 @@ impl AppState {
             resume_env.insert("CONDUCTOR_SESSION_KIND".to_string(), session_kind);
         }
         if executor.kind() == AgentKind::ClaudeCode {
-            resume_env.insert("CLAUDECODE".to_string(), String::new());
+            resume_env.insert("CLAUDECODE".to_string(), "1".to_string());
             resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
         if executor.kind() == AgentKind::OpenClaw {

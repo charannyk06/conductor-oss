@@ -3406,7 +3406,7 @@ impl AppState {
             ACP_SESSION_KIND.to_string(),
         );
         if executor.kind() == AgentKind::ClaudeCode {
-            spawn_env.insert("CLAUDECODE".to_string(), String::new());
+            spawn_env.insert("CLAUDECODE".to_string(), "1".to_string());
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
         if executor.kind() == AgentKind::OpenClaw {
@@ -3565,9 +3565,17 @@ impl AppState {
         let state = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = output_rx.recv().await {
-                let _ = state
+                if let Err(err) = state
                     .apply_dispatcher_runtime_event(&thread_id, &runtime_id, event)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        thread_id = %thread_id,
+                        runtime_id = %runtime_id,
+                        error = %err,
+                        "failed to apply dispatcher runtime event"
+                    );
+                }
             }
         });
     }

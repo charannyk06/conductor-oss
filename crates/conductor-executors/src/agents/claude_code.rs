@@ -75,6 +75,8 @@ impl Executor for ClaudeCodeExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        let sanitized_extra_args = options.sanitized_extra_args();
+        let needs_prompt_separator = sanitized_extra_args.iter().any(|arg| arg == "--mcp-config");
         if options.interactive {
             let mut args = Vec::new();
 
@@ -104,7 +106,7 @@ impl Executor for ClaudeCodeExecutor {
                     args.push(reasoning_effort.clone());
                 }
 
-                args.extend(options.sanitized_extra_args());
+                args.extend(sanitized_extra_args);
                 return args;
             }
 
@@ -122,8 +124,11 @@ impl Executor for ClaudeCodeExecutor {
                 args.push(reasoning_effort.clone());
             }
 
-            args.extend(options.sanitized_extra_args());
+            args.extend(sanitized_extra_args);
             if !options.prompt.trim().is_empty() {
+                if needs_prompt_separator {
+                    args.push("--".to_string());
+                }
                 args.push(options.prompt.clone());
             }
             return args;
@@ -154,9 +159,12 @@ impl Executor for ClaudeCodeExecutor {
         }
 
         // Add extra args.
-        args.extend(options.sanitized_extra_args());
+        args.extend(sanitized_extra_args);
 
         // Add the prompt as the final argument.
+        if needs_prompt_separator {
+            args.push("--".to_string());
+        }
         args.push(options.prompt.clone());
 
         args
@@ -545,6 +553,40 @@ mod tests {
         });
 
         assert_eq!(args, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn build_args_mcp_config_inserts_separator_before_prompt() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "say exactly bridge dispatch smoke test".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            skip_permissions: true,
+            extra_args: vec![
+                "--mcp-config".to_string(),
+                "{\"mcpServers\":{\"conductor\":{}}}".to_string(),
+            ],
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(args.windows(2).any(|window| {
+            window
+                == [
+                    "--mcp-config".to_string(),
+                    "{\"mcpServers\":{\"conductor\":{}}}".to_string(),
+                ]
+        }));
+        assert!(args.ends_with(&[
+            "--".to_string(),
+            "say exactly bridge dispatch smoke test".to_string(),
+        ]));
     }
 
     #[test]
