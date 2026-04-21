@@ -11,8 +11,8 @@ type PublicPageShellProps = {
 
 export function PublicPageShell({ children, className }: PublicPageShellProps) {
   return (
-    <main className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-strong)]">
-      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10">
+    <main className="h-[100dvh] overflow-x-hidden overflow-y-auto bg-[var(--bg-canvas)] text-[var(--text-strong)]">
+      <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10">
         <header className="flex items-center gap-3 border-b border-[var(--border-soft)] pb-6">
           <img
             src="/icon.svg"
