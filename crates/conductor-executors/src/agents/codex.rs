@@ -5,10 +5,14 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::{spawn_process, spawn_process_no_stdin};
+use crate::process::{
+    spawn_process, spawn_process_no_stdin_with_clean_env, spawn_process_with_env_removals,
+};
 
 /// OpenAI Codex CLI executor.
 #[derive(Clone)]
@@ -16,9 +20,331 @@ pub struct CodexExecutor {
     binary: PathBuf,
 }
 
+fn build_codex_spawn_env(overrides: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for key in [
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "SHELL",
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "USER",
+        "USERNAME",
+        "LOGNAME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "TERM",
+        "COLORTERM",
+        "__CF_USER_TEXT_ENCODING",
+        "VIRTUAL_ENV",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "SSH_AUTH_SOCK",
+        "SYSTEMROOT",
+        "XPC_FLAGS",
+        "XPC_SERVICE_NAME",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env.extend(overrides.clone());
+    env
+}
+
+fn codex_clean_env_removals(allowed_env: &HashMap<String, String>) -> Vec<String> {
+    std::env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .filter(|key| !allowed_env.contains_key(key))
+        .collect()
+}
+
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(())
+}
+
+fn clone_or_link_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::copy(source, destination)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+fn strip_mcp_servers_from_codex_config(config: &str) -> String {
+    let sanitized = toml::from_str::<toml::Value>(config)
+        .ok()
+        .and_then(|mut value| {
+            value.as_table_mut()?.remove("mcp_servers");
+            toml::to_string(&value).ok()
+        })
+        .unwrap_or_else(|| strip_mcp_servers_from_codex_config_fallback(config));
+
+    if config.ends_with('\n') && !sanitized.ends_with('\n') {
+        format!("{sanitized}\n")
+    } else {
+        sanitized
+    }
+}
+
+fn strip_mcp_servers_from_codex_config_fallback(config: &str) -> String {
+    let mut sanitized = Vec::new();
+    let mut skipping_mcp_section = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let table_name = trimmed.trim_matches(|ch| ch == '[' || ch == ']');
+            skipping_mcp_section =
+                table_name == "mcp_servers" || table_name.starts_with("mcp_servers.");
+            if skipping_mcp_section {
+                continue;
+            }
+        }
+
+        if !skipping_mcp_section {
+            sanitized.push(line);
+        }
+    }
+
+    let mut sanitized_config = sanitized.join("\n");
+    if config.ends_with('\n') {
+        sanitized_config.push('\n');
+    }
+
+    sanitized_config
+}
+
+fn seed_isolated_codex_home(source_home: &Path, target_home: &Path) -> std::io::Result<()> {
+    let source_codex_dir = source_home.join(".codex");
+    let target_codex_dir = target_home.join(".codex");
+    create_private_dir_all(target_home)?;
+    create_private_dir_all(&target_codex_dir)?;
+
+    let source_auth = source_codex_dir.join("auth.json");
+    if source_auth.is_file() {
+        clone_or_link_file(&source_auth, &target_codex_dir.join("auth.json"))?;
+    }
+
+    let source_version = source_codex_dir.join("version.json");
+    if source_version.is_file() {
+        std::fs::copy(&source_version, target_codex_dir.join("version.json"))?;
+    }
+
+    let source_config = source_codex_dir.join("config.toml");
+    if source_config.is_file() {
+        let config = std::fs::read_to_string(&source_config)?;
+        let sanitized = strip_mcp_servers_from_codex_config(&config);
+        std::fs::write(target_codex_dir.join("config.toml"), sanitized)?;
+    }
+
+    Ok(())
+}
+
+fn next_headless_codex_home_path(source_home: &Path) -> PathBuf {
+    source_home
+        .join(".conductor")
+        .join("codex-headless")
+        .join(Uuid::new_v4().to_string())
+}
+
+fn resolve_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn apply_headless_codex_env(
+    env: &mut HashMap<String, String>,
+    headless_home: &Path,
+) -> std::io::Result<()> {
+    env.insert(
+        "HOME".to_string(),
+        headless_home.to_string_lossy().to_string(),
+    );
+
+    #[cfg(windows)]
+    {
+        let roaming = headless_home.join("AppData").join("Roaming");
+        let local = headless_home.join("AppData").join("Local");
+        create_private_dir_all(&roaming)?;
+        create_private_dir_all(&local)?;
+        env.insert(
+            "USERPROFILE".to_string(),
+            headless_home.to_string_lossy().to_string(),
+        );
+        env.insert("APPDATA".to_string(), roaming.to_string_lossy().to_string());
+        env.insert(
+            "LOCALAPPDATA".to_string(),
+            local.to_string_lossy().to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn prepare_headless_codex_home() -> std::io::Result<Option<PathBuf>> {
+    let Some(source_home) = resolve_home_dir() else {
+        return Ok(None);
+    };
+
+    let target_home = next_headless_codex_home_path(&source_home);
+    seed_isolated_codex_home(&source_home, &target_home)?;
+    Ok(Some(target_home))
+}
+
+fn wrap_codex_output_with_home_cleanup(
+    headless_home: Option<PathBuf>,
+    mut output_rx: mpsc::Receiver<ExecutorOutput>,
+) -> mpsc::Receiver<ExecutorOutput> {
+    let (cleanup_tx, cleanup_rx) = mpsc::channel(1024);
+
+    tokio::spawn(async move {
+        while let Some(event) = output_rx.recv().await {
+            if cleanup_tx.send(event).await.is_err() {
+                break;
+            }
+        }
+
+        if let Some(headless_home) = headless_home {
+            let _ = tokio::fs::remove_dir_all(headless_home).await;
+        }
+    });
+
+    cleanup_rx
+}
+
+fn codex_target_triple() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") | ("linux", "arm64") => Some("aarch64-unknown-linux-musl"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("macos", "aarch64") | ("macos", "arm64") => Some("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+        ("windows", "aarch64") | ("windows", "arm64") => Some("aarch64-pc-windows-msvc"),
+        _ => None,
+    }
+}
+
+fn codex_platform_package(target_triple: &str) -> Option<&'static str> {
+    match target_triple {
+        "x86_64-unknown-linux-musl" => Some("@openai/codex-linux-x64"),
+        "aarch64-unknown-linux-musl" => Some("@openai/codex-linux-arm64"),
+        "x86_64-apple-darwin" => Some("@openai/codex-darwin-x64"),
+        "aarch64-apple-darwin" => Some("@openai/codex-darwin-arm64"),
+        "x86_64-pc-windows-msvc" => Some("@openai/codex-win32-x64"),
+        "aarch64-pc-windows-msvc" => Some("@openai/codex-win32-arm64"),
+        _ => None,
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Ok(metadata) = std::fs::metadata(path) {
+            return metadata.permissions().mode() & 0o111 != 0;
+        }
+        false
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn resolve_native_codex_binary(binary: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(binary).unwrap_or_else(|_| binary.to_path_buf());
+    let is_node_wrapper = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("js"))
+        .unwrap_or(false)
+        && canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case("codex.js"))
+            .unwrap_or(false);
+
+    if !is_node_wrapper {
+        return canonical;
+    }
+
+    let Some(target_triple) = codex_target_triple() else {
+        return canonical;
+    };
+    let binary_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let Some(package_root) = canonical.parent().and_then(Path::parent) else {
+        return canonical;
+    };
+
+    let local_candidate = package_root
+        .join("vendor")
+        .join(target_triple)
+        .join("codex")
+        .join(binary_name);
+    if is_executable_file(&local_candidate) {
+        return local_candidate;
+    }
+
+    let Some(platform_package) = codex_platform_package(target_triple) else {
+        return canonical;
+    };
+    let packaged_candidate = package_root
+        .join("node_modules")
+        .join(platform_package)
+        .join("vendor")
+        .join(target_triple)
+        .join("codex")
+        .join(binary_name);
+    if is_executable_file(&packaged_candidate) {
+        return packaged_candidate;
+    }
+
+    canonical
+}
+
 impl CodexExecutor {
     pub fn new(binary: PathBuf) -> Self {
-        Self { binary }
+        Self {
+            binary: resolve_native_codex_binary(&binary),
+        }
     }
 
     pub fn discover() -> Option<Self> {
@@ -55,13 +381,37 @@ impl Executor for CodexExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let needs_stdin = options.structured_output && args.iter().any(|arg| arg == "-");
-        let handle = if options.structured_output && !needs_stdin {
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        let mut env = build_codex_spawn_env(&options.env);
+        let headless_home = if options.structured_output {
+            let headless_home = prepare_headless_codex_home()?;
+            if let Some(ref headless_home) = headless_home {
+                apply_headless_codex_env(&mut env, headless_home)?;
+            }
+            headless_home
         } else {
-            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+            None
+        };
+        let needs_stdin = options.structured_output && args.iter().any(|arg| arg == "-");
+        let spawn_result = if options.structured_output && !needs_stdin {
+            spawn_process_no_stdin_with_clean_env(&self.binary, &args, &options.cwd, &env).await
+        } else if options.structured_output {
+            let env_remove = codex_clean_env_removals(&env);
+            spawn_process_with_env_removals(&self.binary, &args, &options.cwd, &env, &env_remove)
+                .await
+        } else {
+            spawn_process(&self.binary, &args, &options.cwd, &env).await
+        };
+        let handle = match spawn_result {
+            Ok(handle) => handle,
+            Err(error) => {
+                if let Some(headless_home) = headless_home.clone() {
+                    let _ = tokio::fs::remove_dir_all(headless_home).await;
+                }
+                return Err(error);
+            }
         };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
+        let output_rx = wrap_codex_output_with_home_cleanup(headless_home, output_rx);
 
         Ok(ExecutorHandle::new(
             handle.pid,
@@ -539,7 +889,173 @@ fn extract_text(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use crate::executor::Executor;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::time::{timeout, Duration};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("conductor-codex-{prefix}-{nanos}"))
+    }
+
+    fn mark_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("set executable bit");
+        }
+    }
+
+    #[test]
+    fn next_headless_codex_home_path_is_unique() {
+        let source_home = unique_temp_dir("headless-home-root");
+        let first = next_headless_codex_home_path(&source_home);
+        let second = next_headless_codex_home_path(&source_home);
+        assert_ne!(first, second);
+        assert!(first.to_string_lossy().contains("codex-headless"));
+        assert!(second.to_string_lossy().contains("codex-headless"));
+    }
+
+    #[test]
+    fn strip_mcp_servers_from_codex_config_preserves_non_mcp_settings() {
+        let config = concat!(
+            "model = \"gpt-5.4\"\n",
+            "approval_policy = \"never\"\n\n",
+            "[profiles.default]\n",
+            "model = \"gpt-5.4\"\n\n",
+            "[mcp_servers.memory]\n",
+            "command = \"npx\"\n\n",
+            "[tools]\n",
+            "web_search = true\n"
+        );
+
+        let sanitized = strip_mcp_servers_from_codex_config(config);
+        assert!(sanitized.contains("approval_policy = \"never\""));
+        assert!(sanitized.contains("[profiles.default]"));
+        assert!(sanitized.contains("[tools]"));
+        assert!(!sanitized.contains("mcp_servers"));
+    }
+
+    #[test]
+    fn strip_mcp_servers_from_codex_config_removes_dotted_keys() {
+        let config = concat!(
+            "model = \"gpt-5.4\"\n",
+            "mcp_servers.memory.command = \"npx\"\n",
+            "mcp_servers.memory.args = [\"-y\", \"demo\"]\n",
+            "approval_policy = \"never\"\n"
+        );
+
+        let sanitized = strip_mcp_servers_from_codex_config(config);
+        assert!(sanitized.contains("model = \"gpt-5.4\""));
+        assert!(sanitized.contains("approval_policy = \"never\""));
+        assert!(!sanitized.contains("mcp_servers"));
+    }
+
+    #[tokio::test]
+    async fn wrap_codex_output_with_home_cleanup_removes_headless_home() {
+        let temp_dir = unique_temp_dir("headless-cleanup");
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let (output_tx, output_rx) = mpsc::channel(4);
+        let mut wrapped = wrap_codex_output_with_home_cleanup(Some(temp_dir.clone()), output_rx);
+        output_tx
+            .send(ExecutorOutput::Completed { exit_code: 0 })
+            .await
+            .expect("send completion");
+        drop(output_tx);
+
+        assert!(matches!(
+            wrapped.recv().await,
+            Some(ExecutorOutput::Completed { exit_code: 0 })
+        ));
+        timeout(Duration::from_secs(2), async {
+            while temp_dir.exists() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("cleanup should remove headless home");
+    }
+
+    #[test]
+    fn seed_isolated_codex_home_copies_auth_and_strips_mcp_config() {
+        let temp_dir = unique_temp_dir("isolated-home");
+        let source_home = temp_dir.join("source-home");
+        let target_home = temp_dir.join("target-home");
+        let source_codex_dir = source_home.join(".codex");
+        fs::create_dir_all(&source_codex_dir).expect("create source codex dir");
+        fs::write(source_codex_dir.join("auth.json"), b"{\"token\":\"ok\"}\n").expect("write auth");
+        fs::write(
+            source_codex_dir.join("config.toml"),
+            concat!(
+                "model = \"gpt-5.4\"\n",
+                "approval_policy = \"never\"\n\n",
+                "[mcp_servers.memory]\n",
+                "command = \"npx\"\n\n",
+                "[profiles.default]\n",
+                "model = \"gpt-5.4\"\n"
+            ),
+        )
+        .expect("write source config");
+
+        seed_isolated_codex_home(&source_home, &target_home).expect("seed isolated home");
+
+        let target_codex_dir = target_home.join(".codex");
+        assert!(target_codex_dir.join("auth.json").is_file());
+        #[cfg(unix)]
+        assert!(!fs::symlink_metadata(target_codex_dir.join("auth.json"))
+            .expect("auth metadata")
+            .file_type()
+            .is_symlink());
+        let config = fs::read_to_string(target_codex_dir.join("config.toml")).expect("read config");
+        assert!(config.contains("approval_policy = \"never\""));
+        assert!(config.contains("[profiles.default]"));
+        assert!(!config.contains("mcp_servers"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn new_resolves_native_binary_from_node_wrapper() {
+        let Some(target_triple) = codex_target_triple() else {
+            return;
+        };
+        let Some(platform_package) = codex_platform_package(target_triple) else {
+            return;
+        };
+
+        let temp_dir = unique_temp_dir("native-resolve");
+        let package_root = temp_dir.join("@openai").join("codex");
+        let wrapper_path = package_root.join("bin").join("codex.js");
+        let native_path = package_root
+            .join("node_modules")
+            .join(platform_package)
+            .join("vendor")
+            .join(target_triple)
+            .join("codex")
+            .join(if cfg!(windows) { "codex.exe" } else { "codex" });
+
+        fs::create_dir_all(wrapper_path.parent().expect("wrapper parent"))
+            .expect("create wrapper dir");
+        fs::create_dir_all(native_path.parent().expect("native parent"))
+            .expect("create native dir");
+        fs::write(&wrapper_path, b"#!/usr/bin/env node\n").expect("write wrapper");
+        fs::write(&native_path, b"#!/bin/sh\nexit 0\n").expect("write native binary");
+        mark_executable(&wrapper_path);
+        mark_executable(&native_path);
+
+        let executor = CodexExecutor::new(wrapper_path.clone());
+        let expected = fs::canonicalize(&native_path).expect("canonical native path");
+        assert_eq!(executor.binary_path(), expected.as_path());
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
 
     #[test]
     fn parse_started_mcp_tool_call_emits_structured_status() {
