@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,13 +33,147 @@ fn apply_tokio_command_env(
     cmd: &mut Command,
     env: &HashMap<String, String>,
     env_remove: &[String],
+    clear_existing: bool,
 ) {
+    if clear_existing {
+        cmd.env_clear();
+    }
     for key in env_remove {
         cmd.env_remove(key);
     }
     for (key, value) in env {
         cmd.env(key, value);
     }
+}
+
+#[cfg(unix)]
+fn mark_extra_fds_cloexec_in_child() -> std::io::Result<()> {
+    let max_fd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    let max_fd = if max_fd > 0 { max_fd as i32 } else { 1024 };
+    for fd in 3..max_fd {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EBADF) {
+                return Err(error);
+            }
+            continue;
+        }
+
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        if result == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_default_signals_in_child() -> std::io::Result<()> {
+    for signal in [libc::SIGPIPE, libc::SIGXFSZ] {
+        let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+        action.sa_sigaction = libc::SIG_DFL;
+        let empty_result = unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        if empty_result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        action.sa_flags = 0;
+        let result = unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn clear_signal_mask_in_child() -> std::io::Result<()> {
+    let mut set = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+    let empty_result = unsafe { libc::sigemptyset(&mut set) };
+    if empty_result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mask_result = unsafe { libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) };
+    if mask_result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+const MAX_BUFFERED_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
+async fn await_reader_task_with_timeout<T>(task: &mut tokio::task::JoinHandle<T>) {
+    if tokio::time::timeout(Duration::from_millis(250), &mut *task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+fn buffered_process_output_size(event: &ExecutorOutput) -> Option<usize> {
+    match event {
+        ExecutorOutput::Stdout(line) | ExecutorOutput::Stderr(line) => Some(line.len()),
+        _ => None,
+    }
+}
+
+fn signal_output_overflow(
+    tx: &mpsc::UnboundedSender<ExecutorOutput>,
+    output_overflowed: &AtomicBool,
+) {
+    if !output_overflowed.swap(true, Ordering::AcqRel) {
+        let _ = tx.send(ExecutorOutput::Stderr(format!(
+            "[conductor] process output exceeded {} bytes, dropping additional stdout/stderr",
+            MAX_BUFFERED_PROCESS_OUTPUT_BYTES
+        )));
+    }
+}
+
+fn queue_process_output(
+    tx: &mpsc::UnboundedSender<ExecutorOutput>,
+    buffered_bytes: &AtomicUsize,
+    output_overflowed: &AtomicBool,
+    event: ExecutorOutput,
+) -> bool {
+    if let Some(size) = buffered_process_output_size(&event) {
+        if output_overflowed.load(Ordering::Acquire) {
+            return true;
+        }
+        let previous = buffered_bytes.fetch_add(size, Ordering::AcqRel);
+        if previous + size > MAX_BUFFERED_PROCESS_OUTPUT_BYTES {
+            buffered_bytes.fetch_sub(size, Ordering::AcqRel);
+            signal_output_overflow(tx, output_overflowed);
+            return true;
+        }
+        if tx.send(event).is_err() {
+            buffered_bytes.fetch_sub(size, Ordering::AcqRel);
+            return false;
+        }
+        true
+    } else {
+        tx.send(event).is_ok()
+    }
+}
+
+fn forward_process_output(
+    mut source_rx: mpsc::UnboundedReceiver<ExecutorOutput>,
+    sink_tx: mpsc::Sender<ExecutorOutput>,
+    buffered_bytes: Arc<AtomicUsize>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = source_rx.recv().await {
+            let buffered_size = buffered_process_output_size(&event);
+            let send_result = sink_tx.send(event).await;
+            if let Some(size) = buffered_size {
+                buffered_bytes.fetch_sub(size, Ordering::AcqRel);
+            }
+            if send_result.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// PTY dimensions configuration.
@@ -234,14 +369,24 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
     let child = Arc::new(Mutex::new(child));
 
     let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
+    let (raw_output_tx, raw_output_rx) = mpsc::unbounded_channel::<ExecutorOutput>();
+    let buffered_output_bytes = Arc::new(AtomicUsize::new(0));
+    let output_overflowed = Arc::new(AtomicBool::new(false));
+    forward_process_output(
+        raw_output_rx,
+        output_tx.clone(),
+        Arc::clone(&buffered_output_bytes),
+    );
     let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(256);
     let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(64);
     let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
-    let stdout_tx = output_tx.clone();
+    let stdout_tx = raw_output_tx.clone();
+    let stdout_buffered_bytes = Arc::clone(&buffered_output_bytes);
+    let stdout_output_overflowed = Arc::clone(&output_overflowed);
     let terminal_stream_tx = terminal_tx.clone();
-    tokio::task::spawn_blocking(move || {
+    let mut stdout_task = tokio::task::spawn_blocking(move || {
         let mut reader = reader;
         let mut pending = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -249,10 +394,12 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
             match reader.read(&mut buffer) {
                 Ok(0) => {
                     if let Some(line) = flush_terminal_line_buffer(&mut pending) {
-                        if stdout_tx
-                            .blocking_send(ExecutorOutput::Stdout(line))
-                            .is_err()
-                        {
+                        if !queue_process_output(
+                            &stdout_tx,
+                            &stdout_buffered_bytes,
+                            &stdout_output_overflowed,
+                            ExecutorOutput::Stdout(line),
+                        ) {
                             break;
                         }
                     }
@@ -261,21 +408,36 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
                 Ok(read) => {
                     let chunk = buffer[..read].to_vec();
                     let _ = terminal_stream_tx.blocking_send(chunk.clone());
+                    if stdout_output_overflowed.load(Ordering::Acquire) {
+                        continue;
+                    }
                     pending.extend_from_slice(&chunk);
+                    if pending.len() > MAX_BUFFERED_PROCESS_OUTPUT_BYTES {
+                        pending.clear();
+                        signal_output_overflow(&stdout_tx, &stdout_output_overflowed);
+                        continue;
+                    }
                     for line in drain_terminal_lines(&mut pending) {
-                        if stdout_tx
-                            .blocking_send(ExecutorOutput::Stdout(line))
-                            .is_err()
-                        {
+                        if !queue_process_output(
+                            &stdout_tx,
+                            &stdout_buffered_bytes,
+                            &stdout_output_overflowed,
+                            ExecutorOutput::Stdout(line),
+                        ) {
                             return;
                         }
                     }
                 }
                 Err(error) => {
-                    let _ = stdout_tx.blocking_send(ExecutorOutput::Failed {
-                        error: error.to_string(),
-                        exit_code: None,
-                    });
+                    let _ = queue_process_output(
+                        &stdout_tx,
+                        &stdout_buffered_bytes,
+                        &stdout_output_overflowed,
+                        ExecutorOutput::Failed {
+                            error: error.to_string(),
+                            exit_code: None,
+                        },
+                    );
                     break;
                 }
             }
@@ -328,7 +490,7 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
         }
     });
 
-    let exit_tx = output_tx;
+    let exit_tx = raw_output_tx;
     let child_for_wait = Arc::clone(&child);
     let master_for_cleanup = Arc::clone(&master);
     tokio::spawn(async move {
@@ -352,14 +514,14 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
                         let _ = child.kill();
                         let _ = child.wait();
                     }).await;
-                    // Drop the master handle to close PTY file descriptors.
                     if let Ok(mut guard) = master_for_cleanup.lock() {
                         guard.take();
                     }
+                    await_reader_task_with_timeout(&mut stdout_task).await;
                     let _ = exit_tx.send(ExecutorOutput::Failed {
                         error: "killed".to_string(),
                         exit_code: Some(-9),
-                    }).await;
+                    });
                 }
             }
             result = async move {
@@ -382,19 +544,19 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
                     }
                 }
             } => {
-                // Drop the master handle on normal exit too.
                 if let Ok(mut guard) = master.lock() {
                     guard.take();
                 }
+                await_reader_task_with_timeout(&mut stdout_task).await;
                 match result {
                     Ok(code) => {
-                        let _ = exit_tx.send(ExecutorOutput::Completed { exit_code: code }).await;
+                        let _ = exit_tx.send(ExecutorOutput::Completed { exit_code: code });
                     }
                     Err(error) => {
                         let _ = exit_tx.send(ExecutorOutput::Failed {
                             error,
                             exit_code: None,
-                        }).await;
+                        });
                     }
                 }
             }
@@ -418,7 +580,18 @@ pub async fn spawn_process_no_stdin(
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Result<ProcessHandle> {
-    spawn_process_no_stdin_with_env_removals(binary, args, cwd, env, &[]).await
+    spawn_process_no_stdin_with_env_options(binary, args, cwd, env, &[], false).await
+}
+
+/// Spawn a CLI process with stdout/stderr capture, stdin closed, and a clean
+/// environment built only from the provided variables.
+pub async fn spawn_process_no_stdin_with_clean_env(
+    binary: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+) -> Result<ProcessHandle> {
+    spawn_process_no_stdin_with_env_options(binary, args, cwd, env, &[], true).await
 }
 
 /// Spawn a CLI process with stdout/stderr capture, stdin closed, and explicit
@@ -430,6 +603,17 @@ pub async fn spawn_process_no_stdin_with_env_removals(
     env: &HashMap<String, String>,
     env_remove: &[String],
 ) -> Result<ProcessHandle> {
+    spawn_process_no_stdin_with_env_options(binary, args, cwd, env, env_remove, false).await
+}
+
+async fn spawn_process_no_stdin_with_env_options(
+    binary: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    env_remove: &[String],
+    clear_existing_env: bool,
+) -> Result<ProcessHandle> {
     let mut cmd = Command::new(binary);
     cmd.args(args)
         .current_dir(cwd)
@@ -437,14 +621,15 @@ pub async fn spawn_process_no_stdin_with_env_removals(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    apply_tokio_command_env(&mut cmd, env, env_remove);
+    apply_tokio_command_env(&mut cmd, env, env_remove, clear_existing_env);
 
     #[cfg(unix)]
     {
-        #[allow(unused_imports)]
-        use std::os::unix::process::CommandExt;
         unsafe {
             cmd.pre_exec(|| {
+                mark_extra_fds_cloexec_in_child()?;
+                clear_signal_mask_in_child()?;
+                restore_default_signals_in_child()?;
                 if libc::setpgid(0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -459,7 +644,7 @@ pub async fn spawn_process_no_stdin_with_env_removals(
         let result = unsafe { libc::setpgid(pid as libc::pid_t, pid as libc::pid_t) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EACCES) {
+            if !matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) {
                 return Err(error.into());
             }
         }
@@ -476,47 +661,149 @@ pub async fn spawn_process_no_stdin_with_env_removals(
         .ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
 
     let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
-    // Input channel is intentionally created and receiver dropped — stdin is closed for
+    let (raw_output_tx, raw_output_rx) = mpsc::unbounded_channel::<ExecutorOutput>();
+    let buffered_output_bytes = Arc::new(AtomicUsize::new(0));
+    let output_overflowed = Arc::new(AtomicBool::new(false));
+    forward_process_output(
+        raw_output_rx,
+        output_tx.clone(),
+        Arc::clone(&buffered_output_bytes),
+    );
+    // Input channel is intentionally created and receiver dropped, stdin is closed for
     // this process variant. The sender is required by ProcessHandle's API contract.
     let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
-    let stdout_tx = output_tx.clone();
-    tokio::spawn(async move {
-        let reader = AsyncBufReader::new(stdout);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if stdout_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {
-                break;
+    let stdout_tx = raw_output_tx.clone();
+    let stdout_buffered_bytes = Arc::clone(&buffered_output_bytes);
+    let stdout_output_overflowed = Arc::clone(&output_overflowed);
+    let mut stdout_task = tokio::spawn(async move {
+        let mut reader = stdout;
+        let mut pending = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => {
+                    if stdout_output_overflowed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Some(line) = flush_terminal_line_buffer(&mut pending) {
+                        if !queue_process_output(
+                            &stdout_tx,
+                            &stdout_buffered_bytes,
+                            &stdout_output_overflowed,
+                            ExecutorOutput::Stdout(line),
+                        ) {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                Ok(read) => {
+                    if stdout_output_overflowed.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    pending.extend_from_slice(&buffer[..read]);
+                    if pending.len() > MAX_BUFFERED_PROCESS_OUTPUT_BYTES {
+                        pending.clear();
+                        signal_output_overflow(&stdout_tx, &stdout_output_overflowed);
+                        continue;
+                    }
+                    for line in drain_terminal_lines(&mut pending) {
+                        if !queue_process_output(
+                            &stdout_tx,
+                            &stdout_buffered_bytes,
+                            &stdout_output_overflowed,
+                            ExecutorOutput::Stdout(line),
+                        ) {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
 
-    let stderr_tx = output_tx.clone();
-    tokio::spawn(async move {
-        let reader = AsyncBufReader::new(stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if stderr_tx.send(ExecutorOutput::Stderr(line)).await.is_err() {
-                break;
+    let stderr_tx = raw_output_tx.clone();
+    let stderr_buffered_bytes = Arc::clone(&buffered_output_bytes);
+    let stderr_output_overflowed = Arc::clone(&output_overflowed);
+    let mut stderr_task = tokio::spawn(async move {
+        let mut reader = stderr;
+        let mut pending = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => {
+                    if stderr_output_overflowed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Some(line) = flush_terminal_line_buffer(&mut pending) {
+                        if !queue_process_output(
+                            &stderr_tx,
+                            &stderr_buffered_bytes,
+                            &stderr_output_overflowed,
+                            ExecutorOutput::Stderr(line),
+                        ) {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                Ok(read) => {
+                    if stderr_output_overflowed.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    pending.extend_from_slice(&buffer[..read]);
+                    if pending.len() > MAX_BUFFERED_PROCESS_OUTPUT_BYTES {
+                        pending.clear();
+                        signal_output_overflow(&stderr_tx, &stderr_output_overflowed);
+                        continue;
+                    }
+                    for line in drain_terminal_lines(&mut pending) {
+                        if !queue_process_output(
+                            &stderr_tx,
+                            &stderr_buffered_bytes,
+                            &stderr_output_overflowed,
+                            ExecutorOutput::Stderr(line),
+                        ) {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
 
-    let exit_tx = output_tx;
+    let exit_tx = raw_output_tx;
     tokio::spawn(async move {
         tokio::select! {
-            status = child.wait() => {
+            status = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Ok(status),
+                        Ok(None) => continue,
+                        Err(error) => break Err(error),
+                    }
+                }
+            } => {
+                if status.is_ok() {
+                    let _ = child.wait().await;
+                }
+                await_reader_task_with_timeout(&mut stdout_task).await;
+                await_reader_task_with_timeout(&mut stderr_task).await;
                 match status {
                     Ok(s) => {
                         let code = s.code().unwrap_or(-1);
-                        let _ = exit_tx.send(ExecutorOutput::Completed { exit_code: code }).await;
+                        let _ = exit_tx.send(ExecutorOutput::Completed { exit_code: code });
                     }
                     Err(e) => {
                         let _ = exit_tx.send(ExecutorOutput::Failed {
                             error: e.to_string(),
                             exit_code: None,
-                        }).await;
+                        });
                     }
                 }
             }
@@ -530,18 +817,22 @@ pub async fn spawn_process_no_stdin_with_env_removals(
                         })
                         .await;
                         let _ = child.wait().await;
+                        await_reader_task_with_timeout(&mut stdout_task).await;
+                        await_reader_task_with_timeout(&mut stderr_task).await;
                         let _ = exit_tx.send(ExecutorOutput::Failed {
                             error: "killed".to_string(),
                             exit_code: Some(-15),
-                        }).await;
+                        });
                         return;
                     }
                     // SIGKILL fallback
                     let _ = child.kill().await;
+                    await_reader_task_with_timeout(&mut stdout_task).await;
+                    await_reader_task_with_timeout(&mut stderr_task).await;
                     let _ = exit_tx.send(ExecutorOutput::Failed {
                         error: "killed".to_string(),
                         exit_code: Some(-9),
-                    }).await;
+                    });
                 }
             }
         }
@@ -595,7 +886,10 @@ fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_process_alive, spawn_process, spawn_process_no_stdin, ExecutorOutput};
+    use super::{
+        is_process_alive, spawn_process, spawn_process_no_stdin,
+        spawn_process_no_stdin_with_clean_env, ExecutorOutput,
+    };
     use std::collections::HashMap;
     use std::path::Path;
     use tokio::time::{timeout, Duration};
@@ -699,6 +993,327 @@ mod tests {
         assert!(
             terminated.is_ok(),
             "shell child should terminate with parent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_with_clean_env_drops_parent_env_noise() {
+        let noisy_key = "CONDUCTOR_EXECUTORS_TEST_NOISY_ENV";
+        std::env::set_var(noisy_key, "should-not-leak");
+
+        let mut clean_env = HashMap::new();
+        clean_env.insert("TEST_ALLOWED".to_string(), "present".to_string());
+
+        let mut handle = spawn_process_no_stdin_with_clean_env(
+            Path::new("/usr/bin/python3"),
+            &[
+                "-c".to_string(),
+                format!(
+                    "import json, os; print(json.dumps({{'allowed': os.getenv('TEST_ALLOWED'), 'noisy': os.getenv('{noisy_key}')}}))"
+                ),
+            ],
+            Path::new("."),
+            &clean_env,
+        )
+        .await
+        .expect("headless process should spawn with clean env");
+
+        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for env report")
+            .expect("output channel closed before env report");
+        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for completion")
+            .expect("output channel closed before completion");
+
+        std::env::remove_var(noisy_key);
+
+        let ExecutorOutput::Stdout(env_json) = first else {
+            panic!("expected stdout env report, got {first:?}");
+        };
+        let env_report: serde_json::Value =
+            serde_json::from_str(&env_json).expect("env report should parse");
+
+        assert_eq!(
+            env_report.get("allowed").and_then(|value| value.as_str()),
+            Some("present")
+        );
+        assert!(
+            env_report.get("noisy").is_some_and(|value| value.is_null()),
+            "clean-env spawn should not inherit parent env noise: {env_report:?}"
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion after env report, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_with_clean_env_restores_sigpipe_default() {
+        use nix::libc;
+        use std::fs;
+        use std::process::Command as StdCommand;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("conductor-sigpipe-{stamp}"));
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        let source = root.join("sigpipe.c");
+        let binary = root.join("sigpipe-check");
+        fs::write(
+            &source,
+            r#"#include <signal.h>
+#include <stdio.h>
+int main(void) {
+    struct sigaction action;
+    if (sigaction(SIGPIPE, NULL, &action) != 0) {
+        return 2;
+    }
+    if (action.sa_handler == SIG_DFL) {
+        puts("{\"sigpipe\":\"SIG_DFL\"}");
+    } else if (action.sa_handler == SIG_IGN) {
+        puts("{\"sigpipe\":\"SIG_IGN\"}");
+    } else {
+        puts("{\"sigpipe\":\"OTHER\"}");
+    }
+    return 0;
+}
+"#,
+        )
+        .expect("source should be written");
+        let status = StdCommand::new("/usr/bin/cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .expect("cc should launch");
+        assert!(status.success(), "cc should compile the sigpipe helper");
+
+        let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        assert_ne!(
+            previous,
+            libc::SIG_ERR,
+            "should set parent sigpipe disposition"
+        );
+
+        let mut clean_env = HashMap::new();
+        clean_env.insert("TEST_ALLOWED".to_string(), "present".to_string());
+
+        let mut handle =
+            spawn_process_no_stdin_with_clean_env(&binary, &[], Path::new("."), &clean_env)
+                .await
+                .expect("headless process should spawn with restored sigpipe");
+
+        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for sigpipe report")
+            .expect("output channel closed before sigpipe report");
+        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for completion")
+            .expect("output channel closed before completion");
+
+        let restored = unsafe { libc::signal(libc::SIGPIPE, previous) };
+        assert_ne!(
+            restored,
+            libc::SIG_ERR,
+            "should restore parent sigpipe disposition"
+        );
+
+        let ExecutorOutput::Stdout(sig_json) = first else {
+            panic!("expected stdout sigpipe report, got {first:?}");
+        };
+        let sig_report: serde_json::Value =
+            serde_json::from_str(&sig_json).expect("sigpipe report should parse");
+
+        assert_eq!(
+            sig_report.get("sigpipe").and_then(|value| value.as_str()),
+            Some("SIG_DFL")
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion after sigpipe report, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_closes_inherited_extra_fds() {
+        use nix::libc;
+        use std::fs::File;
+        use std::os::fd::AsRawFd;
+
+        let extra = File::open("/dev/null").expect("should open test file");
+        let extra_fd = extra.as_raw_fd();
+        let flags = unsafe { libc::fcntl(extra_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "should read fd flags");
+        let cleared = unsafe { libc::fcntl(extra_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+        assert_eq!(cleared, 0, "should clear close-on-exec");
+
+        let mut handle = spawn_process_no_stdin(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "python3 -c 'import json, os; print(json.dumps(sorted(int(fd) for fd in os.listdir(\"/dev/fd\"))))'"
+                    .to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("headless process should spawn");
+
+        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for fd list")
+            .expect("output channel closed before fd list");
+        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for completion")
+            .expect("output channel closed before completion");
+
+        let ExecutorOutput::Stdout(fd_json) = first else {
+            panic!("expected stdout fd list, got {first:?}");
+        };
+        let fds: Vec<i32> = serde_json::from_str(&fd_json).expect("fd list should parse");
+
+        assert!(
+            !fds.contains(&extra_fd),
+            "child inherited unexpected extra fd {extra_fd}: {fds:?}"
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion after fd list, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_reports_missing_binary_spawn_errors() {
+        let error = match spawn_process_no_stdin(
+            Path::new("/definitely/not/a/real/binary"),
+            &[],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        {
+            Ok(_) => panic!("missing binary should return spawn error"),
+            Err(error) => error,
+        };
+
+        let error_text = format!("{error:#}");
+        assert!(
+            error_text.contains("No such file") || error_text.contains("os error 2"),
+            "expected missing binary spawn error, got {error_text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_completes_even_if_descendant_keeps_pipe_open() {
+        let mut handle = spawn_process_no_stdin(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "(sleep 2) & printf 'pipe kept open\\n'".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("headless process should spawn");
+
+        let first = timeout(Duration::from_secs(2), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for first event")
+            .expect("output channel closed before first event");
+        let second = timeout(Duration::from_millis(900), handle.output_rx.recv())
+            .await
+            .expect("completion should not wait for descendant-held pipe")
+            .expect("output channel closed before completion");
+
+        assert!(
+            matches!(first, ExecutorOutput::Stdout(ref line) if line == "pipe kept open"),
+            "expected stdout before completion, got {first:?}"
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion even with descendant-held pipe, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_preserves_trailing_stdout_before_completion() {
+        let mut handle = spawn_process_no_stdin(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "printf 'pipe trailing output'".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("headless process should spawn");
+
+        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for first event")
+            .expect("output channel closed before first event");
+        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for second event")
+            .expect("output channel closed before second event");
+
+        assert!(
+            matches!(first, ExecutorOutput::Stdout(ref line) if line == "pipe trailing output"),
+            "expected trailing stdout before completion, got {first:?}"
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion after stdout flush, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_preserves_trailing_stdout_before_completion() {
+        let mut handle = spawn_process(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "printf 'pty trailing output'".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("pty process should spawn");
+
+        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for first event")
+            .expect("output channel closed before first event");
+        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
+            .await
+            .expect("timed out waiting for second event")
+            .expect("output channel closed before second event");
+
+        assert!(
+            matches!(first, ExecutorOutput::Stdout(ref line) if line == "pty trailing output"),
+            "expected trailing stdout before completion, got {first:?}"
+        );
+        assert!(
+            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
+            "expected completion after stdout flush, got {second:?}"
         );
     }
 }

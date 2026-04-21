@@ -1274,7 +1274,14 @@ fn append_dispatcher_context_sections(prompt: &str, sections: &[String]) -> Stri
     combined
 }
 
-fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
+fn running_inside_dispatcher_mcp_server() -> bool {
+    std::env::var("CONDUCTOR_SESSION_KIND").ok().as_deref() == Some(ACP_SESSION_KIND)
+}
+
+fn normalize_loaded_dispatcher_thread(
+    thread: &mut SessionRecord,
+    terminate_loaded_pid: bool,
+) -> bool {
     let mut changed = false;
     if thread.metadata.get("sessionKind").map(String::as_str) != Some(ACP_SESSION_KIND) {
         thread
@@ -1302,26 +1309,32 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
         changed = true;
     }
 
-    if let Some(pid) = thread.pid.filter(|pid| *pid > 1) {
-        if is_process_alive(pid) {
-            let _ = terminate_process(pid);
-        }
-        thread.pid = None;
-        changed = true;
-    }
+    let loaded_pid = thread.pid.filter(|pid| *pid > 1);
+    let live_pid = loaded_pid.filter(|pid| is_process_alive(*pid));
+    let should_reset_runtime_state = terminate_loaded_pid || live_pid.is_none();
 
-    if matches!(
-        thread.status,
-        SessionStatus::Working | SessionStatus::Queued | SessionStatus::Spawning
-    ) {
-        thread.status = SessionStatus::Idle;
-        thread.activity = Some("idle".to_string());
-        thread.summary = Some("Dispatcher ready for the next turn".to_string());
-        thread.metadata.insert(
-            "summary".to_string(),
-            "Dispatcher ready for the next turn".to_string(),
-        );
-        changed = true;
+    if should_reset_runtime_state {
+        if let Some(pid) = loaded_pid {
+            if terminate_loaded_pid && live_pid.is_some() {
+                let _ = terminate_process(pid);
+            }
+            thread.pid = None;
+            changed = true;
+        }
+
+        if matches!(
+            thread.status,
+            SessionStatus::Working | SessionStatus::Queued | SessionStatus::Spawning
+        ) {
+            thread.status = SessionStatus::Idle;
+            thread.activity = Some("idle".to_string());
+            thread.summary = Some("Dispatcher ready for the next turn".to_string());
+            thread.metadata.insert(
+                "summary".to_string(),
+                "Dispatcher ready for the next turn".to_string(),
+            );
+            changed = true;
+        }
     }
 
     if strip_dispatcher_context_attachments(thread) {
@@ -1877,6 +1890,13 @@ impl AppState {
     }
 
     pub(crate) async fn load_dispatchers_from_disk(&self) {
+        self.load_dispatchers_from_disk_with_pid_termination(
+            !running_inside_dispatcher_mcp_server(),
+        )
+        .await;
+    }
+
+    async fn load_dispatchers_from_disk_with_pid_termination(&self, terminate_loaded_pids: bool) {
         let root = self.dispatcher_store_dir();
         let entries = match tokio::fs::read_dir(&root).await {
             Ok(entries) => entries,
@@ -1891,7 +1911,8 @@ impl AppState {
             }
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 if let Ok(mut session) = serde_json::from_str::<SessionRecord>(&content) {
-                    let changed = normalize_loaded_dispatcher_thread(&mut session);
+                    let changed =
+                        normalize_loaded_dispatcher_thread(&mut session, terminate_loaded_pids);
                     if changed {
                         if let Ok(updated) = serde_json::to_string_pretty(&session) {
                             let _ = tokio::fs::write(&path, updated).await;
@@ -3969,6 +3990,17 @@ impl AppState {
         self.persist_dispatcher_thread(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
 
+        if let Err(err) = self
+            .record_acp_dispatcher_turn(&updated, &message, &recorded_attachments)
+            .await
+        {
+            tracing::warn!(
+                session_id = %updated.id,
+                error = %err,
+                "failed to record ACP dispatcher turn"
+            );
+        }
+
         let runtime_prompt = self
             .dispatcher_prompt_with_context(&updated, &runtime_message, &effective_attachments)
             .await;
@@ -4015,17 +4047,6 @@ impl AppState {
                 reasoning_effort.or_else(|| updated.reasoning_effort.clone()),
             )
             .await?;
-        }
-
-        if let Err(err) = self
-            .record_acp_dispatcher_turn(&updated, &message, &recorded_attachments)
-            .await
-        {
-            tracing::warn!(
-                session_id = %updated.id,
-                error = %err,
-                "failed to record ACP dispatcher turn"
-            );
         }
         Ok(())
     }
@@ -4147,6 +4168,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::process::Command;
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::timeout;
     use uuid::Uuid;
@@ -4651,11 +4673,135 @@ mod tests {
             metadata: HashMap::new(),
         });
 
-        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert!(normalize_loaded_dispatcher_thread(&mut thread, false));
         assert_eq!(
             thread.conversation[0].attachments,
             vec!["notes/spec.md".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn load_dispatchers_from_disk_preserves_live_pid_when_termination_disabled() {
+        let (root, state) = build_test_state("dispatcher-load-live-pid").await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = child.id().expect("sleep child should have pid");
+
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-live-pid".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some(root.join("repo").to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("working".to_string());
+        thread.pid = Some(pid);
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+
+        let snapshot = state.dispatcher_snapshot_path(&thread.id);
+        fs::write(
+            &snapshot,
+            serde_json::to_string_pretty(&thread).expect("thread should serialize"),
+        )
+        .expect("dispatcher snapshot should persist");
+
+        state
+            .load_dispatchers_from_disk_with_pid_termination(false)
+            .await;
+
+        assert!(super::is_process_alive(pid));
+        let loaded = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("loaded thread should exist");
+        assert_eq!(loaded.pid, Some(pid));
+        assert_eq!(loaded.status, SessionStatus::Working);
+        assert_eq!(loaded.activity.as_deref(), Some("working"));
+        let persisted: SessionRecord = serde_json::from_str(
+            &fs::read_to_string(&snapshot).expect("dispatcher snapshot should still exist"),
+        )
+        .expect("snapshot should deserialize");
+        assert_eq!(persisted.pid, Some(pid));
+        assert_eq!(persisted.status, SessionStatus::Working);
+
+        let _ = child.kill().await;
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn load_dispatchers_from_disk_terminates_live_process_when_requested() {
+        let (root, state) = build_test_state("dispatcher-load-stale-pid").await;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child should spawn");
+        let pid = child.id().expect("sleep child should have pid");
+
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-stale-pid".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some(root.join("repo").to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("working".to_string());
+        thread.pid = Some(pid);
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+
+        let snapshot = state.dispatcher_snapshot_path(&thread.id);
+        fs::write(
+            &snapshot,
+            serde_json::to_string_pretty(&thread).expect("thread should serialize"),
+        )
+        .expect("dispatcher snapshot should persist");
+
+        state
+            .load_dispatchers_from_disk_with_pid_termination(true)
+            .await;
+
+        let status = timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("stale child should terminate")
+            .expect("child wait should succeed");
+        assert!(
+            !status.success(),
+            "stale child should not exit cleanly after termination"
+        );
+
+        let loaded = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("loaded thread should exist");
+        assert_eq!(loaded.pid, None);
+        assert_eq!(loaded.status, SessionStatus::Idle);
+        assert_eq!(loaded.activity.as_deref(), Some("idle"));
+
+        let _ = child.kill().await;
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4686,7 +4832,7 @@ mod tests {
             ACP_APPROVAL_REQUIRED.to_string(),
         );
 
-        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert!(normalize_loaded_dispatcher_thread(&mut thread, false));
         assert_eq!(thread.status, SessionStatus::NeedsInput);
         assert_eq!(thread.activity.as_deref(), Some("waiting_input"));
         assert_eq!(
@@ -4730,7 +4876,7 @@ mod tests {
             ACP_APPROVAL_REQUIRED.to_string(),
         );
 
-        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert!(normalize_loaded_dispatcher_thread(&mut thread, false));
         assert_eq!(thread.status, SessionStatus::NeedsInput);
         assert_eq!(thread.activity.as_deref(), Some("waiting_input"));
         assert_eq!(
