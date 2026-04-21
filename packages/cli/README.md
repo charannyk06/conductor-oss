@@ -49,6 +49,8 @@ On Windows PowerShell:
 
 The hosted dashboard is not a cloud IDE. Your repos, terminals, and agents stay on the paired machine.
 
+If you only forward a local dashboard port from a remote VM, Conductor will still treat that as remote access and block it unless you add an identity layer. For remote use, either pair the machine with `https://app.conductross.com` or put your self-hosted dashboard behind Clerk or Cloudflare Access.
+
 ## Install globally
 
 ```bash

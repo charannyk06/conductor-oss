@@ -1,8 +1,8 @@
 "use client";
 
 import { memo, type ReactNode } from "react";
-import { Settings } from "lucide-react";
-import { DiscordMark } from "@/components/DiscordMark";
+import { LifeBuoy, Settings } from "lucide-react";
+import { CONDUCTOR_SUPPORT_DISCUSSIONS_URL } from "@/lib/supportLinks";
 
 interface TopBarProps {
   title?: string;
@@ -25,14 +25,14 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           </div>
         ) : null}
         <a
-          href="https://discord.gg/sA4QCWNR"
+          href={CONDUCTOR_SUPPORT_DISCUSSIONS_URL}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-          aria-label="Join Discord community"
-          title="Community"
+          aria-label="Open Conductor support"
+          title="Support"
         >
-          <DiscordMark className="h-4 w-4" />
+          <LifeBuoy className="h-4 w-4" />
         </a>
         {onOpenPreferences ? (
           <button
