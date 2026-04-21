@@ -1,8 +1,7 @@
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
-import { DiscordMark } from "@/components/DiscordMark";
+import { Check, HardDrive, LifeBuoy, ShieldCheck, Workflow } from "lucide-react";
 import { SignInExperience } from "./SignInExperience";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
@@ -18,6 +17,7 @@ import {
   resolveRequestBaseUrl,
   resolveRequestHostname,
 } from "@/lib/clerkConfig";
+import { CONDUCTOR_SUPPORT_DISCUSSIONS_URL } from "@/lib/supportLinks";
 
 const LOCAL_RUNTIME_POINTS = [
   "Repositories remain on the paired laptop.",
@@ -109,9 +109,9 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
               <Link href="https://conductross.com">Read the product story</Link>
             </Button>
             <Button asChild variant="outline" size="lg">
-              <a href="https://discord.gg/sA4QCWNR" target="_blank" rel="noopener noreferrer">
-                <DiscordMark className="mr-2 h-4 w-4" />
-                Join Discord
+              <a href={CONDUCTOR_SUPPORT_DISCUSSIONS_URL} target="_blank" rel="noopener noreferrer">
+                <LifeBuoy className="mr-2 h-4 w-4" />
+                Open support
               </a>
             </Button>
           </div>
@@ -123,7 +123,9 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
           <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
             Use Google or any other provider you enable in Clerk. Email stays available if you keep it enabled.
             After sign-in, Clerk returns you to the dashboard or active bridge claim flow inside the same local
-            workflow.
+            workflow. If you are coming from a remote VM, use the hosted paired-device flow here or put your
+            self-hosted dashboard behind Clerk or Cloudflare Access. Plain forwarded local dashboard ports are
+            intentionally blocked.
           </p>
 
           <div className="mt-6">
