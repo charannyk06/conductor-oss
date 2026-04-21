@@ -61,6 +61,7 @@ pub struct AppUpdateConfig {
     pub package_name: Option<String>,
     pub current_version: Option<String>,
     pub install_mode: AppInstallMode,
+    pub global_prefix: Option<String>,
     pub rerun_command: Option<String>,
     pub launcher_control_url: Option<String>,
     pub launcher_control_token: Option<String>,
@@ -78,6 +79,10 @@ impl AppUpdateConfig {
             .filter(|value| !value.is_empty());
         let mut install_mode =
             AppInstallMode::from_env(env::var("CONDUCTOR_CLI_INSTALL_MODE").ok().as_deref());
+        let mut global_prefix = env::var("CONDUCTOR_CLI_GLOBAL_PREFIX")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let rerun_command = env::var("CONDUCTOR_CLI_RERUN_COMMAND")
             .ok()
             .map(|value| value.trim().to_string())
@@ -90,6 +95,7 @@ impl AppUpdateConfig {
         if package_name.is_none()
             || current_version.is_none()
             || matches!(install_mode, AppInstallMode::Unknown)
+            || (global_prefix.is_none() && matches!(install_mode, AppInstallMode::GlobalNpm))
         {
             let inferred = infer_cli_metadata();
             if package_name.is_none() {
@@ -101,6 +107,9 @@ impl AppUpdateConfig {
             if matches!(install_mode, AppInstallMode::Unknown) {
                 install_mode = inferred.install_mode;
             }
+            if global_prefix.is_none() {
+                global_prefix = inferred.global_prefix;
+            }
         }
         let launcher_control_token = env::var("CONDUCTOR_LAUNCHER_CONTROL_TOKEN")
             .ok()
@@ -111,6 +120,7 @@ impl AppUpdateConfig {
             package_name,
             current_version,
             install_mode,
+            global_prefix,
             rerun_command,
             launcher_control_url,
             launcher_control_token,
@@ -129,6 +139,7 @@ struct InferredAppUpdateMetadata {
     package_name: Option<String>,
     current_version: Option<String>,
     install_mode: AppInstallMode,
+    global_prefix: Option<String>,
 }
 
 fn infer_cli_metadata() -> InferredAppUpdateMetadata {
@@ -136,6 +147,7 @@ fn infer_cli_metadata() -> InferredAppUpdateMetadata {
     let mut package_name = None;
     let mut current_version = None;
     let mut install_mode = AppInstallMode::Unknown;
+    let mut global_prefix = None;
 
     if let Some(current_exe) = current_exe.as_deref() {
         let normalized_root = infer_package_root_candidates(current_exe);
@@ -150,6 +162,9 @@ fn infer_cli_metadata() -> InferredAppUpdateMetadata {
 
             if matches!(install_mode, AppInstallMode::Unknown) {
                 install_mode = infer_cli_install_mode(current_exe, package_root);
+            }
+            if global_prefix.is_none() && matches!(install_mode, AppInstallMode::GlobalNpm) {
+                global_prefix = infer_npm_global_prefix(package_root);
             }
         }
 
@@ -169,6 +184,7 @@ fn infer_cli_metadata() -> InferredAppUpdateMetadata {
         package_name,
         current_version,
         install_mode,
+        global_prefix,
     }
 }
 
@@ -377,6 +393,22 @@ fn infer_cli_install_mode(current_exe: &Path, package_root: &Path) -> AppInstall
     AppInstallMode::Unknown
 }
 
+fn infer_npm_global_prefix(package_root: &Path) -> Option<String> {
+    let node_modules = package_root.parent()?;
+    if node_modules.file_name().and_then(|value| value.to_str()) != Some("node_modules") {
+        return None;
+    }
+
+    let parent = node_modules.parent()?;
+    let prefix = if parent.file_name().and_then(|value| value.to_str()) == Some("lib") {
+        parent.parent()?
+    } else {
+        parent
+    };
+
+    Some(normalize_fs_path(prefix))
+}
+
 fn infer_bun_root() -> Option<PathBuf> {
     env::var_os("BUN_INSTALL").map(PathBuf::from).or_else(|| {
         env::var_os("HOME")
@@ -401,6 +433,10 @@ fn is_source_checkout_layout(candidate: &Path) -> bool {
 
 fn normalize_fs_path(value: &Path) -> String {
     value.to_string_lossy().replace('\\', "/")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -453,6 +489,7 @@ impl AppUpdateStatus {
                 build_update_command(
                     config.install_mode,
                     package_name,
+                    config.global_prefix.as_deref(),
                     config.rerun_command.as_deref(),
                     None,
                 )
@@ -509,6 +546,7 @@ struct ParsedVersion {
 fn build_update_command(
     install_mode: AppInstallMode,
     package_name: &str,
+    global_prefix: Option<&str>,
     rerun_command: Option<&str>,
     target_version: Option<&str>,
 ) -> Option<String> {
@@ -528,9 +566,16 @@ fn build_update_command(
                     "npx --yes --registry={NPM_PUBLIC_REGISTRY} {package_spec} start"
                 ))
             }),
-        AppInstallMode::GlobalNpm => Some(format!(
-            "npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
-        )),
+        AppInstallMode::GlobalNpm => {
+            let prefix_fragment = global_prefix
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!(" --prefix {}", shell_quote(value)))
+                .unwrap_or_default();
+            Some(format!(
+                "npm install -g{prefix_fragment} --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
+            ))
+        }
         AppInstallMode::GlobalPnpm => Some(format!(
             "pnpm add -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
         )),
@@ -545,21 +590,35 @@ fn build_update_command(
 fn resolve_update_invocation(
     install_mode: AppInstallMode,
     package_name: &str,
+    global_prefix: Option<&str>,
     target_version: &str,
 ) -> Option<(&'static str, Vec<String>, String)> {
     let package_spec = format!("{package_name}@{target_version}");
 
     match install_mode {
-        AppInstallMode::GlobalNpm => Some((
-            "npm",
-            vec![
-                "install".to_string(),
-                "-g".to_string(),
-                format!("--registry={NPM_PUBLIC_REGISTRY}"),
-                package_spec.clone(),
-            ],
-            format!("npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"),
-        )),
+        AppInstallMode::GlobalNpm => {
+            let mut args = vec!["install".to_string(), "-g".to_string()];
+            if let Some(prefix) = global_prefix
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                args.push("--prefix".to_string());
+                args.push(prefix.to_string());
+            }
+            args.push(format!("--registry={NPM_PUBLIC_REGISTRY}"));
+            args.push(package_spec.clone());
+            let display_command = build_update_command(
+                install_mode,
+                package_name,
+                global_prefix,
+                None,
+                Some(target_version),
+            )
+            .unwrap_or_else(|| {
+                format!("npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}")
+            });
+            Some(("npm", args, display_command))
+        }
         AppInstallMode::GlobalPnpm => Some((
             "pnpm",
             vec![
@@ -751,6 +810,7 @@ impl AppState {
                             build_update_command(
                                 config.install_mode,
                                 package_name,
+                                config.global_prefix.as_deref(),
                                 config.rerun_command.as_deref(),
                                 runtime.status.latest_version.as_deref(),
                             )
@@ -766,6 +826,7 @@ impl AppState {
                             build_update_command(
                                 config.install_mode,
                                 package_name,
+                                config.global_prefix.as_deref(),
                                 config.rerun_command.as_deref(),
                                 None,
                             )
@@ -793,13 +854,17 @@ impl AppState {
             .clone()
             .ok_or_else(|| anyhow!("No newer Conductor version is available right now."))?;
 
-        let (command, args, display_command) =
-            resolve_update_invocation(config.install_mode, &package_name, &latest_version)
-                .ok_or_else(|| {
-                    anyhow!(
+        let (command, args, display_command) = resolve_update_invocation(
+            config.install_mode,
+            &package_name,
+            config.global_prefix.as_deref(),
+            &latest_version,
+        )
+        .ok_or_else(|| {
+            anyhow!(
             "Automatic updates are unavailable for this install. Use the suggested command instead."
         )
-                })?;
+        })?;
 
         let next_snapshot = {
             let mut runtime = self.app_update.lock().await;
@@ -1044,22 +1109,89 @@ mod tests {
     #[test]
     fn build_update_command_matches_install_mode() {
         assert_eq!(
-            build_update_command(AppInstallMode::Npx, "conductor-oss", None, None),
+            build_update_command(AppInstallMode::Npx, "conductor-oss", None, None, None),
             Some(
                 "npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start"
                     .to_string()
             )
         );
         assert_eq!(
-            build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None, None),
+            build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None, None, None),
             Some(
                 "npm install -g --registry=https://registry.npmjs.org conductor-oss@latest"
                     .to_string()
             )
         );
         assert_eq!(
-            build_update_command(AppInstallMode::Source, "conductor-oss", None, None),
+            build_update_command(
+                AppInstallMode::GlobalNpm,
+                "conductor-oss",
+                Some("/Users/test/.conductor/npm"),
+                None,
+                Some("0.60.7"),
+            ),
+            Some(
+                "npm install -g --prefix '/Users/test/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            build_update_command(AppInstallMode::Source, "conductor-oss", None, None, None),
             None
+        );
+    }
+
+    #[test]
+    fn infer_npm_global_prefix_recovers_custom_prefix() {
+        let package_root = Path::new("/Users/test/.conductor/npm/lib/node_modules/conductor-oss");
+        assert_eq!(
+            infer_npm_global_prefix(package_root),
+            Some("/Users/test/.conductor/npm".to_string())
+        );
+    }
+
+    #[test]
+    fn build_update_command_quotes_prefixes_with_spaces() {
+        assert_eq!(
+            build_update_command(
+                AppInstallMode::GlobalNpm,
+                "conductor-oss",
+                Some("/Users/John Smith/.conductor/npm"),
+                None,
+                Some("0.60.7"),
+            ),
+            Some(
+                "npm install -g --prefix '/Users/John Smith/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_update_invocation_includes_custom_npm_prefix() {
+        let (command, args, display_command) = resolve_update_invocation(
+            AppInstallMode::GlobalNpm,
+            "conductor-oss",
+            Some("/Users/test/.conductor/npm"),
+            "0.60.7",
+        )
+        .expect("expected global npm invocation");
+
+        assert_eq!(command, "npm");
+        assert_eq!(
+            args,
+            vec![
+                "install".to_string(),
+                "-g".to_string(),
+                "--prefix".to_string(),
+                "/Users/test/.conductor/npm".to_string(),
+                "--registry=https://registry.npmjs.org".to_string(),
+                "conductor-oss@0.60.7".to_string(),
+            ]
+        );
+        assert_eq!(
+            display_command,
+            "npm install -g --prefix '/Users/test/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
         );
     }
 
@@ -1069,6 +1201,7 @@ mod tests {
             build_update_command(
                 AppInstallMode::Npx,
                 "conductor-oss",
+                None,
                 Some("npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace demo"),
                 None,
             ),
