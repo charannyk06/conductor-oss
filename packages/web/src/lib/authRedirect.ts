@@ -3,15 +3,21 @@ import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 const DEFAULT_POST_SIGN_IN_REDIRECT = "/";
 const DEFAULT_PAIRED_DEVICE_POST_SIGN_IN_REDIRECT = "/bridge/connect";
 
-function normalizeDefaultRedirectTarget(candidate?: string | null): string {
-  const nextPath = sanitizeRedirectTarget(candidate ?? DEFAULT_POST_SIGN_IN_REDIRECT);
-
-  if (
-    nextPath === "/sign-in"
+function isAuthSurfacePath(nextPath: string): boolean {
+  return nextPath === "/sign-in"
     || nextPath === "/sign-in/"
     || nextPath.startsWith("/sign-in?")
     || nextPath.startsWith("/sign-in/")
-  ) {
+    || nextPath === "/sign-up"
+    || nextPath === "/sign-up/"
+    || nextPath.startsWith("/sign-up?")
+    || nextPath.startsWith("/sign-up/");
+}
+
+function normalizeDefaultRedirectTarget(candidate?: string | null): string {
+  const nextPath = sanitizeRedirectTarget(candidate ?? DEFAULT_POST_SIGN_IN_REDIRECT);
+
+  if (isAuthSurfacePath(nextPath)) {
     return DEFAULT_POST_SIGN_IN_REDIRECT;
   }
 
@@ -65,12 +71,7 @@ export function resolvePostSignInRedirectTarget(
   const resolvedDefaultRedirectTarget = normalizeDefaultRedirectTarget(defaultRedirectTarget);
   const nextPath = resolveRelativeRedirectTarget(candidate, requestBaseUrl, resolvedDefaultRedirectTarget);
 
-  if (
-    nextPath === "/sign-in"
-    || nextPath === "/sign-in/"
-    || nextPath.startsWith("/sign-in?")
-    || nextPath.startsWith("/sign-in/")
-  ) {
+  if (isAuthSurfacePath(nextPath)) {
     return resolvedDefaultRedirectTarget;
   }
 
