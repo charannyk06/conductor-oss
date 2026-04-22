@@ -1484,7 +1484,7 @@ fn home_dir() -> Option<PathBuf> {
 fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
     matches!(
         agent_kind,
-        AgentKind::Codex | AgentKind::QwenCode | AgentKind::OpenClaw
+        AgentKind::Codex | AgentKind::QwenCode | AgentKind::Gemini | AgentKind::OpenClaw
     )
 }
 
@@ -4376,10 +4376,14 @@ mod tests {
     fn dispatcher_runtime_mode_selection_matches_agent_capabilities() {
         assert!(dispatcher_uses_headless_turns(&AgentKind::Codex));
         assert!(dispatcher_uses_headless_turns(&AgentKind::QwenCode));
+        assert!(dispatcher_uses_headless_turns(&AgentKind::Gemini));
         assert!(!dispatcher_uses_headless_turns(&AgentKind::ClaudeCode));
 
         assert!(dispatcher_supports_interactive_structured_output(
             &AgentKind::ClaudeCode
+        ));
+        assert!(dispatcher_supports_interactive_structured_output(
+            &AgentKind::Gemini
         ));
         assert!(dispatcher_supports_interactive_structured_output(
             &AgentKind::GithubCopilot
