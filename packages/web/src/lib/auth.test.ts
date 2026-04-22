@@ -196,9 +196,11 @@ test("resolvePostSignInRedirectTarget preserves bridge device redirects", () => 
   );
 });
 
-test("resolvePostSignInRedirectTarget avoids sending users back into sign-in", () => {
+test("resolvePostSignInRedirectTarget avoids sending users back into auth screens", () => {
   assert.equal(resolvePostSignInRedirectTarget("/sign-in"), "/");
   assert.equal(resolvePostSignInRedirectTarget("/sign-in/sso-callback"), "/");
+  assert.equal(resolvePostSignInRedirectTarget("/sign-up"), "/");
+  assert.equal(resolvePostSignInRedirectTarget("/sign-up/verify-email-address"), "/");
   assert.equal(resolvePostSignInRedirectTarget("https://evil.example.com"), "/");
 });
 

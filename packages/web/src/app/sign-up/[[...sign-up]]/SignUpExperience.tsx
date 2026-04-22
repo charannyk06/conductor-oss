@@ -1,0 +1,68 @@
+"use client";
+
+import { SignUp } from "@clerk/nextjs";
+
+type SignUpExperienceProps = {
+  redirectTarget: string;
+};
+
+const SIGN_UP_APPEARANCE = {
+  variables: {
+    colorPrimary: "#d4d4d8",
+    colorBackground: "transparent",
+    colorInputBackground: "#18181b",
+    colorInputText: "#fafafa",
+    colorText: "#fafafa",
+    colorTextSecondary: "#a1a1aa",
+    colorNeutral: "#3f3f46",
+    colorDanger: "#d25151",
+    fontFamily: "var(--font-sans), system-ui, sans-serif",
+    borderRadius: "0.375rem",
+  },
+  layout: {
+    socialButtonsVariant: "blockButton",
+    socialButtonsPlacement: "top",
+  },
+  elements: {
+    rootBox: "w-full",
+    cardBox: "w-full",
+    card: "w-full border-0 bg-transparent p-0 shadow-none",
+    main: "gap-5",
+    header: "hidden",
+    headerTitle: "hidden",
+    headerSubtitle: "hidden",
+    formFieldInput:
+      "min-h-12 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] px-4 text-[var(--text-strong)] shadow-none placeholder:text-[var(--text-faint)]",
+    formButtonPrimary:
+      "min-h-11 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-muted)] text-[var(--text-strong)] shadow-none transition hover:bg-[var(--bg-panel-2)]",
+    socialButtonsBlockButton:
+      "min-h-12 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-white text-[#111111] shadow-none transition hover:bg-[#f4f4f5]",
+    socialButtonsBlockButtonText: "font-semibold text-[#111111]",
+    dividerText: "text-[11px] uppercase tracking-[0.24em] text-[var(--text-muted)]",
+    dividerLine: "bg-[var(--border-soft)]",
+    footerActionText: "text-[13px] text-[var(--text-muted)]",
+    footerActionLink: "font-semibold text-[var(--text-strong)] transition hover:text-[var(--accent-hover)]",
+    identityPreviewText: "text-[var(--text-strong)]",
+    identityPreviewEditButton: "text-[var(--text-muted)] transition hover:text-[var(--text-strong)]",
+    formFieldSuccessText: "text-emerald-400",
+    formFieldErrorText: "text-rose-400",
+    alertText: "text-rose-300",
+  },
+} as const;
+
+export function SignUpExperience({ redirectTarget }: SignUpExperienceProps) {
+  return (
+    <div className="conductor-auth-form">
+      <SignUp
+        routing="path"
+        path="/sign-up"
+        appearance={SIGN_UP_APPEARANCE}
+        oauthFlow="auto"
+        forceRedirectUrl={redirectTarget}
+        fallbackRedirectUrl={redirectTarget}
+        signInForceRedirectUrl={redirectTarget}
+        signInFallbackRedirectUrl={redirectTarget}
+      />
+    </div>
+  );
+}

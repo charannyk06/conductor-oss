@@ -511,7 +511,7 @@ async function resolveClerkAccess(
       };
     }
 
-    const requireApproval = (process.env.CONDUCTOR_REQUIRE_APPROVAL ?? "true") === "true";
+    const requireApproval = (process.env.CONDUCTOR_REQUIRE_APPROVAL ?? "false").trim().toLowerCase() === "true";
     const adminEmails = legacyRoleEnvFallback().adminEmails;
     if (requireApproval && !adminEmails.includes(normalizedEmail) && !isApproved(user)) {
       return {
