@@ -40,6 +40,7 @@ type CliUpdateContext = {
   packageName: string;
   version: string;
   installMode: CliInstallMode;
+  globalPrefix?: string;
 };
 
 type DashboardPackageManager = "bun" | "pnpm";
@@ -117,6 +118,25 @@ function resolveBunGlobalNodeModulesDir(): string {
   return join(bunInstallRoot, "install", "global", "node_modules");
 }
 
+export function inferNpmGlobalPrefixFromPackageRoot(packageRoot: string): string | null {
+  const packageName = basename(packageRoot).toLowerCase();
+  if (packageName !== "conductor" && packageName !== "conductor-oss") {
+    return null;
+  }
+
+  const nodeModulesDir = dirname(packageRoot);
+  if (basename(nodeModulesDir) !== "node_modules") {
+    return null;
+  }
+
+  const parentDir = dirname(nodeModulesDir);
+  if (basename(parentDir) === "lib") {
+    return dirname(parentDir);
+  }
+
+  return null;
+}
+
 function hasWorkspaceLockfile(packageRoot: string): boolean {
   const workspaceRoot = join(packageRoot, "..", "..");
   return existsSync(join(workspaceRoot, "bun.lock"))
@@ -185,7 +205,7 @@ function dashboardBuildHint(packageManager: DashboardPackageManager): string {
     : "bun run --cwd packages/web build";
 }
 
-function resolveCliUpdateContext(): CliUpdateContext {
+export function resolveCliUpdateContext(): CliUpdateContext {
   const packageJsonUrl = new URL("../../package.json", import.meta.url);
   const packageRoot = dirname(fileURLToPath(packageJsonUrl));
   let packageName = "conductor-oss";
@@ -225,6 +245,22 @@ function resolveCliUpdateContext(): CliUpdateContext {
     return { packageName, version, installMode: "global-pnpm" };
   }
 
+  const inferredNpmGlobalPrefix = inferNpmGlobalPrefixFromPackageRoot(packageRoot);
+  if (inferredNpmGlobalPrefix) {
+    const inferredNpmGlobalDirs = [
+      join(inferredNpmGlobalPrefix, "lib", "node_modules"),
+      join(inferredNpmGlobalPrefix, "node_modules"),
+    ];
+    if (inferredNpmGlobalDirs.some((dir) => isPathInside(packageRoot, dir))) {
+      return {
+        packageName,
+        version,
+        installMode: "global-npm",
+        globalPrefix: inferredNpmGlobalPrefix,
+      };
+    }
+  }
+
   const npmGlobalPrefix = readCommandStdout("npm", ["prefix", "-g"]);
   if (npmGlobalPrefix) {
     const npmGlobalDirs = [
@@ -232,7 +268,7 @@ function resolveCliUpdateContext(): CliUpdateContext {
       join(npmGlobalPrefix, "node_modules"),
     ];
     if (npmGlobalDirs.some((dir) => existsSync(dir) && isPathInside(packageRoot, dir))) {
-      return { packageName, version, installMode: "global-npm" };
+      return { packageName, version, installMode: "global-npm", globalPrefix: npmGlobalPrefix };
     }
   }
 
@@ -1030,6 +1066,9 @@ export function registerStart(program: Command): void {
                   CONDUCTOR_CLI_PACKAGE_NAME: cliUpdateContext.packageName,
                   CONDUCTOR_CLI_VERSION: cliUpdateContext.version,
                   CONDUCTOR_CLI_INSTALL_MODE: cliUpdateContext.installMode,
+                  ...(cliUpdateContext.globalPrefix
+                    ? { CONDUCTOR_CLI_GLOBAL_PREFIX: cliUpdateContext.globalPrefix }
+                    : {}),
                   ...(cliRerunCommand
                     ? { CONDUCTOR_CLI_RERUN_COMMAND: cliRerunCommand }
                     : {}),
@@ -1179,6 +1218,9 @@ export function registerStart(program: Command): void {
                 CONDUCTOR_CLI_PACKAGE_NAME: cliUpdateContext.packageName,
                 CONDUCTOR_CLI_VERSION: cliUpdateContext.version,
                 CONDUCTOR_CLI_INSTALL_MODE: cliUpdateContext.installMode,
+                ...(cliUpdateContext.globalPrefix
+                  ? { CONDUCTOR_CLI_GLOBAL_PREFIX: cliUpdateContext.globalPrefix }
+                  : {}),
                 ...(cliRerunCommand
                   ? { CONDUCTOR_CLI_RERUN_COMMAND: cliRerunCommand }
                   : {}),

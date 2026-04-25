@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  inferNpmGlobalPrefixFromPackageRoot,
   isLoopbackHost,
   quoteWindowsCliArg,
   resolveDashboardPackageManager,
@@ -28,6 +29,27 @@ test("resolveLocalDashboardAuthEnv enables loopback packaged dashboards unless o
   assert.deepEqual(resolveLocalDashboardAuthEnv("127.0.0.1", {
     CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED: "false",
   }), {});
+});
+
+test("inferNpmGlobalPrefixFromPackageRoot derives npm prefixes from package roots", () => {
+  assert.equal(
+    inferNpmGlobalPrefixFromPackageRoot("/Users/test/.conductor/npm/lib/node_modules/conductor-oss"),
+    "/Users/test/.conductor/npm",
+  );
+  assert.equal(
+    inferNpmGlobalPrefixFromPackageRoot("/Users/test/project/node_modules/conductor-oss"),
+    null,
+  );
+  assert.equal(
+    inferNpmGlobalPrefixFromPackageRoot(
+      "/Users/test/.conductor/npm/lib/node_modules/conductor-oss/node_modules/conductor-oss-native-darwin-universal",
+    ),
+    null,
+  );
+  assert.equal(
+    inferNpmGlobalPrefixFromPackageRoot("/Users/test/conductor-oss/packages/cli"),
+    null,
+  );
 });
 
 test("resolveRustBackendLaunch prefers the newest repo-local Rust binary over bundled fallbacks", () => {
