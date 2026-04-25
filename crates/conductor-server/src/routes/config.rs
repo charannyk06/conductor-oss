@@ -1167,7 +1167,13 @@ async fn build_runtime_model_catalog(
                 .await
                 .unwrap_or(Value::Null)
         }
-        _ => Value::Null,
+        _ => {
+            crate::routes::agents::build_runtime_model_catalog_for_name(
+                &kind.to_string(),
+                Some(binary_path),
+            )
+            .await
+        }
     }
 }
 
