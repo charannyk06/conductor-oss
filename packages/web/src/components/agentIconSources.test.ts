@@ -18,6 +18,11 @@ test("Hermes aliases resolve to the bundled Hermes logo", () => {
   );
 });
 
+test("Pi resolves to the bundled original Pi logo", () => {
+  assert.equal(resolveAgentIconKey({ label: "Pi" }), "pi");
+  assert.deepEqual(resolveAgentIconSources({ label: "pi-coding-agent" }), ["/agents/pi.svg"]);
+});
+
 test("Known vector agents still prefer local themed assets before external icons", () => {
   assert.equal(resolveAgentIconKey({ label: "Codex" }), "codex");
   assert.deepEqual(

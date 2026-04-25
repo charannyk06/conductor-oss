@@ -16,6 +16,7 @@ pub mod hermes;
 pub mod letta;
 pub mod openclaw;
 pub mod opencode;
+pub mod pi;
 pub mod qwen;
 
 pub use amp::AmpExecutor;
@@ -30,6 +31,7 @@ pub use hermes::HermesExecutor;
 pub use letta::LettaExecutor;
 pub use openclaw::OpenClawExecutor;
 pub use opencode::OpenCodeExecutor;
+pub use pi::PiExecutor;
 pub use qwen::QwenCodeExecutor;
 
 fn push_search_dir(seen: &mut HashSet<PathBuf>, dirs: &mut Vec<PathBuf>, dir: PathBuf) {

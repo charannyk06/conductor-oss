@@ -116,6 +116,7 @@ Conductor currently includes adapters for:
 - Hermes
 - Cursor CLI
 - OpenCode
+- Pi
 - Droid
 - GitHub Copilot
 - CCR

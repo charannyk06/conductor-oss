@@ -1,6 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseCodexRuntimeModelCatalog } from "./runtimeAgentModels";
+import { parseCodexRuntimeModelCatalog, parsePiListModelsOutput } from "./runtimeAgentModels";
+
+test("parsePiListModelsOutput reads Pi provider model rows", () => {
+  const rows = parsePiListModelsOutput(`provider  model      context  max-out  thinking  images
+openai    gpt-5.4    272K     128K     yes       yes
+openai    gpt-4o     128K     16.4K    no        yes`);
+
+  assert.deepEqual(rows, [
+    {
+      provider: "openai",
+      model: "gpt-5.4",
+      context: "272K",
+      maxOutput: "128K",
+      thinking: true,
+      images: true,
+    },
+    {
+      provider: "openai",
+      model: "gpt-4o",
+      context: "128K",
+      maxOutput: "16.4K",
+      thinking: false,
+      images: true,
+    },
+  ]);
+});
 
 test("parseCodexRuntimeModelCatalog keeps visible Codex models in priority order", () => {
   const catalog = parseCodexRuntimeModelCatalog({

@@ -270,7 +270,7 @@ impl DispatcherTurnRequest {
     }
 }
 
-const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 6] = [
+const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 7] = [
     DispatcherSelectOption {
         value: "codex",
         name: "Codex",
@@ -297,6 +297,11 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 6] = [
         description: "Route work through an OpenClaw gateway-backed runtime.",
     },
     DispatcherSelectOption {
+        value: "pi",
+        name: "Pi",
+        description: "Route implementation work to Pi coding agent sessions.",
+    },
+    DispatcherSelectOption {
         value: "letta",
         name: "Letta Code",
         description: "Route implementation work to Letta Code sessions.",
@@ -307,6 +312,39 @@ const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_LETTA_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
+
+const DISPATCHER_PI_MODEL_OPTIONS: [DispatcherSelectOption; 6] = [
+    DispatcherSelectOption {
+        value: "openai/gpt-5.5",
+        name: "GPT-5.5",
+        description: "Latest frontier OpenAI model exposed by Pi.",
+    },
+    DispatcherSelectOption {
+        value: "openai/gpt-5.4",
+        name: "GPT-5.4",
+        description: "Previous frontier OpenAI model exposed by Pi.",
+    },
+    DispatcherSelectOption {
+        value: "openai/gpt-5.4-mini",
+        name: "GPT-5.4-Mini",
+        description: "Smaller GPT-5.4 variant exposed by Pi.",
+    },
+    DispatcherSelectOption {
+        value: "openai/gpt-5.3-codex",
+        name: "GPT-5.3-Codex",
+        description: "Balanced coding model exposed by Pi.",
+    },
+    DispatcherSelectOption {
+        value: "openai/gpt-5.2-codex",
+        name: "GPT-5.2-Codex",
+        description: "Previous generation coding model exposed by Pi.",
+    },
+    DispatcherSelectOption {
+        value: "anthropic/claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        description: "Claude Sonnet model exposed through Pi providers.",
+    },
+];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -945,6 +983,7 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
         "droid" => Some("export FACTORY_API_KEY=...".to_string()),
         "opencode" => Some("opencode auth login".to_string()),
         "qwen-code" => Some("qwen auth login".to_string()),
+        "pi" | "pi-coding-agent" => Some("pi".to_string()),
         "letta" => Some("letta connect".to_string()),
         _ => None,
     }
@@ -1399,6 +1438,7 @@ fn canonical_implementation_agent(value: &str) -> Option<String> {
         | AgentKind::Gemini
         | AgentKind::OpenClaw
         | AgentKind::CursorCli
+        | AgentKind::Pi
         | AgentKind::Letta => Some(AgentKind::parse(value).to_string()),
         _ => None,
     }
@@ -1444,6 +1484,7 @@ pub(crate) fn dispatcher_implementation_model_options(
         "gemini" => &DISPATCHER_GEMINI_MODEL_OPTIONS,
         "openclaw" => &DISPATCHER_OPENCLAW_MODEL_OPTIONS,
         "cursor-cli" => &DISPATCHER_CURSOR_MODEL_OPTIONS,
+        "pi" => &DISPATCHER_PI_MODEL_OPTIONS,
         "letta" => &DISPATCHER_LETTA_MODEL_OPTIONS,
         _ => &DISPATCHER_CODEX_MODEL_OPTIONS,
     }
@@ -1460,6 +1501,7 @@ pub(crate) fn dispatcher_implementation_reasoning_options(
         "openclaw" => &DISPATCHER_OPENCLAW_REASONING_OPTIONS,
         "letta" => &[],
         "claude-code" => &DISPATCHER_DEFAULT_REASONING_OPTIONS,
+        "pi" => &DISPATCHER_CODEX_REASONING_OPTIONS,
         _ => &DISPATCHER_CODEX_REASONING_OPTIONS,
     }
 }
@@ -1479,6 +1521,7 @@ pub(crate) fn dispatcher_default_implementation_reasoning_effort(
     {
         "claude-code" => Some("medium"),
         "codex" => Some("high"),
+        "pi" => Some("high"),
         "cursor-cli" => Some("medium"),
         "openclaw" | "letta" => None,
         _ => None,
@@ -1532,7 +1575,11 @@ fn home_dir() -> Option<PathBuf> {
 fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
     matches!(
         agent_kind,
-        AgentKind::Codex | AgentKind::QwenCode | AgentKind::Gemini | AgentKind::OpenClaw
+        AgentKind::Codex
+            | AgentKind::QwenCode
+            | AgentKind::Gemini
+            | AgentKind::OpenClaw
+            | AgentKind::Pi
     )
 }
 
@@ -1652,6 +1699,10 @@ fn dispatcher_model_supported_for_agent(agent: &str, model: &str) -> bool {
         }
         "letta" => {
             // Letta Code accepts provider-specific model IDs through --model.
+            true
+        }
+        "pi" => {
+            // Pi accepts provider/model IDs and custom model patterns through --model.
             true
         }
         _ => {
@@ -3117,6 +3168,7 @@ impl AppState {
                     "gemini".to_string(),
                     "cursor-cli".to_string(),
                     "openclaw".to_string(),
+                    "pi".to_string(),
                     "letta".to_string(),
                 ],
                 durable_notes: Vec::new(),
@@ -3284,6 +3336,7 @@ impl AppState {
                     "gemini".to_string(),
                     "cursor-cli".to_string(),
                     "openclaw".to_string(),
+                    "pi".to_string(),
                     "letta".to_string(),
                 ],
                 durable_notes: Vec::new(),
@@ -4518,6 +4571,7 @@ mod tests {
         assert!(dispatcher_uses_headless_turns(&AgentKind::Codex));
         assert!(dispatcher_uses_headless_turns(&AgentKind::QwenCode));
         assert!(dispatcher_uses_headless_turns(&AgentKind::Gemini));
+        assert!(dispatcher_uses_headless_turns(&AgentKind::Pi));
         assert!(!dispatcher_uses_headless_turns(&AgentKind::ClaudeCode));
 
         assert!(dispatcher_supports_interactive_structured_output(
@@ -4554,6 +4608,7 @@ mod tests {
         );
 
         assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Codex), None);
+        assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Pi), None);
         assert_eq!(
             dispatcher_resume_target(&thread, &AgentKind::QwenCode),
             None
@@ -4669,6 +4724,7 @@ mod tests {
             "gemini",
             "gemini-3.2-pro"
         ));
+        assert!(dispatcher_model_supported_for_agent("pi", "openai/gpt-5.5"));
         assert!(!dispatcher_model_supported_for_agent(
             "claude-code",
             "gpt-5.4"

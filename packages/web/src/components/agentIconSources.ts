@@ -17,6 +17,7 @@ type AgentIconKey =
   | "letta"
   | "openclaw"
   | "opencode"
+  | "pi"
   | "qwen";
 
 const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
@@ -43,6 +44,7 @@ const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
   letta: ["letta", "letta-code", "letta_code", "agent-letta", "memgpt"],
   openclaw: ["openclaw", "open-claw", "open_claw", "agent-openclaw"],
   opencode: ["opencode", "open-code", "open_code", "open-code-cli", "agent-opencode"],
+  pi: ["pi", "pi-coding-agent", "pi-agent", "agent-pi"],
   qwen: ["qwen", "qwen-code", "qwen_code", "qwen-code-cli", "agent-qwen-code"],
 };
 
@@ -59,6 +61,7 @@ const AGENT_LOCAL_ICON_SOURCES: Record<AgentIconKey, string[]> = {
   letta: ["/agents/letta-dark.svg", "/agents/letta-light.svg"],
   openclaw: ["/agents/openclaw-dark.svg", "/agents/openclaw-light.svg"],
   opencode: ["/agents/opencode-dark.svg", "/agents/opencode-light.svg"],
+  pi: ["/agents/pi.svg"],
   qwen: ["/agents/qwen-dark.svg", "/agents/qwen-light.svg"],
 };
 

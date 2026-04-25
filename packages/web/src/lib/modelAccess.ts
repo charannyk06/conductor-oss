@@ -41,6 +41,7 @@ export function normalizeModelAccessPreferences(
     gemini: selectValue(root["gemini"], GEMINI_ACCESS, defaults.gemini),
     githubCopilot: selectValue(root["githubCopilot"], DEFAULT_ACCESS, defaults.githubCopilot),
     opencode: selectValue(root["opencode"], DEFAULT_ACCESS, defaults.opencode),
+    pi: selectValue(root["pi"], DEFAULT_ACCESS, defaults.pi),
     qwenCode: selectValue(root["qwenCode"], QWEN_ACCESS, defaults.qwenCode),
     ccr: selectValue(root["ccr"], DEFAULT_ACCESS, defaults.ccr),
   };

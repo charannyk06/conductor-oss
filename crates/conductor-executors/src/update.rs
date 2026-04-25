@@ -76,6 +76,14 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         },
     ),
     (
+        AgentKind::Pi,
+        AgentInstallInfo {
+            binaries: &["pi"],
+            package: "@mariozechner/pi-coding-agent",
+            global_flag: "-g",
+        },
+    ),
+    (
         AgentKind::Droid,
         AgentInstallInfo {
             binaries: &["droid"],
@@ -424,6 +432,7 @@ mod tests {
         assert!(install_info_for(&AgentKind::Codex).is_some());
         assert!(install_info_for(&AgentKind::CursorCli).is_some());
         assert!(install_info_for(&AgentKind::OpenCode).is_some());
+        assert!(install_info_for(&AgentKind::Pi).is_some());
         assert!(install_info_for(&AgentKind::Letta).is_some());
         assert!(install_info_for(&AgentKind::Hermes).is_none());
     }

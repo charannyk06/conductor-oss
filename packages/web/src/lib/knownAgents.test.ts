@@ -9,6 +9,7 @@ import {
 test("openclaw is dispatcher-only", () => {
   assert.equal(supportsTerminalSessions("openclaw"), false);
   assert.equal(supportsTerminalSessions("claude-code"), true);
+  assert.equal(supportsTerminalSessions("pi"), true);
 });
 
 test("filterTerminalAgentNames removes dispatcher-only agents", () => {

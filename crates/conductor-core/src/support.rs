@@ -23,6 +23,7 @@ const FALLBACK_WATCHER_AGENTS: &[&str] = &[
     "hermes",
     "cursor-cli",
     "opencode",
+    "pi",
     "droid",
     "qwen-code",
     "ccr",

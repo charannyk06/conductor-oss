@@ -55,6 +55,28 @@ test("buildAgentCheck treats the qwen binary as an installed Qwen Code CLI", () 
   });
 });
 
+test("Pi setup metadata points at the official package", () => {
+  const config = resolveAgentSetupConfig("pi");
+
+  assert.deepEqual(config.commands, ["pi"]);
+  assert.equal(config.installPackage, "@mariozechner/pi-coding-agent");
+  assert.deepEqual(config.postInstallAuthCommand, {
+    label: "Run Pi setup",
+    cmd: "pi",
+    args: [],
+  });
+});
+
+test("buildAgentCheck treats the pi binary as an installed Pi CLI", () => {
+  withTemporaryPath(["npm", "pi"], () => {
+    const check = buildAgentCheck("pi");
+
+    assert.equal(check.installed, true);
+    assert.equal(check.install, undefined);
+    assert.equal(check.postInstallAuthCommand, undefined);
+  });
+});
+
 test("Hermes setup metadata points at the official installer and setup command", () => {
   const config = resolveAgentSetupConfig("hermes");
 
