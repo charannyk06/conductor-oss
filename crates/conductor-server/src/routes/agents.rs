@@ -370,7 +370,10 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
 // Runtime model catalog dispatch
 // ---------------------------------------------------------------------------
 
-async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&Path>) -> Value {
+pub(crate) async fn build_runtime_model_catalog_for_name(
+    name: &str,
+    binary_path: Option<&Path>,
+) -> Value {
     let normalized = normalize_agent_name(name);
     match normalized.as_str() {
         "claude-code" | "claude" => {
