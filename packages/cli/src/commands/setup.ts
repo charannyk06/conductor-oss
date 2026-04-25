@@ -203,6 +203,16 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
         args: ["auth", "login"],
       },
     },
+    pi: {
+      commands: ["pi"],
+      installPackage: "@mariozechner/pi-coding-agent",
+      installLabel: "Install Pi Coding Agent",
+      postInstallAuthCommand: {
+        label: "Run Pi setup",
+        cmd: "pi",
+        args: [],
+      },
+    },
     hermes: {
       commands: ["hermes", "hermes-agent"],
       installCommand: {

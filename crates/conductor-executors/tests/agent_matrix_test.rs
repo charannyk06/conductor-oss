@@ -1,6 +1,6 @@
 use conductor_executors::agents::{
     AmpExecutor, CcrExecutor, ClaudeCodeExecutor, CodexExecutor, CopilotExecutor, CursorExecutor,
-    DroidExecutor, GeminiExecutor, HermesExecutor, LettaExecutor, OpenCodeExecutor,
+    DroidExecutor, GeminiExecutor, HermesExecutor, LettaExecutor, OpenCodeExecutor, PiExecutor,
     QwenCodeExecutor,
 };
 use conductor_executors::executor::{Executor, ExecutorOutput, SpawnOptions};
@@ -232,6 +232,24 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     assert_contains(&letta, &["--model", "gpt-5", "-p", "letta", "--safe-extra"]);
     assert_filters_blocked_flags(&letta);
 
+    let mut pi_options = options("pi prompt");
+    pi_options.model = Some("openai/gpt-5.4".to_string());
+    pi_options.structured_output = true;
+    let pi = PiExecutor::new(PathBuf::from("/usr/bin/pi")).build_args(&pi_options);
+    assert_contains(
+        &pi,
+        &[
+            "--mode",
+            "json",
+            "--model",
+            "openai/gpt-5.4",
+            "--thinking",
+            "high",
+            "pi prompt",
+        ],
+    );
+    assert_filters_blocked_flags(&pi);
+
     let mut qwen_options = options("qwen");
     qwen_options.model = Some("qwen-max".to_string());
     let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
@@ -323,6 +341,14 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     let letta = LettaExecutor::new(PathBuf::from("/usr/bin/letta")).build_args(&interactive);
     assert_has_pair(&letta, "--model", "gpt-5");
     assert_no_flag(&letta, "-p");
+
+    let mut pi_options = interactive.clone();
+    pi_options.model = Some("openai/gpt-5.4".to_string());
+    pi_options.reasoning_effort = Some("xhigh".to_string());
+    let pi = PiExecutor::new(PathBuf::from("/usr/bin/pi")).build_args(&pi_options);
+    assert_has_pair(&pi, "--model", "openai/gpt-5.4");
+    assert_has_pair(&pi, "--thinking", "xhigh");
+    assert_no_flag(&pi, "-p");
 }
 
 #[test]
@@ -416,6 +442,23 @@ fn parse_output_handles_representative_agent_formats() {
         opencode,
         ExecutorOutput::Failed { ref error, exit_code: Some(1) } if error == "tool crashed"
     ));
+
+    let pi = PiExecutor::new(PathBuf::from("/usr/bin/pi")).parse_output(
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Pi delta"}}"#,
+    );
+    assert!(matches!(pi, ExecutorOutput::Stdout(ref text) if text == "Pi delta"));
+
+    let pi_tool = PiExecutor::new(PathBuf::from("/usr/bin/pi")).parse_output(
+        r#"{"type":"tool_execution_start","toolName":"bash","args":{"command":"ls -la"}}"#,
+    );
+    let ExecutorOutput::StructuredStatus { text, metadata } = pi_tool else {
+        panic!("expected pi tool status");
+    };
+    assert_eq!(text, "Bash");
+    assert_eq!(
+        metadata.get("toolStatus").and_then(Value::as_str),
+        Some("running")
+    );
 
     let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).parse_output(
         r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Qwen delta"}}}"#,

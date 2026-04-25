@@ -110,6 +110,16 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
         setup_url: "",
     },
     KnownAgentInfo {
+        name: "pi",
+        label: "Pi",
+        description: "Pi Coding Agent CLI",
+        homepage: "https://pi.dev",
+        icon_url: "/agents/pi.svg",
+        install_hint: "npm install -g @mariozechner/pi-coding-agent",
+        install_url: "https://www.npmjs.com/package/@mariozechner/pi-coding-agent",
+        setup_url: "https://pi.dev",
+    },
+    KnownAgentInfo {
         name: "letta",
         label: "Letta Code",
         description: "Letta Code CLI",
@@ -321,6 +331,7 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cursor.svg",
         ),
         AgentKind::OpenCode => ("OpenCode CLI", "https://opencode.ai", ""),
+        AgentKind::Pi => ("Pi Coding Agent CLI", "https://pi.dev", "/agents/pi.svg"),
         AgentKind::OpenClaw => (
             "OpenClaw gateway-backed runtime",
             "https://github.com/openclaw/openclaw#readme",
@@ -399,6 +410,12 @@ async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&P
         "opencode" => {
             let bp = binary_path.map(Path::to_path_buf);
             build_opencode_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
+        }
+        "pi" | "pi-coding-agent" | "pi-agent" => {
+            let bp = binary_path.map(Path::to_path_buf);
+            build_pi_runtime_model_catalog(bp.as_deref())
                 .await
                 .unwrap_or(Value::Null)
         }
@@ -1720,6 +1737,130 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
 }
 
 // ---------------------------------------------------------------------------
+// Pi catalog parses pi --list-models
+// ---------------------------------------------------------------------------
+
+fn parse_pi_list_models_output(
+    output: &str,
+) -> Vec<(String, String, Option<String>, Option<String>, bool)> {
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with("provider") || line.starts_with("npm ") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let provider = parts[0].trim();
+        let model = parts[1].trim();
+        if provider.is_empty() || model.is_empty() {
+            continue;
+        }
+        let id = format!("{provider}/{model}");
+        if !seen.insert(id) {
+            continue;
+        }
+        let context = parts.get(2).map(|value| value.to_string());
+        let max_out = parts.get(3).map(|value| value.to_string());
+        let thinking = parts
+            .get(4)
+            .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+        rows.push((
+            provider.to_string(),
+            model.to_string(),
+            context,
+            max_out,
+            thinking,
+        ));
+    }
+
+    rows
+}
+
+async fn build_pi_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
+    let commands: Vec<String> = if let Some(bp) = binary_path {
+        vec![bp.display().to_string()]
+    } else {
+        vec!["pi".to_string()]
+    };
+    let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+
+    let output = read_command_output(&cmd_refs, &["--list-models"]).await?;
+    let rows = parse_pi_list_models_output(&output);
+    if rows.is_empty() {
+        return default_access_catalog("pi", vec![], None, Some("openai/gpt-5.5"), vec![], None);
+    }
+
+    let mut models = Vec::new();
+    let mut reasoning_options_by_model = Map::new();
+    let mut default_reasoning_by_model = Map::new();
+
+    for (provider, model, context, max_out, thinking) in rows {
+        let id = format!("{provider}/{model}");
+        let mut details = vec![format!("provider: {provider}")];
+        if let Some(context) = context.as_deref().filter(|value| !value.is_empty()) {
+            details.push(format!("context: {context}"));
+        }
+        if let Some(max_out) = max_out.as_deref().filter(|value| !value.is_empty()) {
+            details.push(format!("max output: {max_out}"));
+        }
+        models.push(model_option(
+            &id,
+            &format!("{} ({provider})", format_generic_model_label(&model)),
+            &format!(
+                "Model exposed by the local Pi CLI ({}).",
+                details.join(", ")
+            ),
+            &["default"],
+        ));
+
+        if thinking {
+            let reasoning_options = ["low", "medium", "high", "xhigh"]
+                .into_iter()
+                .map(reasoning_option)
+                .collect::<Vec<_>>();
+            reasoning_options_by_model.insert(id.clone(), json!(reasoning_options));
+            default_reasoning_by_model.insert(id, json!("high"));
+        }
+    }
+
+    let default_model = models
+        .iter()
+        .find(|model| model["id"].as_str() == Some("openai/gpt-5.5"))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|model| model["id"].as_str() == Some("openai/gpt-5.4"))
+        })
+        .or_else(|| models.first())
+        .and_then(|model| model["id"].as_str())
+        .map(str::to_string);
+
+    let mut catalog = default_access_catalog(
+        "pi",
+        models,
+        default_model.as_deref(),
+        default_model.as_deref().or(Some("openai/gpt-5.5")),
+        vec![],
+        None,
+    )?;
+    if !reasoning_options_by_model.is_empty() {
+        catalog["reasoningOptionsByModel"] = Value::Object(reasoning_options_by_model);
+    }
+    if !default_reasoning_by_model.is_empty() {
+        catalog["defaultReasoningByModel"] = Value::Object(default_reasoning_by_model);
+    }
+    Some(catalog)
+}
+
+// ---------------------------------------------------------------------------
 // OpenCode catalog — runs opencode models --verbose, parses output
 // ---------------------------------------------------------------------------
 
@@ -2335,6 +2476,20 @@ claude-4.6-opus-max-thinking - Opus 4.6 1M Max Thinking (default)
             ]
         );
         assert_eq!(default_model.as_deref(), Some("gpt-5.4-xhigh"));
+    }
+
+    #[test]
+    fn parse_pi_list_models_output_reads_provider_model_rows() {
+        let rows = parse_pi_list_models_output(
+            "provider  model        context  max-out  thinking  images
+openai    gpt-5.4      272K     128K     yes       yes
+anthropic claude-haiku 200K     8K       no        no",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "openai");
+        assert_eq!(rows[0].1, "gpt-5.4");
+        assert!(rows[0].4);
+        assert!(!rows[1].4);
     }
 
     #[test]

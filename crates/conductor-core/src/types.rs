@@ -34,6 +34,7 @@ pub enum AgentKind {
     CursorCli,
     OpenCode,
     OpenClaw,
+    Pi,
     Droid,
     QwenCode,
     Ccr,
@@ -54,6 +55,7 @@ impl AgentKind {
             "cursor" | "cursor-cli" => Self::CursorCli,
             "opencode" => Self::OpenCode,
             "openclaw" => Self::OpenClaw,
+            "pi" | "pi-coding-agent" | "pi-agent" => Self::Pi,
             "droid" => Self::Droid,
             "qwen" | "qwen-code" => Self::QwenCode,
             "ccr" => Self::Ccr,
@@ -75,6 +77,7 @@ impl std::fmt::Display for AgentKind {
             Self::CursorCli => write!(f, "cursor-cli"),
             Self::OpenCode => write!(f, "opencode"),
             Self::OpenClaw => write!(f, "openclaw"),
+            Self::Pi => write!(f, "pi"),
             Self::Droid => write!(f, "droid"),
             Self::QwenCode => write!(f, "qwen-code"),
             Self::Ccr => write!(f, "ccr"),
@@ -428,6 +431,7 @@ mod tests {
         assert_eq!(AgentKind::QwenCode.to_string(), "qwen-code");
         assert_eq!(AgentKind::GithubCopilot.to_string(), "github-copilot");
         assert_eq!(AgentKind::OpenClaw.to_string(), "openclaw");
+        assert_eq!(AgentKind::Pi.to_string(), "pi");
         assert_eq!(AgentKind::Hermes.to_string(), "hermes");
         assert_eq!(AgentKind::Letta.to_string(), "letta");
         assert_eq!(
@@ -453,6 +457,8 @@ mod tests {
         assert_eq!(AgentKind::parse("hermes"), AgentKind::Hermes);
         assert_eq!(AgentKind::parse("hermes-agent"), AgentKind::Hermes);
         assert_eq!(AgentKind::parse("openclaw"), AgentKind::OpenClaw);
+        assert_eq!(AgentKind::parse("pi"), AgentKind::Pi);
+        assert_eq!(AgentKind::parse("pi-coding-agent"), AgentKind::Pi);
         assert_eq!(AgentKind::parse("qwen-code"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("qwen"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("copilot"), AgentKind::GithubCopilot);

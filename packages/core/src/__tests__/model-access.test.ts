@@ -21,6 +21,7 @@ test("defaults expose model access preferences for supported agents", () => {
     gemini: "oauth",
     githubCopilot: "default",
     opencode: "default",
+    pi: "default",
     qwenCode: "oauth",
     ccr: "default",
   });
@@ -46,6 +47,13 @@ test("agent catalogs only expose access metadata", () => {
   assert.ok(copilotCatalog);
   assert.deepEqual(
     copilotCatalog.accessOptions.map((option) => option.id),
+    ["default"],
+  );
+
+  const piCatalog = getAgentModelCatalog("pi");
+  assert.ok(piCatalog);
+  assert.deepEqual(
+    piCatalog.accessOptions.map((option) => option.id),
     ["default"],
   );
 });
@@ -78,6 +86,12 @@ test("core exposes stable fallback model and reasoning catalogs", () => {
     ["low", "medium", "high"],
   );
   assert.equal(getDefaultAgentReasoningEffort("claude-code", { claudeCode: "max" }), "high");
+  assert.equal(getDefaultAgentModel("pi", { pi: "default" }), "openai/gpt-5.5");
+  assert.deepEqual(
+    getAvailableAgentReasoningEfforts("pi", { pi: "default" }).map((option) => option.id),
+    ["low", "medium", "high", "xhigh"],
+  );
+  assert.equal(getDefaultAgentReasoningEffort("pi", { pi: "default" }), "high");
 });
 
 test("resolveAgentModelAccess uses the saved preference when valid", () => {

@@ -15,6 +15,7 @@ import { buildClaudeRuntimeModelCatalog } from "./claude";
 import { buildGeminiRuntimeModelCatalog } from "./gemini";
 import { buildAmpRuntimeModelCatalog } from "./amp";
 import { buildOpenCodeRuntimeModelCatalog } from "./opencode";
+import { buildPiRuntimeModelCatalog } from "./pi";
 import { buildCopilotRuntimeModelCatalog } from "./copilot";
 import { buildDroidRuntimeModelCatalog } from "./droid";
 import { buildCursorRuntimeModelCatalog } from "./cursor";
@@ -22,6 +23,7 @@ import { buildQwenRuntimeModelCatalog } from "./qwen";
 import { buildCcrRuntimeModelCatalog } from "./ccr";
 
 export { parseCodexRuntimeModelCatalog } from "./codex";
+export { parsePiListModelsOutput } from "./pi";
 
 const runtimeModelCatalogCache = new Map<string, RuntimeModelCatalogCacheEntry>();
 const runtimeModelCatalogInflight = new Map<string, Promise<RuntimeAgentModelCatalog | null>>();
@@ -59,6 +61,10 @@ async function loadRuntimeAgentModelCatalog(agent: string): Promise<RuntimeAgent
 
   if (normalizedAgent === "opencode") {
     return buildOpenCodeRuntimeModelCatalog();
+  }
+
+  if (normalizedAgent === "pi") {
+    return buildPiRuntimeModelCatalog();
   }
 
   if (normalizedAgent === "qwen-code") {

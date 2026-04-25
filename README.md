@@ -219,6 +219,7 @@ Conductor ships adapters for the coding CLIs it can discover and launch today.
 | Hermes | `hermes` |
 | Cursor CLI | `cursor-agent` |
 | OpenCode | `opencode` |
+| Pi | `pi` |
 | Droid | `droid` |
 | GitHub Copilot | `gh copilot` or `copilot` |
 | CCR | `ccr` |

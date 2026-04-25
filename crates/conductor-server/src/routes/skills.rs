@@ -28,6 +28,7 @@ const ALL_SKILL_AGENTS: &[&str] = &[
     "hermes",
     "cursor-cli",
     "opencode",
+    "pi",
     "droid",
     "qwen-code",
     "ccr",
@@ -86,6 +87,12 @@ static SKILL_AGENT_CATALOG: &[SkillAgentCatalogEntry] = &[
         name: "OpenCode",
         project_roots: &[".opencode/skills", ".agents/skills"],
         user_roots: &["~/.config/opencode/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "pi",
+        name: "Pi",
+        project_roots: &[".pi/skills", ".agents/skills"],
+        user_roots: &["~/.pi/agent/skills", "~/.agents/skills"],
     },
     SkillAgentCatalogEntry {
         id: "droid",
@@ -1094,6 +1101,22 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn pi_skill_catalog_entry_uses_pi_standard_roots() {
+        let entry = SKILL_AGENT_CATALOG
+            .iter()
+            .find(|entry| entry.id == "pi")
+            .expect("pi skill agent entry should be present");
+
+        assert_eq!(entry.name, "Pi");
+        assert_eq!(entry.project_roots, &[".pi/skills", ".agents/skills"]);
+        assert_eq!(
+            entry.user_roots,
+            &["~/.pi/agent/skills", "~/.agents/skills"]
+        );
+        assert!(ALL_SKILL_AGENTS.contains(&"pi"));
     }
 
     #[test]

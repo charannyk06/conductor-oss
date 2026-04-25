@@ -1123,6 +1123,11 @@ fn agent_metadata(
             "https://github.com/openclaw/openclaw#readme",
             "",
         ),
+        conductor_core::types::AgentKind::Pi => (
+            "Pi Coding Agent CLI",
+            "https://pi.dev",
+            "/agents/pi.svg",
+        ),
         conductor_core::types::AgentKind::Droid => (
             "Factory Droid CLI",
             "https://github.com/Factory-AI/factory",

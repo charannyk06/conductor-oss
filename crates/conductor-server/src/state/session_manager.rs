@@ -740,6 +740,7 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
         "droid" => Some("export FACTORY_API_KEY=...".to_string()),
         "opencode" => Some("opencode auth login".to_string()),
         "qwen-code" => Some("qwen auth login".to_string()),
+        "pi" | "pi-coding-agent" => Some("pi".to_string()),
         "letta" | "letta-code" => Some("letta connect".to_string()),
         _ => None,
     }

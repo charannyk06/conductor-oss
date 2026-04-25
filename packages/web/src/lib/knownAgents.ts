@@ -94,6 +94,16 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     installUrl: "https://opencode.ai",
   },
   {
+    name: "pi",
+    label: "Pi",
+    description: "Pi Coding Agent CLI",
+    homepage: "https://pi.dev",
+    iconUrl: "/agents/pi.svg",
+    installHint: "npm install -g @mariozechner/pi-coding-agent",
+    installUrl: "https://www.npmjs.com/package/@mariozechner/pi-coding-agent",
+    setupUrl: "https://pi.dev",
+  },
+  {
     name: "letta",
     label: "Letta Code",
     description: "Letta Code CLI (memory-first agent)",

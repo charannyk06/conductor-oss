@@ -182,6 +182,7 @@ const ModelAccessPreferencesSchema = z.object({
   codex: z.enum(["chatgpt", "api"]).optional(),
   gemini: z.enum(["oauth", "api"]).optional(),
   qwenCode: z.enum(["oauth", "api"]).optional(),
+  pi: z.enum(["default"]).optional(),
 });
 
 const UserPreferencesSchema = z.object({

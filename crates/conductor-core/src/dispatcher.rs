@@ -228,6 +228,7 @@ fn parse_agent_tag(tag: &str) -> Option<AgentKind> {
         "cursor" | "cursor-cli" => Some(AgentKind::CursorCli),
         "opencode" => Some(AgentKind::OpenCode),
         "openclaw" => Some(AgentKind::OpenClaw),
+        "pi" | "pi-coding-agent" | "pi-agent" => Some(AgentKind::Pi),
         "droid" => Some(AgentKind::Droid),
         "qwen" | "qwen-code" => Some(AgentKind::QwenCode),
         "ccr" => Some(AgentKind::Ccr),
@@ -340,6 +341,8 @@ mod tests {
         assert_eq!(parse_agent_tag("codex"), Some(AgentKind::Codex));
         assert_eq!(parse_agent_tag("hermes"), Some(AgentKind::Hermes));
         assert_eq!(parse_agent_tag("openclaw"), Some(AgentKind::OpenClaw));
+        assert_eq!(parse_agent_tag("pi"), Some(AgentKind::Pi));
+        assert_eq!(parse_agent_tag("pi-agent"), Some(AgentKind::Pi));
         assert_eq!(parse_agent_tag("letta"), Some(AgentKind::Letta));
         assert_eq!(parse_agent_tag("unknown"), None);
     }

@@ -3,7 +3,7 @@
  *
  * 8 plugin slots + core services:
  *   1. Runtime    — where sessions execute (ttyd-backed PTY)
- *   2. Agent      — AI coding tool (claude-code, codex, gemini, amp, hermes, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot, letta)
+ *   2. Agent      — AI coding tool (claude-code, codex, gemini, amp, hermes, cursor-cli, opencode, pi, droid, qwen-code, ccr, github-copilot, letta)
  *   3. Workspace  — code isolation (worktree)
  *   4. Tracker    — issue tracking (github)
  *   5. SCM        — source platform + PR/CI/reviews (github)
@@ -516,6 +516,7 @@ export const SUPPORTED_MODEL_AGENTS = [
   "gemini",
   "github-copilot",
   "opencode",
+  "pi",
   "qwen-code",
   "ccr",
 ] as const;
@@ -542,6 +543,7 @@ export interface ModelAccessPreferences {
   gemini?: GeminiModelAccess;
   githubCopilot?: DefaultModelAccess;
   opencode?: DefaultModelAccess;
+  pi?: DefaultModelAccess;
   qwenCode?: QwenModelAccess;
   ccr?: DefaultModelAccess;
 }
@@ -593,6 +595,7 @@ const DEFAULT_MODEL_ACCESS_PREFERENCES: Required<ModelAccessPreferences> = {
   gemini: "oauth",
   githubCopilot: "default",
   opencode: "default",
+  pi: "default",
   qwenCode: "oauth",
   ccr: "default",
 };
@@ -731,6 +734,20 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         label: "Local CLI",
         description:
           "Use the locally installed OpenCode catalog and custom override support.",
+      },
+    ],
+  },
+  pi: {
+    agent: "pi",
+    label: "Pi",
+    accessKey: "pi",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description:
+          "Use the locally installed Pi model catalog and custom override support.",
       },
     ],
   },
@@ -1119,6 +1136,51 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
       default: [],
     },
     defaultModelByAccess: {},
+  },
+  pi: {
+    modelsByAccess: {
+      default: [
+        modelOption(
+          "openai/gpt-5.5",
+          "Latest frontier OpenAI model exposed by Pi.",
+          ["default"],
+          "GPT-5.5"
+        ),
+        modelOption(
+          "openai/gpt-5.4",
+          "Previous frontier OpenAI model exposed by Pi.",
+          ["default"],
+          "GPT-5.4"
+        ),
+        modelOption(
+          "openai/gpt-5.4-mini",
+          "Smaller GPT-5.4 variant exposed by Pi.",
+          ["default"],
+          "GPT-5.4-Mini"
+        ),
+        modelOption(
+          "openai/gpt-5.3-codex",
+          "Balanced coding model exposed by Pi.",
+          ["default"],
+          "GPT-5.3-Codex"
+        ),
+        modelOption(
+          "anthropic/claude-sonnet-4-6",
+          "Claude Sonnet model exposed through Pi providers.",
+          ["default"],
+          "Claude Sonnet 4.6"
+        ),
+      ],
+    },
+    defaultModelByAccess: {
+      default: "openai/gpt-5.5",
+    },
+    reasoningOptionsByAccess: {
+      default: CODEX_REASONING_OPTIONS,
+    },
+    defaultReasoningByAccess: {
+      default: "high",
+    },
   },
   "qwen-code": {
     modelsByAccess: {
