@@ -397,6 +397,11 @@ fn infer_npm_global_prefix(package_root: &Path) -> Option<String> {
         return None;
     }
 
+    let manifest = infer_cli_package_manifest(package_root);
+    if manifest.name.is_none() || manifest.version.is_none() {
+        return None;
+    }
+
     let node_modules = package_root.parent()?;
     if node_modules.file_name().and_then(|value| value.to_str()) != Some("node_modules") {
         return None;
@@ -1207,11 +1212,26 @@ mod tests {
 
     #[test]
     fn infer_npm_global_prefix_recovers_custom_prefix() {
-        let package_root = Path::new("/Users/test/.conductor/npm/lib/node_modules/conductor-oss");
+        let temp_dir =
+            env::temp_dir().join(format!("conductor-app-update-{}", uuid::Uuid::new_v4()));
+        let package_root = temp_dir
+            .join("npm")
+            .join("lib")
+            .join("node_modules")
+            .join("conductor-oss");
+        fs::create_dir_all(&package_root).expect("create package root");
+        fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"conductor-oss","version":"7.8.9"}"#,
+        )
+        .expect("write package manifest");
+
         assert_eq!(
-            infer_npm_global_prefix(package_root),
-            Some("/Users/test/.conductor/npm".to_string())
+            infer_npm_global_prefix(&package_root),
+            Some(normalize_fs_path(&temp_dir.join("npm")))
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1241,14 +1261,45 @@ mod tests {
 
     #[test]
     fn infer_cli_install_mode_detects_conductor_npm_package_root() {
-        let package_root = Path::new("/Users/test/.conductor/npm/lib/node_modules/conductor-oss");
+        let temp_dir =
+            env::temp_dir().join(format!("conductor-app-update-{}", uuid::Uuid::new_v4()));
+        let package_root = temp_dir
+            .join("npm")
+            .join("lib")
+            .join("node_modules")
+            .join("conductor-oss");
+        fs::create_dir_all(&package_root).expect("create package root");
+        fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"conductor-oss","version":"7.8.9"}"#,
+        )
+        .expect("write package manifest");
+
         assert_eq!(
             infer_cli_install_mode(
                 &package_root
                     .join("node_modules/conductor-oss-native-darwin-universal/bin/conductor"),
-                package_root
+                &package_root
             ),
             AppInstallMode::GlobalNpm,
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn infer_npm_global_prefix_ignores_synthetic_native_candidate() {
+        let synthetic_package_root = Path::new(
+            "/Users/test/.conductor/npm/lib/node_modules/conductor-oss/node_modules/conductor-oss-native-darwin-universal/lib/node_modules/conductor-oss",
+        );
+
+        assert_eq!(infer_npm_global_prefix(synthetic_package_root), None);
+        assert_eq!(
+            infer_cli_install_mode(
+                &synthetic_package_root.join("bin/conductor"),
+                synthetic_package_root,
+            ),
+            AppInstallMode::Unknown,
         );
     }
 
