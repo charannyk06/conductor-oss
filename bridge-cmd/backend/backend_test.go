@@ -152,6 +152,7 @@ func TestInferCliUpdateEnvFallsBackToSymlinkedDotBinPackageMetadataWhenEnvMissin
 	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
 	t.Setenv("CONDUCTOR_CLI_VERSION", "")
 	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+	t.Setenv("CONDUCTOR_CLI_GLOBAL_PREFIX", "")
 
 	packageRoot := filepath.Join(tempDir, "project", "node_modules", "conductor-oss")
 	binaryPath := filepath.Join(packageRoot, "bin", "conductor")
@@ -191,6 +192,7 @@ func TestInferCliUpdateEnvFallsBackToBunPackageMetadataWhenEnvMissing(t *testing
 	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
 	t.Setenv("CONDUCTOR_CLI_VERSION", "")
 	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+	t.Setenv("CONDUCTOR_CLI_GLOBAL_PREFIX", "")
 
 	workspace := filepath.Join(tempDir, ".bun", "install", "global", "node_modules", "conductor-oss")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
@@ -229,6 +231,7 @@ func TestInferCliUpdateEnvFallsBackToGlobalBinPackageMetadataWhenEnvMissing(t *t
 	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
 	t.Setenv("CONDUCTOR_CLI_VERSION", "")
 	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+	t.Setenv("CONDUCTOR_CLI_GLOBAL_PREFIX", "")
 
 	workspace := filepath.Join(tempDir, "usr", "local", "lib", "node_modules", "conductor-oss")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
@@ -252,9 +255,40 @@ func TestInferCliUpdateEnvFallsBackToGlobalBinPackageMetadataWhenEnvMissing(t *t
 		"CONDUCTOR_CLI_PACKAGE_NAME=conductor-oss",
 		"CONDUCTOR_CLI_VERSION=5.6.7",
 		"CONDUCTOR_CLI_INSTALL_MODE=global-npm",
+		"CONDUCTOR_CLI_GLOBAL_PREFIX=" + filepath.Join(tempDir, "usr", "local"),
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected launch env to contain %q, got %v", want, gotEnv)
 		}
+	}
+}
+
+func TestInferNpmGlobalPrefixIgnoresNestedNativePackage(t *testing.T) {
+	nativePackageRoot := filepath.Join(
+		"Users",
+		"test",
+		".conductor",
+		"npm",
+		"lib",
+		"node_modules",
+		"conductor-oss",
+		"node_modules",
+		"conductor-oss-native-darwin-universal",
+	)
+	if got := inferNpmGlobalPrefix(nativePackageRoot); got != "" {
+		t.Fatalf("expected no npm global prefix for nested native package, got %q", got)
+	}
+	if got := inferCliInstallMode(nativePackageRoot); got != "unknown" {
+		t.Fatalf("expected nested native package install mode unknown, got %q", got)
+	}
+}
+
+func TestInferNpmGlobalPrefixIgnoresLocalProjectNodeModules(t *testing.T) {
+	packageRoot := filepath.Join("Users", "test", "project", "node_modules", "conductor-oss")
+	if got := inferNpmGlobalPrefix(packageRoot); got != "" {
+		t.Fatalf("expected no npm global prefix for local project package, got %q", got)
+	}
+	if got := inferCliInstallMode(packageRoot); got != "unknown" {
+		t.Fatalf("expected local project package install mode unknown, got %q", got)
 	}
 }

@@ -17,6 +17,7 @@ use crate::state::AppState;
 const APP_UPDATE_CHECK_TTL_SECS: i64 = 5 * 60;
 const APP_UPDATE_BACKGROUND_INTERVAL_SECS: u64 = 30 * 60;
 const APP_UPDATE_LOG_TAIL_LIMIT: usize = 6000;
+const APP_UPDATE_NPM_RETRY_DELAYS_SECS: [u64; 2] = [5, 20];
 const NPM_PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -379,10 +380,7 @@ fn infer_cli_install_mode(current_exe: &Path, package_root: &Path) -> AppInstall
         return AppInstallMode::GlobalBun;
     }
 
-    if normalized_root.contains("/.conductor/npm/")
-        || normalized_root.contains("/lib/node_modules/")
-        || normalized_root.contains("/node_modules/")
-    {
+    if infer_npm_global_prefix(package_root).is_some() {
         return AppInstallMode::GlobalNpm;
     }
 
@@ -394,19 +392,22 @@ fn infer_cli_install_mode(current_exe: &Path, package_root: &Path) -> AppInstall
 }
 
 fn infer_npm_global_prefix(package_root: &Path) -> Option<String> {
+    let package_dir = package_root.file_name().and_then(|value| value.to_str())?;
+    if !is_conductor_package_name(package_dir) {
+        return None;
+    }
+
     let node_modules = package_root.parent()?;
     if node_modules.file_name().and_then(|value| value.to_str()) != Some("node_modules") {
         return None;
     }
 
     let parent = node_modules.parent()?;
-    let prefix = if parent.file_name().and_then(|value| value.to_str()) == Some("lib") {
-        parent.parent()?
-    } else {
-        parent
-    };
+    if parent.file_name().and_then(|value| value.to_str()) != Some("lib") {
+        return None;
+    }
 
-    Some(normalize_fs_path(prefix))
+    Some(normalize_fs_path(parent.parent()?))
 }
 
 fn infer_bun_root() -> Option<PathBuf> {
@@ -573,7 +574,7 @@ fn build_update_command(
                 .map(|value| format!(" --prefix {}", shell_quote(value)))
                 .unwrap_or_default();
             Some(format!(
-                "npm install -g{prefix_fragment} --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
+                "npm install -g{prefix_fragment} --prefer-online --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
             ))
         }
         AppInstallMode::GlobalPnpm => Some(format!(
@@ -605,6 +606,7 @@ fn resolve_update_invocation(
                 args.push("--prefix".to_string());
                 args.push(prefix.to_string());
             }
+            args.push("--prefer-online".to_string());
             args.push(format!("--registry={NPM_PUBLIC_REGISTRY}"));
             args.push(package_spec.clone());
             let display_command = build_update_command(
@@ -615,7 +617,7 @@ fn resolve_update_invocation(
                 Some(target_version),
             )
             .unwrap_or_else(|| {
-                format!("npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}")
+                format!("npm install -g --prefer-online --registry={NPM_PUBLIC_REGISTRY} {package_spec}")
             });
             Some(("npm", args, display_command))
         }
@@ -643,6 +645,78 @@ fn trim_log_tail(value: &str) -> String {
         return value.to_string();
     }
     value[value.len() - APP_UPDATE_LOG_TAIL_LIMIT..].to_string()
+}
+
+fn command_output_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        if output.stdout.is_empty() || output.stderr.is_empty() {
+            ""
+        } else {
+            "\n"
+        },
+        String::from_utf8_lossy(&output.stderr),
+    )
+    .trim()
+    .to_string()
+}
+
+fn should_retry_npm_update(output: &std::process::Output) -> bool {
+    if output.status.success() {
+        return false;
+    }
+
+    let normalized = command_output_text(output).to_lowercase();
+    normalized.contains("npm error code etarget")
+        || normalized.contains("no matching version found")
+        || normalized.contains("notarget")
+        || normalized.contains("eai_again")
+        || normalized.contains("etimedout")
+        || normalized.contains("socket timeout")
+}
+
+async fn run_update_command_with_retries(
+    command: &str,
+    args: &[String],
+) -> (std::io::Result<std::process::Output>, String) {
+    let mut retry_logs = String::new();
+
+    for (attempt_index, retry_delay_secs) in APP_UPDATE_NPM_RETRY_DELAYS_SECS
+        .into_iter()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        let result = Command::new(command)
+            .args(args)
+            .env("NO_COLOR", "1")
+            .env("NPM_CONFIG_REGISTRY", NPM_PUBLIC_REGISTRY)
+            .env("npm_config_registry", NPM_PUBLIC_REGISTRY)
+            .output()
+            .await;
+
+        match result {
+            Ok(output)
+                if command == "npm"
+                    && should_retry_npm_update(&output)
+                    && retry_delay_secs.is_some() =>
+            {
+                if !retry_logs.is_empty() {
+                    retry_logs.push_str("\n\n");
+                }
+                retry_logs.push_str(&format!(
+                    "Attempt {} failed:\n{}",
+                    attempt_index + 1,
+                    command_output_text(&output)
+                ));
+                sleep(Duration::from_secs(retry_delay_secs.unwrap_or_default())).await;
+            }
+            other => return (other, retry_logs),
+        }
+    }
+
+    unreachable!("update retry loop always returns from the final attempt")
 }
 
 fn parse_version(value: &str) -> Option<ParsedVersion> {
@@ -898,13 +972,7 @@ impl AppState {
 
         let state = Arc::clone(self);
         tokio::spawn(async move {
-            let result = Command::new(command)
-                .args(&args)
-                .env("NO_COLOR", "1")
-                .env("NPM_CONFIG_REGISTRY", NPM_PUBLIC_REGISTRY)
-                .env("npm_config_registry", NPM_PUBLIC_REGISTRY)
-                .output()
-                .await;
+            let (result, retry_logs) = run_update_command_with_retries(command, &args).await;
 
             let finished_at = Utc::now().to_rfc3339();
             let next_snapshot = {
@@ -929,16 +997,12 @@ impl AppState {
                         runtime.status.logs_tail = None;
                     }
                     Ok(output) => {
-                        let combined_output = format!(
-                            "{}{}{}",
-                            String::from_utf8_lossy(&output.stdout),
-                            if output.stdout.is_empty() || output.stderr.is_empty() {
-                                ""
-                            } else {
-                                "\n"
-                            },
-                            String::from_utf8_lossy(&output.stderr),
-                        );
+                        let mut combined_output = retry_logs;
+                        let final_output = command_output_text(&output);
+                        if !combined_output.is_empty() && !final_output.is_empty() {
+                            combined_output.push_str("\n\nFinal attempt failed:\n");
+                        }
+                        combined_output.push_str(&final_output);
                         runtime.status.job_status = AppUpdateJobStatus::Failed;
                         runtime.status.job_message = Some(format!(
                             "{display_command} exited with code {}.",
@@ -1118,7 +1182,7 @@ mod tests {
         assert_eq!(
             build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None, None, None),
             Some(
-                "npm install -g --registry=https://registry.npmjs.org conductor-oss@latest"
+                "npm install -g --prefer-online --registry=https://registry.npmjs.org conductor-oss@latest"
                     .to_string()
             )
         );
@@ -1131,7 +1195,7 @@ mod tests {
                 Some("0.60.7"),
             ),
             Some(
-                "npm install -g --prefix '/Users/test/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
+                "npm install -g --prefix '/Users/test/.conductor/npm' --prefer-online --registry=https://registry.npmjs.org conductor-oss@0.60.7"
                     .to_string()
             )
         );
@@ -1151,6 +1215,44 @@ mod tests {
     }
 
     #[test]
+    fn infer_npm_global_prefix_ignores_local_project_node_modules() {
+        let package_root = Path::new("/Users/test/project/node_modules/conductor-oss");
+        assert_eq!(infer_npm_global_prefix(package_root), None);
+        assert_eq!(
+            infer_cli_install_mode(&package_root.join("bin/conductor"), package_root),
+            AppInstallMode::Unknown,
+        );
+    }
+
+    #[test]
+    fn infer_npm_global_prefix_ignores_nested_native_package() {
+        let native_package_root = Path::new(
+            "/Users/test/.conductor/npm/lib/node_modules/conductor-oss/node_modules/conductor-oss-native-darwin-universal",
+        );
+        assert_eq!(infer_npm_global_prefix(native_package_root), None);
+        assert_eq!(
+            infer_cli_install_mode(
+                &native_package_root.join("bin/conductor"),
+                native_package_root,
+            ),
+            AppInstallMode::Unknown,
+        );
+    }
+
+    #[test]
+    fn infer_cli_install_mode_detects_conductor_npm_package_root() {
+        let package_root = Path::new("/Users/test/.conductor/npm/lib/node_modules/conductor-oss");
+        assert_eq!(
+            infer_cli_install_mode(
+                &package_root
+                    .join("node_modules/conductor-oss-native-darwin-universal/bin/conductor"),
+                package_root
+            ),
+            AppInstallMode::GlobalNpm,
+        );
+    }
+
+    #[test]
     fn build_update_command_quotes_prefixes_with_spaces() {
         assert_eq!(
             build_update_command(
@@ -1161,7 +1263,7 @@ mod tests {
                 Some("0.60.7"),
             ),
             Some(
-                "npm install -g --prefix '/Users/John Smith/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
+                "npm install -g --prefix '/Users/John Smith/.conductor/npm' --prefer-online --registry=https://registry.npmjs.org conductor-oss@0.60.7"
                     .to_string()
             )
         );
@@ -1185,13 +1287,14 @@ mod tests {
                 "-g".to_string(),
                 "--prefix".to_string(),
                 "/Users/test/.conductor/npm".to_string(),
+                "--prefer-online".to_string(),
                 "--registry=https://registry.npmjs.org".to_string(),
                 "conductor-oss@0.60.7".to_string(),
             ]
         );
         assert_eq!(
             display_command,
-            "npm install -g --prefix '/Users/test/.conductor/npm' --registry=https://registry.npmjs.org conductor-oss@0.60.7"
+            "npm install -g --prefix '/Users/test/.conductor/npm' --prefer-online --registry=https://registry.npmjs.org conductor-oss@0.60.7"
         );
     }
 

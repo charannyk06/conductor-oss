@@ -382,11 +382,16 @@ func inferCliUpdateEnv(binaryPath string) []string {
 	currentVersion := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_VERSION"))
 	installMode := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_INSTALL_MODE"))
 
+	globalPrefix := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_GLOBAL_PREFIX"))
+
 	manifestName, manifestVersion, manifestPackageRoot := inferCliPackageManifest(binaryPath)
 	if manifestName != "" && manifestVersion != "" {
 		packageName = manifestName
 		currentVersion = manifestVersion
 		installMode = inferCliInstallMode(manifestPackageRoot)
+		if globalPrefix == "" && installMode == "global-npm" {
+			globalPrefix = inferNpmGlobalPrefix(manifestPackageRoot)
+		}
 	}
 
 	if packageName == "" {
@@ -398,15 +403,27 @@ func inferCliUpdateEnv(binaryPath string) []string {
 	if installMode == "" {
 		installMode = inferCliInstallModeFromBinary(binaryPath)
 	}
+	if globalPrefix == "" && installMode == "global-npm" {
+		for _, packageRoot := range inferCliPackageRootCandidates(binaryPath) {
+			if candidate := inferNpmGlobalPrefix(packageRoot); candidate != "" {
+				globalPrefix = candidate
+				break
+			}
+		}
+	}
 	if packageName == "" || currentVersion == "" {
 		return nil
 	}
 
-	return []string{
+	env := []string{
 		"CONDUCTOR_CLI_PACKAGE_NAME=" + packageName,
 		"CONDUCTOR_CLI_VERSION=" + currentVersion,
 		"CONDUCTOR_CLI_INSTALL_MODE=" + installMode,
 	}
+	if globalPrefix != "" {
+		env = append(env, "CONDUCTOR_CLI_GLOBAL_PREFIX="+globalPrefix)
+	}
+	return env
 }
 
 func inferCliPackageManifest(binaryPath string) (string, string, string) {
@@ -600,9 +617,7 @@ func inferCliInstallMode(packageRoot string) string {
 		}
 	}
 
-	if strings.Contains(normalizedRoot, "/.conductor/npm/") ||
-		strings.Contains(normalizedRoot, "/lib/node_modules/") ||
-		strings.Contains(normalizedRoot, "/node_modules/") {
+	if inferNpmGlobalPrefix(packageRoot) != "" {
 		return "global-npm"
 	}
 
@@ -611,6 +626,24 @@ func inferCliInstallMode(packageRoot string) string {
 	}
 
 	return "unknown"
+}
+
+func inferNpmGlobalPrefix(packageRoot string) string {
+	if !isConductorPackageName(filepath.Base(packageRoot)) {
+		return ""
+	}
+
+	nodeModulesDir := filepath.Dir(packageRoot)
+	if filepath.Base(nodeModulesDir) != "node_modules" {
+		return ""
+	}
+
+	libDir := filepath.Dir(nodeModulesDir)
+	if filepath.Base(libDir) != "lib" {
+		return ""
+	}
+
+	return filepath.Clean(filepath.Dir(libDir))
 }
 
 func normalizeFsPath(value string) string {
