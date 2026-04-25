@@ -91,6 +91,11 @@ impl Executor for LettaExecutor {
                 args.push(model.to_string());
             }
 
+            if options.skip_permissions {
+                args.push("--permission-mode".to_string());
+                args.push("bypassPermissions".to_string());
+            }
+
             if let Some(id) = options
                 .resume_target
                 .as_deref()
@@ -117,6 +122,11 @@ impl Executor for LettaExecutor {
             args.push(model.to_string());
         }
 
+        if options.skip_permissions {
+            args.push("--permission-mode".to_string());
+            args.push("bypassPermissions".to_string());
+        }
+
         args.push("-p".to_string());
         args.push(options.prompt.clone());
 
@@ -137,11 +147,27 @@ impl Executor for LettaExecutor {
     fn parse_output(&self, line: &str) -> ExecutorOutput {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            ExecutorOutput::Stdout(String::new())
-        } else {
-            ExecutorOutput::Stdout(trimmed.to_string())
+            return ExecutorOutput::Stdout(String::new());
         }
+
+        if is_letta_auth_prompt(trimmed) {
+            return ExecutorOutput::NeedsInput(
+                "Letta login required. Run `letta` or `letta connect` in a terminal, then retry the session."
+                    .to_string(),
+            );
+        }
+
+        ExecutorOutput::Stdout(trimmed.to_string())
     }
+}
+
+fn is_letta_auth_prompt(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("missing letta_api_key")
+        || lower.contains("letta cloud oauth")
+        || lower.contains("authenticate")
+        || lower.contains("run 'letta' in interactive mode")
+        || lower.contains("run `letta` in interactive mode")
 }
 
 #[cfg(test)]
@@ -175,6 +201,47 @@ mod tests {
         assert!(args.contains(&"sonnet".to_string()));
         assert!(args.contains(&"--conversation".to_string()));
         assert!(args.contains(&"conv-1".to_string()));
+    }
+
+    #[test]
+    fn auth_prompt_is_reported_as_needs_input() {
+        let executor = LettaExecutor::new(PathBuf::from("/usr/bin/letta"));
+        match executor.parse_output("Missing LETTA_API_KEY") {
+            ExecutorOutput::NeedsInput(message) => {
+                assert!(message.contains("Letta login required"));
+            }
+            other => panic!("expected NeedsInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permission_bypass_maps_to_letta_permission_mode() {
+        let executor = LettaExecutor::new(PathBuf::from("/usr/bin/letta"));
+        let mut options = SpawnOptions {
+            cwd: PathBuf::from("."),
+            prompt: "Ship the feature".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: true,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        };
+
+        let headless_args = executor.build_args(&options);
+        assert!(headless_args
+            .windows(2)
+            .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"));
+
+        options.interactive = true;
+        let interactive_args = executor.build_args(&options);
+        assert!(interactive_args
+            .windows(2)
+            .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"));
     }
 
     #[test]

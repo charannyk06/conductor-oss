@@ -1011,6 +1011,7 @@ export function DispatcherSessionPane({
   const streamConnectCountRef = useRef(0);
   const streamReconnectCountRef = useRef(0);
   const streamFallbackReloadCountRef = useRef(0);
+  const streamConnectGenerationRef = useRef(0);
   const deltaAppendCountRef = useRef(0);
   const deltaPatchCountRef = useRef(0);
   const deltaReplaceCountRef = useRef(0);
@@ -1036,6 +1037,7 @@ export function DispatcherSessionPane({
     streamConnectCountRef.current = 0;
     streamReconnectCountRef.current = 0;
     streamFallbackReloadCountRef.current = 0;
+    streamConnectGenerationRef.current += 1;
     deltaAppendCountRef.current = 0;
     deltaPatchCountRef.current = 0;
     deltaReplaceCountRef.current = 0;
@@ -1124,9 +1126,12 @@ export function DispatcherSessionPane({
     }
   }, [bridgeId, hideRepositoryControls, session.projectId, sessionApiPaths.repositories]);
 
-  const loadFeed = useCallback(async () => {
+  const loadFeed = useCallback(async (options: { showLoading?: boolean } = {}) => {
+    const showLoading = options.showLoading ?? true;
     loadFeedCountRef.current += 1;
-    setLoading(true);
+    if (showLoading) {
+      setLoading(true);
+    }
     setLoadingError(null);
     try {
       const response = await fetch(withBridgeQuery(sessionApiPaths.feed, bridgeId), { cache: "no-store" });
@@ -1144,7 +1149,9 @@ export function DispatcherSessionPane({
       loadFeedFailureCountRef.current += 1;
       setLoadingError(error instanceof Error ? error.message : "Failed to load session feed");
     } finally {
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   }, [bridgeId, sessionApiPaths.feed]);
 
@@ -1253,6 +1260,9 @@ export function DispatcherSessionPane({
       if (cancelled) {
         return;
       }
+      const myGeneration = streamConnectGenerationRef.current + 1;
+      streamConnectGenerationRef.current = myGeneration;
+      const isCurrentConnection = () => !cancelled && streamConnectGenerationRef.current === myGeneration;
       streamAbortRef.current?.abort();
       const ac = new AbortController();
       streamAbortRef.current = ac;
@@ -1263,28 +1273,29 @@ export function DispatcherSessionPane({
           cache: "no-store",
           signal: ac.signal,
         });
+        if (!isCurrentConnection()) {
+          return;
+        }
         if (!res.ok || !res.body) {
-          if (!cancelled) {
-            streamFallbackReloadCountRef.current += 1;
-            void loadFeed();
-            scheduleReconnect();
-          }
+          streamFallbackReloadCountRef.current += 1;
+          void loadFeed();
+          scheduleReconnect();
           return;
         }
         reconnectAttempt = 0;
         for await (const frame of iterateSseFrames(res.body, ac.signal)) {
-          if (cancelled) {
+          if (!isCurrentConnection()) {
             return;
           }
           applySseData(frame.data);
         }
-        if (!cancelled) {
+        if (isCurrentConnection()) {
           streamFallbackReloadCountRef.current += 1;
           void loadFeed();
           scheduleReconnect();
         }
       } catch {
-        if (!cancelled && !ac.signal.aborted) {
+        if (isCurrentConnection() && !ac.signal.aborted) {
           streamFallbackReloadCountRef.current += 1;
           void loadFeed();
           scheduleReconnect();
@@ -1296,6 +1307,7 @@ export function DispatcherSessionPane({
 
     return () => {
       cancelled = true;
+      streamConnectGenerationRef.current += 1;
       clearReconnect();
       streamAbortRef.current?.abort();
     };
@@ -1469,6 +1481,7 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to send message (${response.status})`);
       }
+      void loadFeed({ showLoading: false });
       return true;
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to send message");
@@ -1476,7 +1489,7 @@ export function DispatcherSessionPane({
     } finally {
       setSending(false);
     }
-  }, [bridgeId, sending, sessionApiPaths.send]);
+  }, [bridgeId, loadFeed, sending, sessionApiPaths.send]);
 
   const handleSend = useCallback(async () => {
     const message = composerValue.trim();
@@ -1507,12 +1520,13 @@ export function DispatcherSessionPane({
         throw new Error(readString(payload.error) ?? `Failed to ${action} plan (${response.status})`);
       }
       setComposerValue("");
+      void loadFeed({ showLoading: false });
     } catch (err) {
       setSendError(err instanceof Error ? err.message : `Failed to ${action} plan`);
     } finally {
       setSending(false);
     }
-  }, [bridgeId, sendMessage, sessionApiPaths.approve, sessionApiPaths.reject]);
+  }, [bridgeId, loadFeed, sendMessage, sessionApiPaths.approve, sessionApiPaths.reject]);
 
   const handleAgentChange = useCallback(async (nextAgent: string) => {
     if (!repository || savingAgent || nextAgent === repository.agent) {
@@ -1564,12 +1578,13 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to interrupt session (${response.status})`);
       }
+      void loadFeed({ showLoading: false });
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to interrupt session");
     } finally {
       setSending(false);
     }
-  }, [bridgeId, sessionApiPaths.interrupt]);
+  }, [bridgeId, loadFeed, sessionApiPaths.interrupt]);
 
   return (
     <aside className={cn(
