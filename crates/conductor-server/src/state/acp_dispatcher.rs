@@ -270,7 +270,7 @@ impl DispatcherTurnRequest {
     }
 }
 
-const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
+const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 6] = [
     DispatcherSelectOption {
         value: "codex",
         name: "Codex",
@@ -287,15 +287,26 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
         description: "Route implementation work to Gemini sessions.",
     },
     DispatcherSelectOption {
+        value: "cursor-cli",
+        name: "Cursor CLI",
+        description: "Route implementation work to Cursor CLI sessions.",
+    },
+    DispatcherSelectOption {
         value: "openclaw",
         name: "OpenClaw",
         description: "Route work through an OpenClaw gateway-backed runtime.",
+    },
+    DispatcherSelectOption {
+        value: "letta",
+        name: "Letta Code",
+        description: "Route implementation work to Letta Code sessions.",
     },
 ];
 
 const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
+const DISPATCHER_LETTA_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -1370,6 +1381,29 @@ fn normalize_loaded_dispatcher_thread(
     changed
 }
 
+fn canonical_dispatcher_agent(value: &str) -> Option<String> {
+    match AgentKind::parse(value) {
+        AgentKind::Codex
+        | AgentKind::ClaudeCode
+        | AgentKind::Gemini
+        | AgentKind::OpenClaw
+        | AgentKind::Letta => Some(AgentKind::parse(value).to_string()),
+        _ => None,
+    }
+}
+
+fn canonical_implementation_agent(value: &str) -> Option<String> {
+    match AgentKind::parse(value) {
+        AgentKind::Codex
+        | AgentKind::ClaudeCode
+        | AgentKind::Gemini
+        | AgentKind::OpenClaw
+        | AgentKind::CursorCli
+        | AgentKind::Letta => Some(AgentKind::parse(value).to_string()),
+        _ => None,
+    }
+}
+
 fn default_implementation_agent(
     requested_agent: Option<&str>,
     project: &ProjectConfig,
@@ -1378,18 +1412,21 @@ fn default_implementation_agent(
     let candidate = requested_agent
         .or(project.agent.as_deref())
         .unwrap_or(default_agent);
-    match candidate.trim() {
-        "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => {
-            candidate.trim().to_string()
-        }
-        _ => "codex".to_string(),
-    }
+    canonical_implementation_agent(candidate).unwrap_or_else(|| "codex".to_string())
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_dispatcher_agent(value: Option<String>) -> Option<String> {
+    normalize_optional_string(value).and_then(|value| canonical_dispatcher_agent(&value))
+}
+
+fn normalize_implementation_agent(value: Option<String>) -> Option<String> {
+    normalize_optional_string(value).and_then(|value| canonical_implementation_agent(&value))
 }
 
 pub(crate) fn dispatcher_implementation_agent_options() -> &'static [DispatcherSelectOption] {
@@ -1399,11 +1436,15 @@ pub(crate) fn dispatcher_implementation_agent_options() -> &'static [DispatcherS
 pub(crate) fn dispatcher_implementation_model_options(
     agent: &str,
 ) -> &'static [DispatcherSelectOption] {
-    match agent.trim() {
+    match canonical_implementation_agent(agent)
+        .unwrap_or_else(|| "codex".to_string())
+        .as_str()
+    {
         "claude-code" => &DISPATCHER_CLAUDE_MODEL_OPTIONS,
         "gemini" => &DISPATCHER_GEMINI_MODEL_OPTIONS,
         "openclaw" => &DISPATCHER_OPENCLAW_MODEL_OPTIONS,
         "cursor-cli" => &DISPATCHER_CURSOR_MODEL_OPTIONS,
+        "letta" => &DISPATCHER_LETTA_MODEL_OPTIONS,
         _ => &DISPATCHER_CODEX_MODEL_OPTIONS,
     }
 }
@@ -1411,9 +1452,13 @@ pub(crate) fn dispatcher_implementation_model_options(
 pub(crate) fn dispatcher_implementation_reasoning_options(
     agent: &str,
 ) -> &'static [DispatcherSelectOption] {
-    match agent.trim() {
+    match canonical_implementation_agent(agent)
+        .unwrap_or_else(|| "codex".to_string())
+        .as_str()
+    {
         "gemini" => &[],
         "openclaw" => &DISPATCHER_OPENCLAW_REASONING_OPTIONS,
+        "letta" => &[],
         "claude-code" => &DISPATCHER_DEFAULT_REASONING_OPTIONS,
         _ => &DISPATCHER_CODEX_REASONING_OPTIONS,
     }
@@ -1428,11 +1473,14 @@ pub(crate) fn dispatcher_default_implementation_model(agent: &str) -> Option<&'s
 pub(crate) fn dispatcher_default_implementation_reasoning_effort(
     agent: &str,
 ) -> Option<&'static str> {
-    match agent.trim() {
+    match canonical_implementation_agent(agent)
+        .unwrap_or_else(|| "codex".to_string())
+        .as_str()
+    {
         "claude-code" => Some("medium"),
         "codex" => Some("high"),
         "cursor-cli" => Some("medium"),
-        "openclaw" => None,
+        "openclaw" | "letta" => None,
         _ => None,
     }
 }
@@ -1484,7 +1532,7 @@ fn home_dir() -> Option<PathBuf> {
 fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
     matches!(
         agent_kind,
-        AgentKind::Codex | AgentKind::QwenCode | AgentKind::OpenClaw
+        AgentKind::Codex | AgentKind::QwenCode | AgentKind::Gemini | AgentKind::OpenClaw
     )
 }
 
@@ -1588,7 +1636,10 @@ fn dispatcher_model_supported_for_agent(agent: &str, model: &str) -> bool {
     }
 
     let normalized = trimmed.to_ascii_lowercase();
-    match agent.trim() {
+    match canonical_implementation_agent(agent)
+        .unwrap_or_else(|| "codex".to_string())
+        .as_str()
+    {
         "claude-code" => {
             matches!(normalized.as_str(), "opus" | "sonnet" | "haiku")
                 || normalized.starts_with("claude-")
@@ -1597,6 +1648,10 @@ fn dispatcher_model_supported_for_agent(agent: &str, model: &str) -> bool {
         "cursor-cli" => {
             // Cursor model IDs are runtime-discovered (e.g. auto, gpt-5.4-medium,
             // claude-4.6-opus-max-thinking) and not statically enumerated here.
+            true
+        }
+        "letta" => {
+            // Letta Code accepts provider-specific model IDs through --model.
             true
         }
         _ => {
@@ -1614,7 +1669,7 @@ fn dispatcher_reasoning_supported_for_agent(
     model: Option<&str>,
     reasoning_effort: &str,
 ) -> bool {
-    if agent.trim() == "codex" {
+    if canonical_implementation_agent(agent).as_deref() == Some("codex") {
         if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
             if let Some(supported) = codex_runtime_reasoning_supported(model, reasoning_effort) {
                 return supported;
@@ -1688,12 +1743,7 @@ fn apply_dispatcher_implementation_preferences(
     let previous_agent = dispatcher_preferred_implementation_agent(thread);
     let next_agent = implementation_agent
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| match value {
-            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => value.to_string(),
-            _ => "codex".to_string(),
-        })
+        .and_then(canonical_implementation_agent)
         .unwrap_or_else(|| previous_agent.clone());
     let agent_changed = next_agent != previous_agent
         || thread
@@ -2558,11 +2608,12 @@ impl AppState {
             .cloned()
             .with_context(|| format!("Unknown project: {project_id}"))?;
         let default_agent =
-            normalize_optional_string(Some(config.preferences.coding_agent.clone()))
+            normalize_implementation_agent(Some(config.preferences.coding_agent.clone()))
                 .unwrap_or_else(|| "codex".to_string());
-        let agent = normalize_optional_string(dispatcher_agent)
-            .or_else(|| normalize_optional_string(project.agent.clone()))
-            .unwrap_or_else(|| default_agent.clone());
+        let agent = normalize_dispatcher_agent(dispatcher_agent)
+            .or_else(|| normalize_dispatcher_agent(project.agent.clone()))
+            .or_else(|| canonical_dispatcher_agent(&default_agent))
+            .unwrap_or_else(|| "codex".to_string());
         if !force_new {
             if let Some(existing) = self
                 .latest_project_dispatcher_thread(
@@ -2648,7 +2699,7 @@ impl AppState {
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             ACP_APPROVAL_GRANTED.to_string(),
         );
-        let selected_implementation_agent = normalize_optional_string(implementation_agent)
+        let selected_implementation_agent = normalize_implementation_agent(implementation_agent)
             .unwrap_or_else(|| {
                 default_implementation_agent(Some(agent.as_str()), &project, &default_agent)
             });
@@ -2727,21 +2778,19 @@ impl AppState {
             openclaw_config,
         } = patch;
 
-        let current_dispatcher_agent = thread.agent.trim().to_ascii_lowercase();
-        let target_dispatcher_agent = dispatcher_agent
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase())
-            .unwrap_or_else(|| current_dispatcher_agent.clone());
-        if !matches!(
-            target_dispatcher_agent.as_str(),
-            "codex" | "claude-code" | "gemini" | "openclaw"
-        ) {
-            return Err(anyhow!(
-                "Unsupported dispatcher agent `{target_dispatcher_agent}`. Expected codex, claude-code, gemini, or openclaw"
-            ));
-        }
+        let current_dispatcher_agent = canonical_dispatcher_agent(&thread.agent)
+            .unwrap_or_else(|| thread.agent.trim().to_ascii_lowercase());
+        let requested_dispatcher_agent = normalize_optional_string(dispatcher_agent.clone())
+            .map(|value| {
+                canonical_dispatcher_agent(&value).ok_or_else(|| {
+                    anyhow!(
+                        "Unsupported dispatcher agent `{value}`. Expected codex, claude-code, gemini, openclaw, or letta"
+                    )
+                })
+            })
+            .transpose()?;
+        let target_dispatcher_agent =
+            requested_dispatcher_agent.unwrap_or_else(|| current_dispatcher_agent.clone());
 
         let requested_dispatcher_model = dispatcher_model
             .as_deref()
@@ -2789,20 +2838,19 @@ impl AppState {
             })
         });
 
-        let target_implementation_agent = implementation_agent
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| dispatcher_preferred_implementation_agent(&thread));
-        if !matches!(
-            target_implementation_agent.as_str(),
-            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli"
-        ) {
-            return Err(anyhow!(
-                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, openclaw, or cursor-cli"
-            ));
-        }
+        let requested_implementation_agent = normalize_optional_string(implementation_agent.clone())
+            .map(|value| {
+                canonical_implementation_agent(&value).ok_or_else(|| {
+                    anyhow!(
+                        "Unsupported implementation agent `{value}`. Expected codex, claude-code, gemini, openclaw, cursor-cli, or letta"
+                    )
+                })
+            })
+            .transpose()?;
+        let target_implementation_agent = requested_implementation_agent.unwrap_or_else(|| {
+            canonical_implementation_agent(&dispatcher_preferred_implementation_agent(&thread))
+                .unwrap_or_else(|| "codex".to_string())
+        });
         let target_implementation_model = resolve_dispatcher_implementation_model(
             &thread,
             &target_implementation_agent,
@@ -3067,6 +3115,9 @@ impl AppState {
                     "codex".to_string(),
                     "claude-code".to_string(),
                     "gemini".to_string(),
+                    "cursor-cli".to_string(),
+                    "openclaw".to_string(),
+                    "letta".to_string(),
                 ],
                 durable_notes: Vec::new(),
                 recent_task_refs: Vec::new(),
@@ -3231,6 +3282,9 @@ impl AppState {
                     "codex".to_string(),
                     "claude-code".to_string(),
                     "gemini".to_string(),
+                    "cursor-cli".to_string(),
+                    "openclaw".to_string(),
+                    "letta".to_string(),
                 ],
                 durable_notes: Vec::new(),
                 recent_task_refs: Vec::new(),
@@ -3511,13 +3565,22 @@ impl AppState {
         };
         let resume_target = dispatcher_resume_target(thread, &executor.kind());
 
-        let prompt = self
+        let runtime_prompt = self
             .dispatcher_prompt_with_context(
                 thread,
                 &merge_dispatcher_prompt_with_user(&thread.prompt, initial_message),
                 attachments,
             )
             .await;
+        let send_initial_prompt_after_runtime_attach = !use_headless_turns
+            && executor.supports_direct_terminal_ui()
+            && !executor.accepts_prompt_on_launch_when_interactive()
+            && !runtime_prompt.trim().is_empty();
+        let launch_prompt = if send_initial_prompt_after_runtime_attach {
+            String::new()
+        } else {
+            runtime_prompt.clone()
+        };
         let handle = executor
             .spawn(SpawnOptions {
                 cwd: PathBuf::from(
@@ -3528,7 +3591,7 @@ impl AppState {
                         .or_else(|| thread.workspace_path.clone())
                         .unwrap_or_else(|| ".".to_string()),
                 ),
-                prompt,
+                prompt: launch_prompt,
                 model,
                 reasoning_effort,
                 skip_permissions: true,
@@ -3574,6 +3637,12 @@ impl AppState {
             runtime_handle.runtime_id.clone(),
             output_rx,
         );
+        if send_initial_prompt_after_runtime_attach {
+            runtime_handle
+                .input_tx
+                .send(ExecutorInput::Text(runtime_prompt))
+                .await?;
+        }
         Ok(())
     }
 
@@ -4161,7 +4230,9 @@ mod tests {
         types::AgentKind,
     };
     use conductor_db::Database;
-    use conductor_executors::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+    use conductor_executors::executor::{
+        Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
+    };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
@@ -4177,6 +4248,76 @@ mod tests {
     struct DelayedHeadlessExecutor {
         assistant_text: String,
         delay: Duration,
+    }
+
+    #[derive(Clone)]
+    struct PromptAfterAttachExecutor {
+        observed_input_tx: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl Executor for PromptAfterAttachExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Letta
+        }
+
+        fn name(&self) -> &str {
+            "PromptAfterAttachExecutor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/tmp/prompt-after-attach-executor")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
+        }
+
+        fn accepts_prompt_on_launch_when_interactive(&self) -> bool {
+            false
+        }
+
+        async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
+            assert_eq!(options.prompt, "");
+            assert!(options.interactive);
+            let (output_tx, output_rx) = mpsc::channel(8);
+            let (input_tx, mut input_rx) = mpsc::channel(4);
+            let (kill_tx, _kill_rx) = oneshot::channel();
+            let observed_input_tx = self.observed_input_tx.clone();
+
+            tokio::spawn(async move {
+                if let Some(ExecutorInput::Text(text)) = input_rx.recv().await {
+                    let _ = observed_input_tx.send(text);
+                    let _ = output_tx
+                        .send(ExecutorOutput::Completed { exit_code: 0 })
+                        .await;
+                }
+            });
+
+            Ok(ExecutorHandle::new(
+                4343,
+                AgentKind::Letta,
+                output_rx,
+                input_tx,
+                kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
     }
 
     #[async_trait]
@@ -4376,10 +4517,14 @@ mod tests {
     fn dispatcher_runtime_mode_selection_matches_agent_capabilities() {
         assert!(dispatcher_uses_headless_turns(&AgentKind::Codex));
         assert!(dispatcher_uses_headless_turns(&AgentKind::QwenCode));
+        assert!(dispatcher_uses_headless_turns(&AgentKind::Gemini));
         assert!(!dispatcher_uses_headless_turns(&AgentKind::ClaudeCode));
 
         assert!(dispatcher_supports_interactive_structured_output(
             &AgentKind::ClaudeCode
+        ));
+        assert!(dispatcher_supports_interactive_structured_output(
+            &AgentKind::Gemini
         ));
         assert!(dispatcher_supports_interactive_structured_output(
             &AgentKind::GithubCopilot
@@ -5022,6 +5167,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactive_prompt_after_attach_dispatcher_receives_first_turn() {
+        let (root, state) = build_test_state("acp-prompt-after-attach").await;
+        let thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("letta".to_string()),
+                    implementation_agent: Some("letta".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        let (observed_input_tx, mut observed_input_rx) = mpsc::unbounded_channel();
+        state.executors.write().await.insert(
+            AgentKind::Letta,
+            Arc::new(PromptAfterAttachExecutor { observed_input_tx }),
+        );
+
+        state
+            .send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "Ship through Letta".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            )
+            .await
+            .expect("dispatcher send should succeed");
+
+        let prompt = timeout(Duration::from_secs(3), observed_input_rx.recv())
+            .await
+            .expect("interactive prompt should be sent after runtime attach")
+            .expect("interactive prompt channel should remain open");
+        assert!(prompt.contains("Ship through Letta"));
+        assert!(prompt.to_ascii_lowercase().contains("letta"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn runtime_events_refresh_session_memory_artifacts() {
         let (root, state) = build_test_state("acp-runtime-memory-sync").await;
         let thread = state
@@ -5109,6 +5298,28 @@ mod tests {
         assert_eq!(
             updated.metadata.get("reasoningEffort").map(String::as_str),
             Some("high")
+        );
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                DispatcherPreferencesPatch {
+                    dispatcher_agent: Some("letta-code".to_string()),
+                    implementation_agent: Some("letta-code".to_string()),
+                    openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                    ..DispatcherPreferencesPatch::default()
+                },
+            )
+            .await
+            .expect("dispatcher preferences should accept letta aliases");
+
+        assert_eq!(updated.agent, "letta");
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_AGENT_METADATA_KEY)
+                .map(String::as_str),
+            Some("letta")
         );
 
         let _ = fs::remove_dir_all(root);

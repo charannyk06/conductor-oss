@@ -177,6 +177,7 @@ export function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEven
     if (
       delta.textDelta !== null
       && nextEntry.text.startsWith(existing.text)
+      && existing.text.length + delta.textDelta.length === nextEntry.text.length
     ) {
       entries[patchIndex] = {
         ...nextEntry,

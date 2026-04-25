@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
+use url::form_urlencoded;
 
 use crate::dispatcher_task_lifecycle::{
     create_dispatcher_task, handoff_dispatcher_task, update_dispatcher_task,
@@ -118,16 +119,18 @@ fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DispatcherQuery {
+    #[serde(alias = "bridge_id")]
     bridge_id: Option<String>,
+    #[serde(alias = "thread_id")]
     thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeedQuery {
     limit: Option<usize>,
-    #[serde(rename = "bridgeId")]
+    #[serde(rename = "bridgeId", alias = "bridge_id")]
     bridge_id: Option<String>,
-    #[serde(rename = "threadId")]
+    #[serde(rename = "threadId", alias = "thread_id")]
     thread_id: Option<String>,
 }
 
@@ -263,6 +266,15 @@ fn binding_query_lookup(query: &DispatcherBindingQuery) -> DispatcherBindingLook
     }
 }
 
+fn dispatcher_thread_query(thread_id: &str, bridge_id: Option<&str>) -> String {
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("threadId", thread_id);
+    if let Some(bridge_id) = bridge_id {
+        serializer.append_pair("bridgeId", bridge_id);
+    }
+    serializer.finish()
+}
+
 async fn serialize_dispatcher_binding(
     state: &Arc<AppState>,
     project_id: &str,
@@ -275,14 +287,10 @@ async fn serialize_dispatcher_binding(
         },
         None => Value::Null,
     };
-    let dispatcher_query = binding.dispatcher_thread_id.as_deref().map(|thread_id| {
-        let mut query = format!("threadId={thread_id}");
-        if let Some(bridge_id) = binding.bridge_id.as_deref() {
-            query.push_str("&bridgeId=");
-            query.push_str(bridge_id);
-        }
-        query
-    });
+    let dispatcher_query = binding
+        .dispatcher_thread_id
+        .as_deref()
+        .map(|thread_id| dispatcher_thread_query(thread_id, binding.bridge_id.as_deref()));
     let base_path = format!("/api/projects/{project_id}/dispatcher");
     let tasks_endpoint = dispatcher_query
         .as_ref()
@@ -1295,6 +1303,26 @@ mod tests {
         assert_eq!(trimmed_query_value(None), None);
         assert_eq!(trimmed_query_value(Some("   ")), None);
         assert_eq!(trimmed_query_value(Some(" thread-1 ")), Some("thread-1"));
+    }
+
+    #[test]
+    fn dispatcher_query_accepts_frontend_camel_case_scope() {
+        let query: super::DispatcherQuery = serde_json::from_value(serde_json::json!({
+            "threadId": "dispatcher-1",
+            "bridgeId": "bridge-1"
+        }))
+        .expect("camelCase dispatcher query should deserialize");
+
+        assert_eq!(query.thread_id.as_deref(), Some("dispatcher-1"));
+        assert_eq!(query.bridge_id.as_deref(), Some("bridge-1"));
+    }
+
+    #[test]
+    fn dispatcher_thread_query_url_encodes_scope() {
+        assert_eq!(
+            super::dispatcher_thread_query("thread/1", Some("bridge id")),
+            "threadId=thread%2F1&bridgeId=bridge+id"
+        );
     }
 
     #[test]

@@ -49,8 +49,8 @@ test("applyFeedDelta patch appends textDelta onto the existing entry text", () =
     entries: [makeEntry("entry-1", "hello", true)],
   };
 
-  const next = applyFeedDelta(current, {
-    type: "patch",
+  const delta = {
+    type: "patch" as const,
     entryId: "entry-1",
     entry: makeEntry("entry-1", "hello world", true),
     textDelta: " world",
@@ -64,8 +64,14 @@ test("applyFeedDelta patch appends textDelta onto the existing entry text", () =
     source: "stream",
     error: null,
     integration: null,
-  });
+  };
+
+  const next = applyFeedDelta(current, delta);
 
   assert.equal(next.entries.length, 1);
   assert.equal(next.entries[0]?.text, "hello world");
+
+  const replayed = applyFeedDelta(next, delta);
+  assert.equal(replayed.entries.length, 1);
+  assert.equal(replayed.entries[0]?.text, "hello world");
 });
