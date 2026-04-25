@@ -1740,9 +1740,16 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
 // Pi catalog parses pi --list-models
 // ---------------------------------------------------------------------------
 
-fn parse_pi_list_models_output(
-    output: &str,
-) -> Vec<(String, String, Option<String>, Option<String>, bool)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PiModelRow {
+    provider: String,
+    model: String,
+    context: Option<String>,
+    max_out: Option<String>,
+    thinking: bool,
+}
+
+fn parse_pi_list_models_output(output: &str) -> Vec<PiModelRow> {
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
 
@@ -1772,13 +1779,13 @@ fn parse_pi_list_models_output(
         let thinking = parts
             .get(4)
             .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
-        rows.push((
-            provider.to_string(),
-            model.to_string(),
+        rows.push(PiModelRow {
+            provider: provider.to_string(),
+            model: model.to_string(),
             context,
             max_out,
             thinking,
-        ));
+        });
     }
 
     rows
@@ -1802,18 +1809,22 @@ async fn build_pi_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Va
     let mut reasoning_options_by_model = Map::new();
     let mut default_reasoning_by_model = Map::new();
 
-    for (provider, model, context, max_out, thinking) in rows {
-        let id = format!("{provider}/{model}");
-        let mut details = vec![format!("provider: {provider}")];
-        if let Some(context) = context.as_deref().filter(|value| !value.is_empty()) {
+    for row in rows {
+        let id = format!("{}/{}", row.provider, row.model);
+        let mut details = vec![format!("provider: {}", row.provider)];
+        if let Some(context) = row.context.as_deref().filter(|value| !value.is_empty()) {
             details.push(format!("context: {context}"));
         }
-        if let Some(max_out) = max_out.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(max_out) = row.max_out.as_deref().filter(|value| !value.is_empty()) {
             details.push(format!("max output: {max_out}"));
         }
         models.push(model_option(
             &id,
-            &format!("{} ({provider})", format_generic_model_label(&model)),
+            &format!(
+                "{} ({})",
+                format_generic_model_label(&row.model),
+                row.provider
+            ),
             &format!(
                 "Model exposed by the local Pi CLI ({}).",
                 details.join(", ")
@@ -1821,7 +1832,7 @@ async fn build_pi_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Va
             &["default"],
         ));
 
-        if thinking {
+        if row.thinking {
             let reasoning_options = ["low", "medium", "high", "xhigh"]
                 .into_iter()
                 .map(reasoning_option)
@@ -2339,9 +2350,10 @@ mod tests {
         assert_eq!(known_agent_order("codex"), 0);
         assert_eq!(known_agent_order("claude-code"), 4);
         assert_eq!(known_agent_order("hermes"), 6);
-        assert_eq!(known_agent_order("letta"), 8);
-        assert_eq!(known_agent_order("openclaw"), 9);
-        assert_eq!(known_agent_order("ccr"), 12);
+        assert_eq!(known_agent_order("pi"), 8);
+        assert_eq!(known_agent_order("letta"), 9);
+        assert_eq!(known_agent_order("openclaw"), 10);
+        assert_eq!(known_agent_order("ccr"), 13);
         assert_eq!(known_agent_order("unknown"), usize::MAX);
     }
 
@@ -2486,10 +2498,10 @@ openai    gpt-5.4      272K     128K     yes       yes
 anthropic claude-haiku 200K     8K       no        no",
         );
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "openai");
-        assert_eq!(rows[0].1, "gpt-5.4");
-        assert!(rows[0].4);
-        assert!(!rows[1].4);
+        assert_eq!(rows[0].provider, "openai");
+        assert_eq!(rows[0].model, "gpt-5.4");
+        assert!(rows[0].thinking);
+        assert!(!rows[1].thinking);
     }
 
     #[test]
