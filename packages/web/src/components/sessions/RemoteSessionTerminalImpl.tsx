@@ -70,7 +70,7 @@ function resetTerminalOutput(terminal: Terminal, value: string, scrollToBottom =
   }
 }
 
-function encodeResizeFrame(cols: number, rows: number): Uint8Array {
+function encodeResizeFrame(cols: number, rows: number): Uint8Array<ArrayBuffer> {
   const payload = new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
   const frame = new Uint8Array(payload.length + 1);
   frame[0] = CMD_RESIZE;
@@ -78,7 +78,7 @@ function encodeResizeFrame(cols: number, rows: number): Uint8Array {
   return frame;
 }
 
-function encodeInputFrame(data: string): Uint8Array {
+function encodeInputFrame(data: string): Uint8Array<ArrayBuffer> {
   const payload = new TextEncoder().encode(data);
   const frame = new Uint8Array(payload.length + 1);
   frame[0] = CMD_OUTPUT;
@@ -237,7 +237,7 @@ export function RemoteSessionTerminal({
     }
   }, []);
 
-  const sendTerminalFrame = useCallback((frame: string | Uint8Array) => {
+  const sendTerminalFrame = useCallback((frame: string | Uint8Array<ArrayBuffer>) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Relay terminal is not connected.");

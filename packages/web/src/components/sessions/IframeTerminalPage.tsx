@@ -263,7 +263,7 @@ export function IframeTerminalPage({
     return { wsUrl: payload.wsUrl, wsProtocol: payload.wsProtocol };
   }, [bridgeId, sessionId]);
 
-  const encodeResizeFrame = useCallback((cols: number, rows: number): Uint8Array => {
+  const encodeResizeFrame = useCallback((cols: number, rows: number): Uint8Array<ArrayBuffer> => {
     const payload = new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
     const frame = new Uint8Array(payload.length + 1);
     frame[0] = CMD_RESIZE;
@@ -271,7 +271,7 @@ export function IframeTerminalPage({
     return frame;
   }, []);
 
-  const encodeInputFrame = useCallback((data: string): Uint8Array => {
+  const encodeInputFrame = useCallback((data: string): Uint8Array<ArrayBuffer> => {
     const payload = new TextEncoder().encode(data);
     const frame = new Uint8Array(payload.length + 1);
     frame[0] = CMD_OUTPUT;
