@@ -91,7 +91,6 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <ClerkProvider
       publishableKey={clerkConfiguration.publishableKey}
       proxyUrl={clerkConfiguration.proxyUrl ?? undefined}
-      clerkJSUrl={clerkConfiguration.clerkJSUrl ?? undefined}
       signInUrl={clerkConfiguration.signInUrl ?? undefined}
       signUpUrl={clerkConfiguration.signUpUrl ?? undefined}
       allowedRedirectOrigins={clerkConfiguration.allowedRedirectOrigins.length > 0
