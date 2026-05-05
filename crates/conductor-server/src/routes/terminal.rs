@@ -2543,8 +2543,10 @@ mod tests {
         assert!(injected.contains("overflow: hidden;"));
         assert!(injected.contains("box-sizing: border-box;"));
         assert!(injected.contains("html.conductor-ttyd-touch-shim-enabled #terminal-container {"));
-        assert!(injected.contains("html.conductor-ttyd-touch-shim-enabled #terminal-container .terminal {"));
-        assert!(injected.contains("padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) !important;"));
+        assert!(injected
+            .contains("html.conductor-ttyd-touch-shim-enabled #terminal-container .terminal {"));
+        assert!(injected
+            .contains("padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) !important;"));
         assert!(injected.contains("touch-action: pan-y;"));
         assert!(injected.contains("conductor-ttyd-wheel-mode"));
         assert!(injected.contains(
