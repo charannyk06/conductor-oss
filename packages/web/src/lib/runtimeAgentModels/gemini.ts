@@ -7,6 +7,18 @@ import {
   uniqueModelOptions,
 } from "./helpers";
 
+const STALE_GEMINI_FLASH_MODEL_ID = "gemini-3.1-flash-preview";
+const GEMINI_FLASH_MODEL_ID = "gemini-3-flash-preview";
+
+function normalizeGeminiRuntimeModelId(model: string): string | null {
+  const trimmed = model.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.toLowerCase() === STALE_GEMINI_FLASH_MODEL_ID) {
+    return GEMINI_FLASH_MODEL_ID;
+  }
+  return trimmed;
+}
+
 function formatGeminiModelLabel(model: string): string {
   return model
     .trim()
@@ -20,18 +32,17 @@ function formatGeminiModelLabel(model: string): string {
     .join(" ");
 }
 
-export async function buildGeminiRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog | null> {
-  const models = await collectRegexMatchesFromRecentFiles(
-    join(homedir(), ".gemini"),
-    /"(?:model|modelVersion)"\s*:\s*"([^"]+)"/g,
-    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 4, maxFiles: 12, maxDirectories: 48 },
-  );
+export function parseGeminiRuntimeModelCatalog(models: string[]): RuntimeAgentModelCatalog | null {
+  const normalizedModels = models.flatMap((model) => {
+    const normalized = normalizeGeminiRuntimeModelId(model);
+    return normalized ? [normalized] : [];
+  });
 
-  if (models.length === 0) {
+  if (normalizedModels.length === 0) {
     return null;
   }
 
-  const runtimeModels = uniqueModelOptions(models.map((model) => toRuntimeModelOption(
+  const runtimeModels = uniqueModelOptions(normalizedModels.map((model) => toRuntimeModelOption(
     model,
     `Model discovered from the local Gemini CLI installation (${model}).`,
     ["oauth", "api"],
@@ -51,4 +62,14 @@ export async function buildGeminiRuntimeModelCatalog(): Promise<RuntimeAgentMode
     },
     defaultReasoningByAccess: {},
   };
+}
+
+export async function buildGeminiRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog | null> {
+  const models = await collectRegexMatchesFromRecentFiles(
+    join(homedir(), ".gemini"),
+    /"(?:model|modelVersion)"\s*:\s*"([^"]+)"/g,
+    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 4, maxFiles: 12, maxDirectories: 48 },
+  );
+
+  return parseGeminiRuntimeModelCatalog(models);
 }
