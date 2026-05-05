@@ -168,6 +168,24 @@ html.conductor-ttyd-touch-shim-enabled body {
     overscroll-behavior: contain;
 }
 
+html.conductor-ttyd-touch-shim-enabled *,
+html.conductor-ttyd-touch-shim-enabled *::before,
+html.conductor-ttyd-touch-shim-enabled *::after {
+    box-sizing: border-box;
+}
+
+html.conductor-ttyd-touch-shim-enabled #terminal-container {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+}
+
+html.conductor-ttyd-touch-shim-enabled #terminal-container .terminal {
+    height: 100% !important;
+    min-height: 0;
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) !important;
+}
+
 html.conductor-ttyd-touch-shim-enabled .xterm-viewport,
 html.conductor-ttyd-touch-shim-enabled .xterm-scrollable-element {
     -webkit-overflow-scrolling: touch;
@@ -2523,6 +2541,12 @@ mod tests {
         assert!(injected.contains("height: 100%;"));
         assert!(injected.contains("max-height: 100%;"));
         assert!(injected.contains("overflow: hidden;"));
+        assert!(injected.contains("box-sizing: border-box;"));
+        assert!(injected.contains("html.conductor-ttyd-touch-shim-enabled #terminal-container {"));
+        assert!(injected
+            .contains("html.conductor-ttyd-touch-shim-enabled #terminal-container .terminal {"));
+        assert!(injected
+            .contains("padding: 8px 8px calc(8px + env(safe-area-inset-bottom)) !important;"));
         assert!(injected.contains("touch-action: pan-y;"));
         assert!(injected.contains("conductor-ttyd-wheel-mode"));
         assert!(injected.contains(

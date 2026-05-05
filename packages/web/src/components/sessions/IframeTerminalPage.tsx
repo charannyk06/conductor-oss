@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
@@ -75,7 +75,7 @@ const TERMINAL_THEME = {
 const IFRAME_TERMINAL_PAGE_CLASSNAME =
   "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[#060404] text-[#efe8e1]";
 const IFRAME_TERMINAL_HOST_CLASSNAME =
-  "h-full w-full overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]";
+  "box-border h-full w-full overflow-hidden overscroll-contain px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]";
 
 export function IframeTerminalPage({
   sessionId,
@@ -185,7 +185,14 @@ export function IframeTerminalPage({
     }
     applyKeyboardAwareTerminalHeight();
     applyTerminalViewport();
-    fitAddon.fit();
+    try {
+      fitAddon.fit();
+    } catch {
+      // xterm can reject a fit during the first desktop layout pass before the
+      // character measurement helpers are ready. The geometry burst retries
+      // after fonts and layout settle so the pane does not stay at 80x24.
+      return null;
+    }
     return { cols: terminal.cols, rows: terminal.rows };
   }, [applyKeyboardAwareTerminalHeight, applyTerminalViewport]);
 
@@ -503,107 +510,200 @@ export function IframeTerminalPage({
   }, []);
 
   useEffect(() => {
-    const initialViewport = resolveSessionTerminalViewportOptions(
-      typeof window === "undefined" ? undefined : window.innerWidth,
-    );
-    const terminal = new Terminal({
-      cursorBlink: true,
-      fontFamily: initialViewport.fontFamily,
-      fontSize: initialViewport.fontSize,
-      lineHeight: initialViewport.lineHeight,
-      letterSpacing: 0.2,
-      convertEol: true,
-      scrollback: 4_000,
-      allowTransparency: true,
-      theme: TERMINAL_THEME,
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
+    let disposed = false;
+    let dataSubscription: { dispose: () => void } | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let visualViewport: VisualViewport | null = null;
+    let handleVisibilityChange: (() => void) | null = null;
+    let handleParentMessage: ((event: MessageEvent) => void) | null = null;
+    let scheduleGeometryBurst: (() => void) | null = null;
+    let clearGeometryBurst: (() => void) | null = null;
 
-    const host = hostRef.current;
-    if (!host) {
-      return () => {
-        terminal.dispose();
-      };
-    }
-
-    terminal.open(host);
-    allowReconnectRef.current = true;
-    cleanupTouchRef.current = attachMobileTouchScrollShim(terminal, host);
-
-    const dataSubscription = terminal.onData((data) => {
-      const socket = socketRef.current;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        return;
+    const cleanupTerminal = () => {
+      allowReconnectRef.current = false;
+      dataSubscription?.dispose();
+      dataSubscription = null;
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+      if (scheduleGeometryBurst) {
+        window.removeEventListener("resize", scheduleGeometryBurst);
+        visualViewport?.removeEventListener("resize", scheduleGeometryBurst);
+        visualViewport?.removeEventListener("scroll", scheduleGeometryBurst);
       }
-      if (ttydProtocolRef.current) {
-        socket.send(encodeInputFrame(data));
-      } else {
-        socket.send(JSON.stringify({ type: "input", data }));
+      if (handleVisibilityChange) {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
       }
-    });
-
-    const resizeObserver = new ResizeObserver(() => {
-      applyGeometry();
-    });
-    resizeObserver.observe(host);
-    const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        applyGeometry();
+      if (handleParentMessage) {
+        window.removeEventListener("message", handleParentMessage);
       }
+      cleanupTouchRef.current?.();
+      cleanupTouchRef.current = null;
+      clearGeometryBurst?.();
+      clearReconnectTimer();
+      closeSocket();
+      terminalRef.current?.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
     };
-    const handleParentMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent || event.origin !== window.location.origin) {
+
+    void Promise.all([
+      import("xterm"),
+      import("@xterm/addon-fit"),
+    ]).then(([xtermModule, fitModule]) => {
+      if (disposed) {
         return;
       }
-      if ((event.data as { type?: string } | null)?.type !== TERMINAL_RESIZE_MESSAGE_TYPE) {
-        return;
-      }
-      window.requestAnimationFrame(() => {
-        applyGeometry();
+
+      const initialViewport = resolveSessionTerminalViewportOptions(
+        typeof window === "undefined" ? undefined : window.innerWidth,
+      );
+      const terminal = new xtermModule.Terminal({
+        cursorBlink: true,
+        fontFamily: initialViewport.fontFamily,
+        fontSize: initialViewport.fontSize,
+        lineHeight: initialViewport.lineHeight,
+        letterSpacing: 0.2,
+        convertEol: true,
+        scrollback: 4_000,
+        allowTransparency: true,
+        theme: TERMINAL_THEME,
       });
-    };
+      const fitAddon = new fitModule.FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminalRef.current = terminal;
+      fitAddonRef.current = fitAddon;
 
-    window.addEventListener("resize", applyGeometry);
-    visualViewport?.addEventListener("resize", applyGeometry);
-    visualViewport?.addEventListener("scroll", applyGeometry);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("message", handleParentMessage);
+      const host = hostRef.current;
+      if (!host) {
+        terminal.dispose();
+        terminalRef.current = null;
+        fitAddonRef.current = null;
+        return;
+      }
 
-    window.requestAnimationFrame(() => {
-      applyGeometry();
-      postParentReady();
-      connectInvokerRef.current?.();
+      terminal.open(host);
+      allowReconnectRef.current = true;
+      cleanupTouchRef.current = attachMobileTouchScrollShim(terminal, host);
+
+      dataSubscription = terminal.onData((data) => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        if (ttydProtocolRef.current) {
+          socket.send(encodeInputFrame(data));
+        } else {
+          socket.send(JSON.stringify({ type: "input", data }));
+        }
+      });
+
+      const geometryTimers = new Set<number>();
+      const geometryFrames = new Set<number>();
+      const syntheticResizeTimers = new Set<number>();
+      clearGeometryBurst = () => {
+        for (const timer of geometryTimers) {
+          window.clearTimeout(timer);
+        }
+        geometryTimers.clear();
+        for (const timer of syntheticResizeTimers) {
+          window.clearTimeout(timer);
+        }
+        syntheticResizeTimers.clear();
+        for (const frame of geometryFrames) {
+          window.cancelAnimationFrame(frame);
+        }
+        geometryFrames.clear();
+      };
+      scheduleGeometryBurst = () => {
+        if (geometryTimers.size > 32 || geometryFrames.size > 16) {
+          clearGeometryBurst?.();
+        }
+        applyGeometry();
+
+        const firstFrame = window.requestAnimationFrame(() => {
+          geometryFrames.delete(firstFrame);
+          applyGeometry();
+          const secondFrame = window.requestAnimationFrame(() => {
+            geometryFrames.delete(secondFrame);
+            applyGeometry();
+          });
+          geometryFrames.add(secondFrame);
+        });
+        geometryFrames.add(firstFrame);
+
+        for (const delay of [60, 180, 360, 720, 1200, 2400, 4000]) {
+          const timer = window.setTimeout(() => {
+            geometryTimers.delete(timer);
+            applyGeometry();
+          }, delay);
+          geometryTimers.add(timer);
+        }
+      };
+      const scheduleSyntheticResizeBurst = () => {
+        for (const delay of [120, 420, 1200, 2400, 4000]) {
+          const timer = window.setTimeout(() => {
+            syntheticResizeTimers.delete(timer);
+            window.dispatchEvent(new Event("resize"));
+          }, delay);
+          syntheticResizeTimers.add(timer);
+        }
+      };
+
+      resizeObserver = new ResizeObserver(() => {
+        scheduleGeometryBurst?.();
+      });
+      resizeObserver.observe(host);
+      visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+      handleVisibilityChange = () => {
+        if (document.visibilityState === "visible") {
+          scheduleGeometryBurst?.();
+        }
+      };
+      handleParentMessage = (event: MessageEvent) => {
+        if (event.source !== window.parent || event.origin !== window.location.origin) {
+          return;
+        }
+        if ((event.data as { type?: string } | null)?.type !== TERMINAL_RESIZE_MESSAGE_TYPE) {
+          return;
+        }
+        scheduleGeometryBurst?.();
+      };
+
+      window.addEventListener("resize", scheduleGeometryBurst);
+      visualViewport?.addEventListener("resize", scheduleGeometryBurst);
+      visualViewport?.addEventListener("scroll", scheduleGeometryBurst);
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+      window.addEventListener("message", handleParentMessage);
+
+      scheduleGeometryBurst();
+      scheduleSyntheticResizeBurst();
+      void document.fonts?.ready.then(() => {
+        scheduleGeometryBurst?.();
+        scheduleSyntheticResizeBurst();
+      }).catch(() => {
+        // Font readiness is best-effort; timer-based fits still cover fallback cases.
+      });
+      window.requestAnimationFrame(() => {
+        postParentReady();
+        connectInvokerRef.current?.();
+      });
+    }).catch((nextError) => {
+      if (disposed) {
+        return;
+      }
+      console.error("Failed to load terminal renderer", nextError);
     });
 
     return () => {
-      allowReconnectRef.current = false;
-      dataSubscription.dispose();
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", applyGeometry);
-      visualViewport?.removeEventListener("resize", applyGeometry);
-      visualViewport?.removeEventListener("scroll", applyGeometry);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("message", handleParentMessage);
-      cleanupTouchRef.current?.();
-      cleanupTouchRef.current = null;
-      clearReconnectTimer();
-      closeSocket();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
+      disposed = true;
+      cleanupTerminal();
     };
   }, [
     applyGeometry,
     clearReconnectTimer,
     closeSocket,
-    connect,
     encodeInputFrame,
     postParentReady,
-    usesRelayTerminal,
   ]);
 
   return (
