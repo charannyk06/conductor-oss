@@ -407,6 +407,9 @@ const DISPATCHER_CLAUDE_MODEL_OPTIONS: [DispatcherSelectOption; 3] = [
     },
 ];
 
+const GEMINI_STALE_FLASH_MODEL_ID: &str = "gemini-3.1-flash-preview";
+const GEMINI_FLASH_MODEL_ID: &str = "gemini-3-flash-preview";
+
 const DISPATCHER_GEMINI_MODEL_OPTIONS: [DispatcherSelectOption; 2] = [
     DispatcherSelectOption {
         value: "gemini-3.1-pro-preview",
@@ -414,7 +417,7 @@ const DISPATCHER_GEMINI_MODEL_OPTIONS: [DispatcherSelectOption; 2] = [
         description: "High-capability Gemini model discovered in local Gemini sessions.",
     },
     DispatcherSelectOption {
-        value: "gemini-3-flash-preview",
+        value: GEMINI_FLASH_MODEL_ID,
         name: "Gemini 3 Flash Preview",
         description: "Fast Gemini model discovered in local Gemini sessions.",
     },
@@ -1469,6 +1472,29 @@ fn normalize_implementation_agent(value: Option<String>) -> Option<String> {
     normalize_optional_string(value).and_then(|value| canonical_implementation_agent(&value))
 }
 
+fn normalize_dispatcher_model_for_agent(agent: &str, model: Option<&str>) -> Option<String> {
+    let trimmed = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let canonical_agent =
+        canonical_implementation_agent(agent).unwrap_or_else(|| "codex".to_string());
+    if canonical_agent == "gemini" && trimmed.eq_ignore_ascii_case(GEMINI_STALE_FLASH_MODEL_ID) {
+        return Some(GEMINI_FLASH_MODEL_ID.to_string());
+    }
+    dispatcher_model_supported_for_agent(&canonical_agent, trimmed).then(|| trimmed.to_string())
+}
+
+fn requested_dispatcher_model_for_agent(
+    agent: &str,
+    model: Option<&str>,
+    label: &str,
+) -> Result<Option<String>> {
+    let Some(trimmed) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    normalize_dispatcher_model_for_agent(agent, Some(trimmed))
+        .map(Some)
+        .ok_or_else(|| anyhow!("Unsupported {label} model `{trimmed}` for agent `{agent}`"))
+}
+
 pub(crate) fn dispatcher_implementation_agent_options() -> &'static [DispatcherSelectOption] {
     &DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS
 }
@@ -1733,11 +1759,6 @@ fn dispatcher_reasoning_supported_for_agent(
         .any(|option| option.value == reasoning_effort.trim().to_ascii_lowercase())
 }
 
-fn dispatcher_runtime_model_supported_for_agent(agent: &str, model: &str) -> bool {
-    let options = dispatcher_implementation_model_options(agent);
-    options.is_empty() || dispatcher_model_supported_for_agent(agent, model)
-}
-
 fn dispatcher_runtime_reasoning_supported_for_agent(
     agent: &str,
     model: Option<&str>,
@@ -1753,14 +1774,11 @@ fn resolve_dispatcher_implementation_model(
     implementation_model: Option<&str>,
 ) -> Option<String> {
     let current_model = dispatcher_preferred_implementation_model(thread);
-    implementation_model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    normalize_dispatcher_model_for_agent(agent, implementation_model)
         .or_else(|| {
-            current_model.as_ref().and_then(|value| {
-                dispatcher_model_supported_for_agent(agent, value).then(|| value.clone())
-            })
+            current_model
+                .as_deref()
+                .and_then(|value| normalize_dispatcher_model_for_agent(agent, Some(value)))
         })
         .or_else(|| dispatcher_default_implementation_model(agent).map(str::to_string))
 }
@@ -2665,6 +2683,11 @@ impl AppState {
             .or_else(|| normalize_dispatcher_agent(project.agent.clone()))
             .or_else(|| canonical_dispatcher_agent(&default_agent))
             .unwrap_or_else(|| "codex".to_string());
+        let dispatcher_model = requested_dispatcher_model_for_agent(
+            &agent,
+            dispatcher_model.as_deref(),
+            "dispatcher",
+        )?;
         if !force_new {
             if let Some(existing) = self
                 .latest_project_dispatcher_thread(
@@ -2756,8 +2779,13 @@ impl AppState {
             });
         thread.metadata.insert(
             ACP_IMPLEMENTATION_AGENT_METADATA_KEY.to_string(),
-            selected_implementation_agent,
+            selected_implementation_agent.clone(),
         );
+        let implementation_model = requested_dispatcher_model_for_agent(
+            &selected_implementation_agent,
+            implementation_model.as_deref(),
+            "implementation",
+        )?;
         let _ = apply_dispatcher_implementation_preferences(
             &mut thread,
             None,
@@ -2843,22 +2871,14 @@ impl AppState {
         let target_dispatcher_agent =
             requested_dispatcher_agent.unwrap_or_else(|| current_dispatcher_agent.clone());
 
-        let requested_dispatcher_model = dispatcher_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if let Some(model) = requested_dispatcher_model.as_deref() {
-            if !dispatcher_runtime_model_supported_for_agent(&target_dispatcher_agent, model) {
-                return Err(anyhow!(
-                    "Unsupported dispatcher model `{model}` for agent `{target_dispatcher_agent}`"
-                ));
-            }
-        }
+        let requested_dispatcher_model = requested_dispatcher_model_for_agent(
+            &target_dispatcher_agent,
+            dispatcher_model.as_deref(),
+            "dispatcher",
+        )?;
         let next_dispatcher_model = requested_dispatcher_model.or_else(|| {
-            thread.model.as_ref().and_then(|value| {
-                dispatcher_runtime_model_supported_for_agent(&target_dispatcher_agent, value)
-                    .then(|| value.clone())
+            thread.model.as_deref().and_then(|value| {
+                normalize_dispatcher_model_for_agent(&target_dispatcher_agent, Some(value))
             })
         });
 
@@ -2902,22 +2922,16 @@ impl AppState {
             canonical_implementation_agent(&dispatcher_preferred_implementation_agent(&thread))
                 .unwrap_or_else(|| "codex".to_string())
         });
+        let requested_implementation_model = requested_dispatcher_model_for_agent(
+            &target_implementation_agent,
+            implementation_model.as_deref(),
+            "implementation",
+        )?;
         let target_implementation_model = resolve_dispatcher_implementation_model(
             &thread,
             &target_implementation_agent,
-            implementation_model.as_deref(),
+            requested_implementation_model.as_deref(),
         );
-        if let Some(model) = implementation_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if !dispatcher_model_supported_for_agent(&target_implementation_agent, model) {
-                return Err(anyhow!(
-                    "Unsupported implementation model `{model}` for agent `{target_implementation_agent}`"
-                ));
-            }
-        }
         if let Some(reasoning_effort) = implementation_reasoning_effort
             .as_deref()
             .map(str::trim)
@@ -2967,7 +2981,7 @@ impl AppState {
         let implementation_changed = apply_dispatcher_implementation_preferences(
             &mut thread,
             implementation_agent,
-            implementation_model,
+            requested_implementation_model,
             implementation_reasoning_effort,
         );
         let openclaw_changed = apply_openclaw_dispatcher_config(&mut thread, &openclaw_config);
@@ -2996,24 +3010,18 @@ impl AppState {
             .await
             .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
 
-        let dispatcher_agent = thread.agent.trim().to_ascii_lowercase();
-        let target_model = model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .or_else(|| thread.model.clone());
-        if let Some(model_value) = model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if !dispatcher_runtime_model_supported_for_agent(&dispatcher_agent, model_value) {
-                return Err(anyhow!(
-                    "Unsupported dispatcher model `{model_value}` for agent `{dispatcher_agent}`"
-                ));
-            }
-        }
+        let dispatcher_agent = canonical_dispatcher_agent(&thread.agent)
+            .unwrap_or_else(|| thread.agent.trim().to_ascii_lowercase());
+        let requested_model = requested_dispatcher_model_for_agent(
+            &dispatcher_agent,
+            model.as_deref(),
+            "dispatcher",
+        )?;
+        let target_model = requested_model.clone().or_else(|| {
+            thread.model.as_deref().and_then(|value| {
+                normalize_dispatcher_model_for_agent(&dispatcher_agent, Some(value))
+            })
+        });
         if let Some(reasoning_value) = reasoning_effort
             .as_deref()
             .map(str::trim)
@@ -3030,17 +3038,12 @@ impl AppState {
             }
         }
 
-        let next_model = model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
+        let next_model = target_model;
         let next_reasoning = reasoning_effort
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_ascii_lowercase());
-        let next_model = next_model.or_else(|| thread.model.clone());
         let next_reasoning = next_reasoning.or_else(|| thread.reasoning_effort.clone());
         if thread.model == next_model && thread.reasoning_effort == next_reasoning {
             return Ok(thread);
@@ -4043,6 +4046,18 @@ impl AppState {
         let thread = threads
             .get_mut(thread_id)
             .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+        let dispatcher_agent = canonical_dispatcher_agent(&thread.agent)
+            .unwrap_or_else(|| thread.agent.trim().to_ascii_lowercase());
+        let requested_model = requested_dispatcher_model_for_agent(
+            &dispatcher_agent,
+            model.as_deref(),
+            "dispatcher",
+        )?;
+        let effective_model = requested_model.or_else(|| {
+            thread.model.as_deref().and_then(|value| {
+                normalize_dispatcher_model_for_agent(&dispatcher_agent, Some(value))
+            })
+        });
 
         clear_parser_state(thread);
         thread.last_activity_at = Utc::now().to_rfc3339();
@@ -4086,9 +4101,18 @@ impl AppState {
             runtime_message.push_str(runtime_context);
         }
 
-        if let Some(model_value) = model.clone() {
-            thread.model = Some(model_value.clone());
-            thread.metadata.insert("model".to_string(), model_value);
+        if thread.model != effective_model {
+            thread.model = effective_model.clone();
+            match effective_model.as_ref() {
+                Some(model_value) => {
+                    thread
+                        .metadata
+                        .insert("model".to_string(), model_value.clone());
+                }
+                None => {
+                    thread.metadata.remove("model");
+                }
+            }
         }
         if let Some(reasoning) = reasoning_effort.clone() {
             thread.reasoning_effort = Some(reasoning.clone());
@@ -4145,7 +4169,7 @@ impl AppState {
                         &updated,
                         &runtime_message,
                         &effective_attachments,
-                        model.or_else(|| updated.model.clone()),
+                        updated.model.clone(),
                         reasoning_effort.or_else(|| updated.reasoning_effort.clone()),
                     )
                     .await?;
@@ -4155,7 +4179,7 @@ impl AppState {
                     &updated,
                     &runtime_message,
                     &effective_attachments,
-                    model.or_else(|| updated.model.clone()),
+                    updated.model.clone(),
                     reasoning_effort.or_else(|| updated.reasoning_effort.clone()),
                 )
                 .await?;
@@ -4165,7 +4189,7 @@ impl AppState {
                 &updated,
                 &runtime_message,
                 &effective_attachments,
-                model.or_else(|| updated.model.clone()),
+                updated.model.clone(),
                 reasoning_effort.or_else(|| updated.reasoning_effort.clone()),
             )
             .await?;
@@ -4265,14 +4289,15 @@ mod tests {
         codex_runtime_reasoning_supported_in_cache, dispatcher_context_attachment_paths,
         dispatcher_model_supported_for_agent, dispatcher_resume_target,
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
-        merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
-        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, DispatcherPreferencesPatch, OpenClawDispatcherConfigPatch,
-        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
-        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
-        OPENCLAW_SESSION_KEY_METADATA_KEY,
+        merge_dispatcher_context_attachments, normalize_dispatcher_model_for_agent,
+        normalize_loaded_dispatcher_thread, prepare_dispatcher_runtime_env, read_json,
+        AcpSessionMemoryState, AppState, CreateDispatcherThreadOptions, DispatcherPreferencesPatch,
+        OpenClawDispatcherConfigPatch, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
+        ACP_IMPLEMENTATION_MODEL_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
+        GEMINI_FLASH_MODEL_ID, GEMINI_STALE_FLASH_MODEL_ID, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
     use anyhow::Result;
@@ -4729,6 +4754,58 @@ mod tests {
             "claude-code",
             "gpt-5.4"
         ));
+    }
+
+    #[test]
+    fn dispatcher_model_normalization_remaps_stale_gemini_flash_id() {
+        assert_eq!(
+            normalize_dispatcher_model_for_agent("gemini", Some(GEMINI_STALE_FLASH_MODEL_ID)),
+            Some(GEMINI_FLASH_MODEL_ID.to_string())
+        );
+        assert_eq!(
+            normalize_dispatcher_model_for_agent("gemini", Some("gemini-3.1-pro-preview")),
+            Some("gemini-3.1-pro-preview".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_runtime_preferences_remap_stale_gemini_flash_id() {
+        let (root, state) = build_test_state("acp-gemini-stale-flash-model").await;
+        let thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("gemini".to_string()),
+                    implementation_agent: Some("gemini".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+
+        let updated = state
+            .update_dispatcher_runtime_preferences(
+                &thread.id,
+                Some(GEMINI_STALE_FLASH_MODEL_ID.to_string()),
+                None,
+            )
+            .await
+            .expect("stale Gemini flash model should normalize to the live CLI model");
+
+        assert_eq!(updated.model.as_deref(), Some(GEMINI_FLASH_MODEL_ID));
+        assert_eq!(
+            updated.metadata.get("model").map(String::as_str),
+            Some(GEMINI_FLASH_MODEL_ID)
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_MODEL_METADATA_KEY)
+                .map(String::as_str),
+            Some(GEMINI_FLASH_MODEL_ID)
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

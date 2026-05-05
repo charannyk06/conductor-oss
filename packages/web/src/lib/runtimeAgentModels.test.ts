@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCodexRuntimeModelCatalog, parsePiListModelsOutput } from "./runtimeAgentModels";
+import { parseGeminiRuntimeModelCatalog } from "./runtimeAgentModels/gemini";
 
 test("parsePiListModelsOutput reads Pi provider model rows", () => {
   const rows = parsePiListModelsOutput(`provider  model      context  max-out  thinking  images
@@ -130,4 +131,20 @@ test("parseCodexRuntimeModelCatalog keeps visible Codex models in priority order
     catalog.reasoningOptionsByModel?.["gpt-5.4"]?.map((option) => option.id),
     ["low", "medium", "high", "xhigh"],
   );
+});
+
+test("parseGeminiRuntimeModelCatalog remaps stale Gemini 3.1 Flash history to the live CLI model", () => {
+  const catalog = parseGeminiRuntimeModelCatalog([
+    "gemini-3.1-flash-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+  ]);
+
+  assert.ok(catalog);
+  assert.deepEqual(
+    catalog.modelsByAccess.oauth?.map((model) => model.id),
+    ["gemini-3-flash-preview", "gemini-3.1-pro-preview"],
+  );
+  assert.equal(catalog.defaultModelByAccess.oauth, "gemini-3-flash-preview");
+  assert.equal(catalog.defaultModelByAccess.api, "gemini-3-flash-preview");
 });
