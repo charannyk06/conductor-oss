@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "conductor-oss-workspace",
@@ -14,7 +15,10 @@
       "name": "conductor-oss",
       "version": "0.2.8",
       "bin": {
-        "conductor-oss": "dist/launcher.js",        "conductor": "dist/launcher.js",        "co": "dist/launcher.js"      },
+        "conductor-oss": "dist/launcher.js",
+        "conductor": "dist/launcher.js",
+        "co": "dist/launcher.js",
+      },
       "dependencies": {
         "@conductor-oss/core": "workspace:*",
         "chalk": "^5.6.2",

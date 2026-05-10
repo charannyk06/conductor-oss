@@ -684,7 +684,22 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
         url.hash = '';
 
-        const normalizedPathname = url.pathname.replace(/\/+$/, '');
+        // Use the Conductor backend origin injected into the page (if available).
+        // This ensures the WebSocket connects directly to the Rust backend's
+        // /api/sessions/:id/terminal/ttyd/ws handler rather than through the
+        // Next.js dashboard proxy, which cannot forward WebSocket upgrade requests.
+        try {
+            const backendMeta = document.querySelector('meta[name="conductor-backend-url"]');
+            const backendContent = (backendMeta && backendMeta.content || '').trim();
+            if (backendContent) {
+                const b = new URL(backendContent);
+                url.hostname = b.hostname;
+                url.port = b.port;
+                url.protocol = b.protocol === 'https:' ? 'wss:' : 'ws:';
+            }
+        } catch {}
+
+        const normalizedPathname = window.location.pathname.replace(/\/+$/, '');
         url.pathname = normalizedPathname.endsWith('/ws')
             ? normalizedPathname
             : `${normalizedPathname}/ws`;
@@ -1183,6 +1198,64 @@ fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> Str
     inject_ttyd_html_fragment(html, TTYD_PASTE_SHIM_MARKER, &paste_shim)
 }
 
+const TTYD_BACKEND_URL_META_MARKER: &str = "conductor-ttyd-backend-url-meta";
+
+/// Inject a `<meta name="conductor-backend-url">` tag so the auth-sync shim can
+/// route WebSocket connections directly to the Rust backend rather than through
+/// the Next.js dashboard proxy, which cannot forward WebSocket upgrade requests.
+fn inject_conductor_backend_url_meta(html: &str, backend_origin: &str) -> String {
+    if html.contains(TTYD_BACKEND_URL_META_MARKER) {
+        return html.to_string();
+    }
+    let escaped = backend_origin.replace('"', "&quot;");
+    let meta = format!(
+        "<!-- {TTYD_BACKEND_URL_META_MARKER} --><meta name=\"conductor-backend-url\" content=\"{escaped}\">"
+    );
+    // Inject before </head> so the tag is parsed before any script runs.
+    if let Some(idx) = html.find("</head>") {
+        let mut out = String::with_capacity(html.len() + meta.len() + 1);
+        out.push_str(&html[..idx]);
+        out.push_str(&meta);
+        out.push_str(&html[idx..]);
+        return out;
+    }
+    // No </head> found — try after <head>.
+    if let Some(idx) = html.find("<head>") {
+        let end = idx + "<head>".len();
+        let mut out = String::with_capacity(html.len() + meta.len() + 1);
+        out.push_str(&html[..end]);
+        out.push_str(&meta);
+        out.push_str(&html[end..]);
+        return out;
+    }
+    // No head element at all; skip injection.
+    html.to_string()
+}
+
+/// Derive the backend's own HTTP origin from the request's Host header.
+///
+/// When Next.js proxies to the Rust backend it strips the incoming Host header
+/// and the HTTP client sets `Host: <backend-ip>:<port>` based on the target URL.
+/// Loopback addresses always use `http://`; others follow `x-forwarded-proto`.
+fn backend_origin_from_headers(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    let is_loopback = host.starts_with("127.")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("[::1]");
+    let proto = if is_loopback {
+        "http"
+    } else {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("http")
+    };
+    format!("{proto}://{host}")
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TerminalTokenScope {
     Control,
@@ -1600,6 +1673,9 @@ async fn terminal_ttyd_frontend(
     }
     let body = if content_type_is_html(&content_type) {
         let mut html = String::from_utf8_lossy(&body).into_owned();
+        // Inject backend origin first so the auth-sync shim can read it at runtime.
+        let backend_origin = backend_origin_from_headers(&headers);
+        html = inject_conductor_backend_url_meta(&html, &backend_origin);
         html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
         html = inject_ttyd_resize_shim(&html);
         html = inject_ttyd_auth_sync_shim(&html);
