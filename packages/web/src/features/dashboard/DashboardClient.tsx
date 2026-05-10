@@ -2697,11 +2697,13 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
       setBranchOptions([]);
       setSelectedBranch("");
       setBranchLoading(false);
+      setUseWorktree(false);
       return;
     }
     setBranchOptions([]);
     setSelectedBranch(selectedProject.defaultBranch.trim() || "main");
     setBranchLoading(false);
+    setUseWorktree(selectedProject.workspace === "worktree");
   }, [selectedProject]);
 
   useEffect(() => {

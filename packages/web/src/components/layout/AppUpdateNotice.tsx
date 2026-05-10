@@ -190,6 +190,7 @@ export function AppUpdateNotice() {
   const showDetailedBody = !compactNotice || mobileExpanded;
   const visible = useMemo(() => {
     if (!update) return false;
+    if (update.installMode === "source") return false;
     if (hiddenForVersion) return false;
     if (restarting || update.jobStatus === "running") return true;
     if (update.jobStatus === "completed" || update.jobStatus === "failed") return true;

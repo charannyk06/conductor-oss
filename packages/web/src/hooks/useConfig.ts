@@ -16,6 +16,7 @@ export interface ConfigProject {
   agentPermissions: string | null;
   agentModel: string | null;
   agentReasoningEffort: string | null;
+  workspace: string | null;
 }
 
 interface UseConfigReturn {
@@ -55,6 +56,9 @@ function normalizeProject(
       : null,
     agentReasoningEffort: typeof raw?.["agentReasoningEffort"] === "string" && raw["agentReasoningEffort"].trim().length > 0
       ? raw["agentReasoningEffort"]
+      : null,
+    workspace: typeof raw?.["workspace"] === "string" && raw["workspace"].trim().length > 0
+      ? raw["workspace"].trim()
       : null,
   };
 }
