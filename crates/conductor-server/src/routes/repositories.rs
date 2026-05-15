@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::state::AppState;
+use crate::state::{repo_url_without_credentials, AppState};
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -224,7 +224,7 @@ fn repository_payload(
     json!({
         "id": id,
         "displayName": project.name.clone().unwrap_or_else(|| id.to_string()),
-        "repo": project.repo.clone().unwrap_or_else(|| id.to_string()),
+        "repo": repo_url_without_credentials(project.repo.as_deref()).unwrap_or_else(|| id.to_string()),
         "path": resolved_path.to_string_lossy().to_string(),
         "agent": project.agent.clone().unwrap_or_else(|| default_agent.to_string()),
         "agentPermissions": project.agent_config.permissions.clone().unwrap_or_else(|| "skip".to_string()),

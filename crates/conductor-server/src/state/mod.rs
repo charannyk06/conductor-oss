@@ -79,6 +79,7 @@ use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
+use url::Url;
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -118,6 +119,27 @@ const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 64 * 1024;
 const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
+
+pub(crate) fn repo_url_without_credentials(repo: Option<&str>) -> Option<String> {
+    repo.map(redact_repo_url_credentials)
+}
+
+pub(crate) fn redact_repo_url_credentials(repo: &str) -> String {
+    let trimmed = repo.trim();
+    let Ok(mut url) = Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    if matches!(url.scheme(), "http" | "https")
+        && (!url.username().is_empty() || url.password().is_some())
+    {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        return url.to_string();
+    }
+
+    trimmed.to_string()
+}
 const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
 const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
@@ -1315,7 +1337,7 @@ impl AppState {
                 let board_dir = project.board_dir.clone().unwrap_or_else(|| id.clone());
                 json!({
                     "id": id,
-                    "repo": project.repo,
+                    "repo": repo_url_without_credentials(project.repo.as_deref()),
                     "path": expand_path(&project.path, &workspace_path).to_string_lossy().to_string(),
                     "iconUrl": project.icon_url,
                     "boardDir": board_dir,
@@ -1348,6 +1370,74 @@ mod tests {
 
     fn contains_arg(args: &[String], needle: &str) -> bool {
         args.iter().any(|arg| arg.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn config_projects_payload_redacts_repo_url_credentials() {
+        let root = std::env::temp_dir().join(format!("conductor-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test root should exist");
+        let github_host = "github.com";
+        let basic_repo = format!("https://{}@{github_host}/acme/basic.git", "user:password");
+        let token_prefix = "ghp_";
+        let token_value = format!("{token_prefix}{}", "exampletoken");
+        let token_repo = format!("https://{token_value}@{github_host}/acme/widgets.git");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            projects: BTreeMap::from([
+                (
+                    "basic".to_string(),
+                    ProjectConfig {
+                        repo: Some(basic_repo.clone()),
+                        path: "basic".to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
+                (
+                    "pat".to_string(),
+                    ProjectConfig {
+                        repo: Some(token_repo.clone()),
+                        path: "widgets".to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
+                (
+                    "ssh".to_string(),
+                    ProjectConfig {
+                        repo: Some("git@github.com:acme/safe.git".to_string()),
+                        path: "safe".to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
+            ]),
+            ..ConductorConfig::default()
+        };
+        let config_path = root.join("conductor.yaml");
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should open");
+        let state = AppState::new(config_path, config.clone(), db).await;
+
+        let payload = state.config_projects_payload(&config);
+        let projects = payload["projects"]
+            .as_array()
+            .expect("projects should be an array");
+        let repo_for = |id: &str| -> &str {
+            projects
+                .iter()
+                .find(|project| project["id"] == id)
+                .and_then(|project| project["repo"].as_str())
+                .expect("project repo should be present")
+        };
+
+        assert_eq!(repo_for("basic"), "https://github.com/acme/basic.git");
+        assert_eq!(repo_for("pat"), "https://github.com/acme/widgets.git");
+        assert_eq!(repo_for("ssh"), "git@github.com:acme/safe.git");
+        let payload_text = payload.to_string();
+        assert!(!payload_text.contains("password"));
+        assert!(!payload_text.contains(&token_value));
+
+        std::fs::remove_dir_all(&root).expect("test root should be removed");
     }
 
     #[tokio::test]

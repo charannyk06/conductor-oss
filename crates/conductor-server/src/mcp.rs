@@ -11,7 +11,7 @@ use crate::dispatcher_task_lifecycle::{
     DispatcherTaskUpdateInput,
 };
 use crate::routes::boards::{load_board_response, resolve_board_task_record, split_task_text};
-use crate::state::{AppState, SessionRecord, SpawnRequest};
+use crate::state::{repo_url_without_credentials, AppState, SessionRecord, SpawnRequest};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -208,7 +208,7 @@ impl McpBackend for AppStateMcpBackend {
             .map(|(id, project)| McpProjectSummary {
                 id,
                 name: project.name,
-                repo: project.repo,
+                repo: repo_url_without_credentials(project.repo.as_deref()),
                 path: project.path,
                 default_branch: project.default_branch,
                 agent: project.agent,
