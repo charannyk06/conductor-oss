@@ -23,24 +23,27 @@ function installModeHint(mode: AppInstallMode): string | null {
   }
 }
 
-function formatBuildVersionSuffix(update: AppUpdateStatus): string {
+function formatInstalledPackageVersionSuffix(update: AppUpdateStatus): string {
   const version = update.currentVersion?.trim();
-  return version ? ` (build ${version})` : "";
+  return version ? ` (installed package ${version})` : "";
 }
 
 export function noticeTitle(update: AppUpdateStatus): string {
-  const buildVersionSuffix = formatBuildVersionSuffix(update);
+  const installedPackageVersionSuffix = formatInstalledPackageVersionSuffix(update);
 
   if (!update.enabled && update.reason) {
-    return `Conductor update unavailable${buildVersionSuffix}`;
+    return `Conductor package update unavailable${installedPackageVersionSuffix}`;
   }
-  if (update.restarting) return `Restarting Conductor${buildVersionSuffix}`;
-  if (update.jobStatus === "running") return `Updating Conductor${buildVersionSuffix}`;
-  if (update.jobStatus === "completed") return `Conductor updated${buildVersionSuffix}`;
-  if (update.jobStatus === "failed") return `Update failed${buildVersionSuffix}`;
+  if (update.restarting) return `Restarting Conductor${installedPackageVersionSuffix}`;
+  if (update.jobStatus === "running") return `Updating Conductor package${installedPackageVersionSuffix}`;
+  if (update.jobStatus === "completed") return `Conductor package updated${installedPackageVersionSuffix}`;
+  if (update.jobStatus === "failed") return `Package update failed${installedPackageVersionSuffix}`;
+  if (!update.updateAvailable && !update.latestVersion) {
+    return `Conductor package is up to date${installedPackageVersionSuffix}`;
+  }
   return update.latestVersion
-    ? `Conductor ${update.latestVersion} is available${buildVersionSuffix}`
-    : `Conductor update available${buildVersionSuffix}`;
+    ? `Conductor package ${update.latestVersion} is available${installedPackageVersionSuffix}`
+    : `Conductor package update available${installedPackageVersionSuffix}`;
 }
 
 function noticeDescription(update: AppUpdateStatus): string {
@@ -60,7 +63,9 @@ function noticeDescription(update: AppUpdateStatus): string {
     return update.jobMessage ?? "The update command did not finish successfully.";
   }
 
-  const currentVersion = update.currentVersion ? `You are running ${update.currentVersion}. ` : "";
+  const currentVersion = update.currentVersion
+    ? `Installed Conductor package: ${update.currentVersion}. `
+    : "";
   if (update.canAutoUpdate) {
     return `${currentVersion}Install the new release now and restart when it finishes.`;
   }

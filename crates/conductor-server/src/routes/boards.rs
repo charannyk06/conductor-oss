@@ -16,7 +16,7 @@ use crate::dispatcher_task_lifecycle::{
     DispatcherTaskMutationContext, DispatcherTaskUpdateInput,
 };
 use crate::routes::config::resolve_access_identity;
-use crate::state::{resolve_board_file, AppState};
+use crate::state::{repo_url_without_credentials, resolve_board_file, AppState};
 use crate::task_context::ensure_task_brief;
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -567,7 +567,7 @@ pub(crate) async fn load_board_response(
 
     Ok(json!({
         "projectId": project_id,
-        "repository": project.repo.clone(),
+        "repository": repo_url_without_credentials(project.repo.as_deref()),
         "boardPath": board_path_display,
         "workspacePath": state.workspace_path.to_string_lossy().to_string(),
         "columns": columns,

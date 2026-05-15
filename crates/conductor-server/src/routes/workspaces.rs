@@ -15,7 +15,7 @@ use tokio::process::Command;
 use tracing::info;
 
 use crate::routes::filesystem::{allowed_browse_roots, expand_path, resolve_browse_path};
-use crate::state::AppState;
+use crate::state::{repo_url_without_credentials, AppState};
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -81,7 +81,7 @@ async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
             json!({
                 "id": id,
                 "name": project.name.clone().unwrap_or_else(|| id.to_string()),
-                "repo": project.repo.clone(),
+                "repo": repo_url_without_credentials(project.repo.as_deref()),
                 "workspace": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),
                 "runtime": project.runtime.clone().unwrap_or_else(|| "ttyd".to_string()),
                 "path": resolve_path(&state.workspace_path, &project.path).to_string_lossy().to_string(),

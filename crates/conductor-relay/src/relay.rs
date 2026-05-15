@@ -2992,9 +2992,10 @@ fn generate_claim_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{LazyLock, Mutex as StdMutex};
+    use std::sync::LazyLock;
 
-    static RELAY_STATE_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
+    static RELAY_STATE_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
     use axum::extract::ws::Message;
     use tokio::sync::mpsc;
 
@@ -3761,7 +3762,7 @@ mod tests {
 
     #[tokio::test]
     async fn persisted_device_state_round_trips() {
-        let _guard = RELAY_STATE_ENV_LOCK.lock().unwrap();
+        let _guard = RELAY_STATE_ENV_LOCK.lock().await;
         let path =
             std::env::temp_dir().join(format!("conductor-relay-state-{}.json", Uuid::new_v4()));
         unsafe {

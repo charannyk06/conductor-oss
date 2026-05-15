@@ -76,7 +76,6 @@ struct OpenProjectNoteBody {
 
 #[derive(Debug, Clone)]
 struct ProjectNotesContext {
-    workspace_root: PathBuf,
     project_root: PathBuf,
     project_workspace_root: Option<PathBuf>,
     board_path: Option<PathBuf>,
@@ -284,9 +283,34 @@ async fn resolve_project_notes_context(
         &state.workspace_path,
         &config.preferences.markdown_editor_path,
     );
+    let notes_root = notes_root.and_then(|root| {
+        let scoped_roots = project_scoped_note_roots(
+            &project_root,
+            project_workspace_root.as_deref(),
+            board_parent.as_deref(),
+        );
+        if scoped_roots
+            .iter()
+            .any(|scoped_root| path_is_within_root(&root, scoped_root, false))
+        {
+            Some(root)
+        } else {
+            let scoped_roots_display = scoped_roots
+                .iter()
+                .map(|scoped_root| scoped_root.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                project_id = trimmed_project_id,
+                configured_root = %root.display(),
+                scoped_roots = %scoped_roots_display,
+                "Ignoring markdown_editor_path because it falls outside the project-scoped note roots"
+            );
+            None
+        }
+    });
 
     Ok(ProjectNotesContext {
-        workspace_root: state.workspace_path.clone(),
         project_root,
         project_workspace_root,
         board_path: Some(board_path),
@@ -583,18 +607,29 @@ fn path_within_allowed_note_roots(
 }
 
 fn allowed_note_roots(context: &ProjectNotesContext) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
     if let Some(notes_root) = context.notes_root.as_ref() {
-        roots.push(notes_root.clone());
-    } else {
-        if let Some(project_workspace_root) = context.project_workspace_root.as_ref() {
-            roots.push(project_workspace_root.clone());
-        }
-        roots.push(context.project_root.clone());
-        if let Some(board_parent) = context.board_parent.as_ref() {
-            roots.push(board_parent.clone());
-        }
-        roots.push(context.workspace_root.clone());
+        return vec![notes_root.clone()];
+    }
+
+    project_scoped_note_roots(
+        &context.project_root,
+        context.project_workspace_root.as_deref(),
+        context.board_parent.as_deref(),
+    )
+}
+
+fn project_scoped_note_roots(
+    project_root: &Path,
+    project_workspace_root: Option<&Path>,
+    board_parent: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(project_workspace_root) = project_workspace_root {
+        roots.push(project_workspace_root.to_path_buf());
+    }
+    roots.push(project_root.to_path_buf());
+    if let Some(board_parent) = board_parent {
+        roots.push(board_parent.to_path_buf());
     }
 
     let mut seen = HashSet::new();
@@ -1263,9 +1298,13 @@ fn resolve_wikilink_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_obsidian_open_uri, canonicalize_for_write_target, is_markdown_like,
-        markdown_source_label,
+        build_obsidian_open_uri, canonicalize_for_write_target, collect_indexed_note_files,
+        is_markdown_like, markdown_source_label, resolve_project_notes_context,
     };
+    use crate::state::AppState;
+    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_db::Database;
+    use std::collections::BTreeMap;
     use std::fs;
 
     #[test]
@@ -1280,6 +1319,68 @@ mod tests {
         assert!(is_markdown_like(std::path::Path::new("notes/design.md")));
         assert!(is_markdown_like(std::path::Path::new("notes/summary.mdx")));
         assert!(!is_markdown_like(std::path::Path::new("notes/design.ts")));
+    }
+
+    #[tokio::test]
+    async fn project_notes_ignore_configured_root_from_another_project() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-project-notes-isolation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let conductor_root = root.join("projects").join("conductor-oss");
+        let solar_root = root.join("projects").join("solar-copilot");
+        fs::create_dir_all(&conductor_root).unwrap();
+        fs::create_dir_all(&solar_root).unwrap();
+        fs::write(conductor_root.join("CONDUCTOR.md"), "# Conductor\n").unwrap();
+        fs::write(conductor_root.join("roadmap.md"), "# Roadmap\n").unwrap();
+        fs::write(solar_root.join("private-solar-note.md"), "# Solar\n").unwrap();
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: PreferencesConfig {
+                markdown_editor: "obsidian".to_string(),
+                markdown_editor_path: solar_root.to_string_lossy().to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([
+                (
+                    "conductor-oss".to_string(),
+                    ProjectConfig {
+                        path: conductor_root.to_string_lossy().to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
+                (
+                    "solar-copilot".to_string(),
+                    ProjectConfig {
+                        path: solar_root.to_string_lossy().to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
+            ]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should open");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+
+        let context = resolve_project_notes_context(&state, "conductor-oss")
+            .await
+            .expect("project notes context should resolve");
+        assert_ne!(context.notes_root.as_deref(), Some(solar_root.as_path()));
+
+        let files = collect_indexed_note_files(&context);
+        let joined = files
+            .iter()
+            .filter_map(|file| file["path"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("roadmap.md"));
+        assert!(!joined.contains("private-solar-note.md"));
+        assert!(!joined.contains("solar-copilot"));
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

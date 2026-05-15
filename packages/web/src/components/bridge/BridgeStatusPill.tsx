@@ -27,6 +27,12 @@ import {
 } from "@/lib/bridgeOnboarding";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
+import {
+  bridgeStatusBadgeLabel,
+  bridgeStatusTone,
+  type BridgeStatusBadgeLabelInput,
+  type BridgeStatusTone,
+} from "@/lib/bridgeStatusLabel";
 
 type BridgeDevice = {
   device_id: string;
@@ -63,34 +69,54 @@ type BridgeStatusPillProps = {
 
 const BRIDGE_CONNECT_PATH = "/bridge/connect";
 
+function bridgeStatusToneClasses(tone: BridgeStatusTone) {
+  if (tone === "online") {
+    return {
+      pill: "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]",
+      dot: "bg-[var(--vk-green)]",
+    };
+  }
+  if (tone === "neutral") {
+    return {
+      pill: "border-[var(--vk-border)] bg-[rgba(255,255,255,0.04)] text-[var(--vk-text-muted)]",
+      dot: "bg-[var(--vk-text-muted)]",
+    };
+  }
+  return {
+    pill: "border-[rgba(255,143,122,0.24)] bg-[rgba(255,143,122,0.08)] text-[var(--vk-red)]",
+    dot: "bg-[var(--vk-red)]",
+  };
+}
+
 function StatusBadge({
-  connected,
+  label,
+  tone,
   className,
   title,
   suffix,
 }: {
-  connected: boolean;
+  label: string;
+  tone: BridgeStatusTone;
   className?: string;
   title?: string;
   suffix?: ReactNode;
 }) {
+  const toneClasses = bridgeStatusToneClasses(tone);
   return (
     <span
       className={cn(
         "inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[12px] font-medium",
-        connected
-          ? "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]"
-          : "border-[rgba(255,143,122,0.24)] bg-[rgba(255,143,122,0.08)] text-[var(--vk-red)]",
+        toneClasses.pill,
         className,
       )}
       title={title}
     >
       <span className={cn(
         "h-2.5 w-2.5 rounded-full",
-        connected ? "bg-[var(--vk-green)]" : "bg-[var(--vk-red)]",
+        toneClasses.dot,
       )}
       />
-      <span>{connected ? "Online" : "Offline"}</span>
+      <span>{label}</span>
       {suffix}
     </span>
   );
@@ -216,7 +242,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   const selectedBridgeDevice = selectedBridgeId
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
-  const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
+  const shouldLinkToDeviceScreen = relayConfigured && !loading && connectedDevices.length === 0;
   const recentPairingDevice = recentPairingDeviceId
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
@@ -230,8 +256,16 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
           : BRIDGE_CONNECT_PATH
     : BRIDGE_CONNECT_PATH;
   const connected = connectedDevices.length > 0;
+  const statusInput = {
+    relayConfigured,
+    connectedDevices: connectedDevices.length,
+    totalDevices: devices.length,
+    loading,
+  } satisfies BridgeStatusBadgeLabelInput;
+  const badgeLabel = bridgeStatusBadgeLabel(statusInput);
+  const badgeTone = bridgeStatusTone(statusInput);
   const title = !relayConfigured
-    ? relayUnavailableReason ?? "Bridge relay URL is not configured"
+    ? "Local backend is running. Paired-device bridge relay is not configured."
     : error
     ?? (connected
       ? `${connectedDevices.length} bridge${connectedDevices.length === 1 ? "" : "s"} online`
@@ -347,7 +381,8 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
         title={devices.length > 0 ? "Reconnect paired device" : "Pair a device"}
       >
         <StatusBadge
-          connected={false}
+          label={badgeLabel}
+          tone={badgeTone}
           className={className}
           title={devices.length > 0 ? "Reconnect paired device" : "Pair a device"}
           suffix={<ArrowUpRight className="h-3.5 w-3.5" />}
@@ -361,7 +396,8 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       <DropdownMenu.Trigger asChild>
         <button type="button" className="outline-none">
           <StatusBadge
-            connected={connected}
+            label={badgeLabel}
+            tone={badgeTone}
             className={className}
             title={title}
             suffix={<ChevronDown className="h-3.5 w-3.5 text-current/70" />}
@@ -381,7 +417,9 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
             <div className="mt-2 text-[13px] text-[var(--vk-text-normal)]">
               {connected
                 ? `${connectedDevices.length} device${connectedDevices.length === 1 ? "" : "s"} online`
-                : loading
+                : !relayConfigured
+                  ? "Local backend is healthy. Paired-device relay is not configured."
+                  : loading
                   ? "Loading device status"
                   : "No live bridge connection"}
             </div>
@@ -531,7 +569,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                           </div>
                         ) : null}
                       </div>
-                      <StatusBadge connected={device.connected === true} />
+                      <StatusBadge
+                        label={device.connected === true ? "Online" : "Offline"}
+                        tone={device.connected === true ? "online" : "offline"}
+                      />
                     </div>
                   </div>
                 );
@@ -562,7 +603,14 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
 
 export function BridgeStatusPill({ connected, className, title }: BridgeStatusPillProps = {}) {
   if (typeof connected === "boolean") {
-    return <StatusBadge connected={connected} className={className} title={title} />;
+    return (
+      <StatusBadge
+        label={connected ? "Online" : "Offline"}
+        tone={connected ? "online" : "offline"}
+        className={className}
+        title={title}
+      />
+    );
   }
 
   return <BridgeStatusDropdown className={className} />;

@@ -9,7 +9,7 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::state::{resolve_board_file, AppState};
+use crate::state::{redact_repo_url_credentials, resolve_board_file, AppState};
 use conductor_core::config::ProjectConfig;
 use conductor_core::support::{
     resolve_project_path, sync_project_local_config, sync_support_files_for_directory,
@@ -101,7 +101,7 @@ fn config_project_response(
     let name = project
         .name
         .clone()
-        .or_else(|| project.repo.clone())
+        .or_else(|| project.repo.as_deref().map(redact_repo_url_credentials))
         .unwrap_or_else(|| id.to_string());
     let board_dir = project.board_dir.as_deref().unwrap_or(id);
     let board_path = Some(resolve_board_file(

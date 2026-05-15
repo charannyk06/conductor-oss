@@ -4,7 +4,7 @@ import test from "node:test";
 import { noticeTitle } from "./AppUpdateNotice";
 import type { AppUpdateStatus } from "@/lib/types";
 
-test("noticeTitle includes the installed build version when already up to date", () => {
+test("noticeTitle labels package versions explicitly when already up to date", () => {
   const status = {
     enabled: true,
     reason: null,
@@ -14,10 +14,10 @@ test("noticeTitle includes the installed build version when already up to date",
     latestVersion: null,
   } as AppUpdateStatus;
 
-  assert.equal(noticeTitle(status), "Conductor update available (build 0.3.4)");
+  assert.equal(noticeTitle(status), "Conductor package is up to date (installed package 0.3.4)");
 });
 
-test("noticeTitle includes the installed build version alongside an available release", () => {
+test("noticeTitle labels package versions explicitly alongside an available release", () => {
   const status = {
     enabled: true,
     reason: null,
@@ -27,7 +27,7 @@ test("noticeTitle includes the installed build version alongside an available re
     latestVersion: "0.3.5",
   } as AppUpdateStatus;
 
-  assert.equal(noticeTitle(status), "Conductor 0.3.5 is available (build 0.3.4)");
+  assert.equal(noticeTitle(status), "Conductor package 0.3.5 is available (installed package 0.3.4)");
 });
 
 test("mobile update notice collapses into a compact card instead of covering the whole workspace", () => {
