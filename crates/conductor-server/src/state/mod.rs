@@ -130,9 +130,7 @@ pub(crate) fn redact_repo_url_credentials(repo: &str) -> String {
         return trimmed.to_string();
     };
 
-    if matches!(url.scheme(), "http" | "https")
-        && (!url.username().is_empty() || url.password().is_some())
-    {
+    if !url.username().is_empty() || url.password().is_some() {
         let _ = url.set_username("");
         let _ = url.set_password(None);
         return url.to_string();
@@ -1378,6 +1376,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("test root should exist");
         let github_host = "github.com";
         let basic_repo = format!("https://{}@{github_host}/acme/basic.git", "user:password");
+        let ssh_url_repo = format!("ssh://{}@{github_host}/acme/ssh.git", "user:password");
         let token_prefix = "ghp_";
         let token_value = format!("{token_prefix}{}", "exampletoken");
         let token_repo = format!("https://{token_value}@{github_host}/acme/widgets.git");
@@ -1409,6 +1408,14 @@ mod tests {
                         ..ProjectConfig::default()
                     },
                 ),
+                (
+                    "ssh-url".to_string(),
+                    ProjectConfig {
+                        repo: Some(ssh_url_repo.clone()),
+                        path: "ssh-url".to_string(),
+                        ..ProjectConfig::default()
+                    },
+                ),
             ]),
             ..ConductorConfig::default()
         };
@@ -1433,6 +1440,7 @@ mod tests {
         assert_eq!(repo_for("basic"), "https://github.com/acme/basic.git");
         assert_eq!(repo_for("pat"), "https://github.com/acme/widgets.git");
         assert_eq!(repo_for("ssh"), "git@github.com:acme/safe.git");
+        assert_eq!(repo_for("ssh-url"), "ssh://github.com/acme/ssh.git");
         let payload_text = payload.to_string();
         assert!(!payload_text.contains("password"));
         assert!(!payload_text.contains(&token_value));

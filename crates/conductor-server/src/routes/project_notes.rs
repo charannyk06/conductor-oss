@@ -282,15 +282,32 @@ async fn resolve_project_notes_context(
     let notes_root = resolve_notes_root(
         &state.workspace_path,
         &config.preferences.markdown_editor_path,
-    )
-    .filter(|root| {
-        project_scoped_note_roots(
+    );
+    let notes_root = notes_root.and_then(|root| {
+        let scoped_roots = project_scoped_note_roots(
             &project_root,
             project_workspace_root.as_deref(),
             board_parent.as_deref(),
-        )
-        .iter()
-        .any(|scoped_root| path_is_within_root(root, scoped_root, false))
+        );
+        if scoped_roots
+            .iter()
+            .any(|scoped_root| path_is_within_root(&root, scoped_root, false))
+        {
+            Some(root)
+        } else {
+            let scoped_roots_display = scoped_roots
+                .iter()
+                .map(|scoped_root| scoped_root.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                project_id = trimmed_project_id,
+                configured_root = %root.display(),
+                scoped_roots = %scoped_roots_display,
+                "Ignoring markdown_editor_path because it falls outside the project-scoped note roots"
+            );
+            None
+        }
     });
 
     Ok(ProjectNotesContext {
