@@ -50,6 +50,7 @@ import type { DashboardProfile } from "@/lib/dashboardProfile";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
+import { agentModelAccessBadgeLabel, agentSetupStatusLabel } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
@@ -2665,11 +2666,11 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
 
   async function handleSubmitPreferences(
     acknowledgeOnboarding: boolean,
-    options?: { closeDialog?: boolean },
+    options?: { closeDialog?: boolean; openAgentSetup?: boolean },
   ): Promise<boolean> {
     if (!canSubmitPreferences || creating) return false;
     const saved = await onSave(buildNextPreferences(acknowledgeOnboarding), options);
-    if (saved && selectedCodingAgentState && !selectedCodingAgentState.ready) {
+    if (saved && options?.openAgentSetup !== false && selectedCodingAgentState && !selectedCodingAgentState.ready) {
       onOpenAgentSetup(codingAgent);
     }
     return saved;
@@ -2700,10 +2701,16 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     onOnboardingComplete?.({ needsProject: false });
   }
 
+  async function handleSkipOnboarding() {
+    const saved = await handleSubmitPreferences(true, { closeDialog: true, openAgentSetup: false });
+    if (!saved) return;
+    onOnboardingComplete?.({ needsProject: false });
+  }
+
   return (
     <>
       <div
-        className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center"
+        className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-6"
         onClick={() => {
           if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen || filesystemRootPickerOpen) return;
           onClose();
@@ -2711,7 +2718,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
         role="presentation"
       >
         <div
-          className="flex h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(92vh,760px)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[1120px] sm:rounded-[6px] sm:border sm:flex-row"
+          className="flex h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-h-[calc(100dvh-3rem)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row"
           onClick={(event) => event.stopPropagation()}
         >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
@@ -2771,7 +2778,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
               </button>
             </header>
 
-            <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
+            <div className="min-h-0 flex-1 overflow-auto px-4 py-3 pb-8 sm:px-6 sm:py-4 sm:pb-8">
               {isPreferenceFormTab ? (
                 <div className="space-y-5">
                   {isOnboarding && (
@@ -2790,7 +2797,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     <p className="text-[12px] text-[var(--vk-text-muted)]">
                       Select the default coding agent, review its setup state, and confirm which models Conductor can offer for it.
                     </p>
-                    <div className="grid gap-3">
+                    <div className="grid gap-3 lg:grid-cols-2">
                       {orderedAgentOptions.map((agent) => {
                         const selected = codingAgent === agent;
                         const agentState = agentStates[normalizeAgentName(agent)] ?? null;
@@ -2798,15 +2805,12 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                         const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
                         const previewModels = availableModels.slice(0, 3);
                         const additionalModels = availableModels.length - previewModels.length;
-                        const statusLabel = !agentState?.installed
-                          ? "Not installed"
-                          : !agentState.ready
-                            ? "Setup required"
-                            : "Ready";
+                        const statusLabel = agentSetupStatusLabel(agentState);
+                        const accessBadgeLabel = agentModelAccessBadgeLabel(accessLabel);
                         return (
                           <div
                             key={agent}
-                            className={`flex flex-col gap-3 rounded-[4px] border px-3 py-3 text-left sm:flex-row sm:items-start ${
+                            className={`flex min-h-full flex-col gap-3 rounded-[4px] border px-3 py-3 text-left ${
                               selected
                                 ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
                                 : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
@@ -2820,9 +2824,9 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                                   <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
                                     {statusLabel}
                                   </span>
-                                  {accessLabel ? (
+                                  {accessBadgeLabel ? (
                                     <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
-                                      {accessLabel}
+                                      {accessBadgeLabel}
                                     </span>
                                   ) : null}
                                 </div>
@@ -2856,7 +2860,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                                 ) : null}
                               </div>
                             </div>
-                            <div className="flex shrink-0 items-center gap-2 self-start sm:ml-auto">
+                            <div className="mt-auto flex shrink-0 items-center gap-2 self-start">
                               {!agentState?.ready ? (
                                 <button
                                   type="button"
@@ -3888,6 +3892,18 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                         Saving...
                       </>
                     ) : "Save Access"}
+                  </button>
+                )}
+                {isOnboarding && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleSkipOnboarding();
+                    }}
+                    disabled={!canSubmitPreferences || isBusy}
+                    className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  >
+                    Skip for now
                   </button>
                 )}
                 {isOnboarding && (
