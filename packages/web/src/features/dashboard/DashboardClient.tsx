@@ -86,6 +86,7 @@ import {
 } from "@/lib/bridgeScope";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { buildDashboardSessionSelection } from "@/lib/dashboardSessionSelection";
+import { agentSetupStatusLabel } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import {
@@ -3056,7 +3057,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             <div>{getAgentLabel(agent)}</div>
                             {!agentState?.ready ? (
                               <div className="truncate text-[12px] leading-[16px] text-[var(--vk-text-muted)]">
-                                {agentState?.installed ? "Setup required" : "Not installed"}
+                                {agentSetupStatusLabel(agentState)}
                               </div>
                             ) : null}
                           </div>
