@@ -7,10 +7,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
+  ArrowRight,
   Braces,
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   ExternalLink,
   FileText,
   FolderOpen,
@@ -23,6 +25,7 @@ import {
   Search,
   Send,
   Sparkles,
+  Terminal,
   TerminalSquare,
   Wrench,
   X,
@@ -38,6 +41,7 @@ import {
   findDispatcherBoardRefreshReason,
 } from "@/lib/dispatcherBoardRefresh";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
+import { useAgents, type Agent } from "@/hooks/useAgents";
 import { iterateSseFrames } from "@/lib/sseFetch";
 import { isDispatcherFeedNearBottom } from "@/components/dispatcher/dispatcherFeedScroll";
 import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
@@ -832,14 +836,24 @@ function ProjectAgentSelect({
   project,
   disabled = false,
   saving = false,
+  agents = [],
   onChange,
 }: {
   project: RepositorySettingsPayload | null;
   disabled?: boolean;
   saving?: boolean;
+  agents?: Agent[];
   onChange: (value: string) => void;
 }) {
   const activeAgent = project?.agent?.trim() || "codex";
+
+  // Check if active agent is installed
+  const activeAgentInfo = agents.find(
+    (a) => a.name.toLowerCase() === activeAgent.toLowerCase()
+  );
+  const isActiveInstalled = activeAgentInfo ? (activeAgentInfo.installed ?? true) : true;
+
+  const agentsList = agents && agents.length > 0 ? agents : KNOWN_AGENTS;
 
   return (
     <DropdownMenu.Root>
@@ -856,8 +870,11 @@ function ProjectAgentSelect({
               seed={{ label: activeAgent }}
               className="h-5 w-5 border-none bg-transparent"
             />
-            <span className="truncate">
+            <span className="truncate flex items-center gap-1.5">
               {saving ? "Saving agent…" : `Coding Agent · ${formatAgentName(activeAgent)}`}
+              {!isActiveInstalled && (
+                <span className="inline-flex h-2 w-2 rounded-full bg-[var(--vk-orange)] animate-pulse" title="Not installed" />
+              )}
             </span>
           </span>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
@@ -872,8 +889,10 @@ function ProjectAgentSelect({
           <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
             Coding agent
           </p>
-          {KNOWN_AGENTS.map((agent) => {
+          {agentsList.map((agent) => {
             const selected = agent.name === activeAgent;
+            const isInstalled = (agent as Agent).installed ?? true;
+
             return (
               <DropdownMenu.Item
                 key={agent.name}
@@ -885,7 +904,18 @@ function ProjectAgentSelect({
                   className="h-5 w-5 border-none bg-transparent"
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium">{agent.label}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="truncate text-[13px] font-medium">{agent.label || agent.name}</p>
+                    {isInstalled ? (
+                      <span className="inline-flex items-center rounded-full bg-[color:color-mix(in_srgb,var(--vk-green)_15%,transparent)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--vk-green)] border border-[color:color-mix(in_srgb,var(--vk-green)_25%,transparent)]">
+                        Ready
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-full bg-[color:color-mix(in_srgb,var(--vk-text-muted)_20%,transparent)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--vk-text-muted)] border border-[rgba(255,255,255,0.05)]">
+                        Not Installed
+                      </span>
+                    )}
+                  </div>
                   <p className="truncate text-[11px] text-[rgba(255,255,255,0.6)]">{agent.description}</p>
                 </div>
                 {selected ? <Check className="h-4 w-4 text-white" /> : null}
@@ -994,6 +1024,28 @@ export function DispatcherSessionPane({
   const [repositoryLoading, setRepositoryLoading] = useState(true);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [savingAgent, setSavingAgent] = useState(false);
+  const { agents: fetchedAgents = [] } = useAgents(bridgeId);
+  const [commandCopied, setCommandCopied] = useState(false);
+
+  const activeAgentName = useMemo(
+    () => repository?.agent?.trim() || session.metadata.agent?.trim() || "codex",
+    [repository?.agent, session.metadata.agent],
+  );
+
+  const activeAgentInfo = useMemo(() => {
+    return fetchedAgents.find(
+      (a) => a.name.toLowerCase() === activeAgentName.toLowerCase()
+    );
+  }, [fetchedAgents, activeAgentName]);
+
+  const isActiveInstalled = useMemo(() => {
+    return activeAgentInfo ? (activeAgentInfo.installed ?? true) : true;
+  }, [activeAgentInfo]);
+
+  useEffect(() => {
+    setCommandCopied(false);
+  }, [activeAgentName]);
+
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
@@ -1678,9 +1730,113 @@ export function DispatcherSessionPane({
             ) : null}
 
             {payload.entries.length === 0 ? (
-              <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                No dispatcher activity yet.
-              </div>
+              !isActiveInstalled ? (
+                <div className="rounded-[16px] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,rgba(255,255,255,0.06))] bg-[rgba(25,23,22,0.65)] backdrop-blur-md p-5 shadow-[0_15px_40px_rgba(0,0,0,0.35)] relative overflow-hidden transition-all duration-300 hover:border-[color:color-mix(in_srgb,var(--vk-orange)_40%,rgba(255,255,255,0.1))]">
+                  <div className="absolute top-0 right-0 h-40 w-40 bg-[radial-gradient(circle_at_top_right,color-mix(in_srgb,var(--vk-orange)_12%,transparent),transparent_70%)] pointer-events-none" />
+                  
+                  <div className="flex items-start gap-3">
+                    <div className="p-2 rounded-[10px] bg-[color:color-mix(in_srgb,var(--vk-orange)_15%,transparent)] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,transparent)] text-[var(--vk-orange)] shrink-0">
+                      <AlertCircle className="h-5 w-5 animate-pulse" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h4 className="text-[14px] font-semibold text-[#f5ebd7] tracking-wide">
+                        Coding Agent Setup Required
+                      </h4>
+                      <p className="mt-1.5 text-[12px] leading-5 text-[rgba(255,255,255,0.7)]">
+                        The selected agent <strong className="text-white">{formatAgentName(activeAgentName)}</strong> is not installed or configured on your system. Conductor orchestrates tasks by dispatching them to this agent.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Install instruction section */}
+                  {activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint ? (
+                    <div className="mt-4">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--vk-text-muted)] mb-2">
+                        Installation Command
+                      </div>
+                      <div className="flex items-center gap-2 rounded-[8px] border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.25)] p-2 font-mono text-[12px] text-[#e0dacb]">
+                        <Terminal className="h-3.5 w-3.5 text-[rgba(255,255,255,0.4)] shrink-0" />
+                        <span className="flex-1 truncate select-all">{activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const cmd = activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint;
+                            if (cmd) {
+                              void navigator.clipboard.writeText(cmd);
+                              setCommandCopied(true);
+                              setTimeout(() => setCommandCopied(false), 2000);
+                            }
+                          }}
+                          className="p-1 rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[rgba(255,255,255,0.06)] hover:text-white transition"
+                          title="Copy install command"
+                        >
+                          {commandCopied ? (
+                            <Check className="h-3.5 w-3.5 text-[var(--vk-green)]" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Help links */}
+                  <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-[rgba(255,255,255,0.06)] pt-3.5">
+                    {activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage ? (
+                      <a
+                        href={activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage || undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
+                      >
+                        <span>Visit homepage</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null}
+                    
+                    {activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl ? (
+                      <a
+                        href={activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl || undefined}
+                        target="_blank"
+rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
+                      >
+                        <span>Setup credentials</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null}
+                  </div>
+
+                  {/* Quick switcher to ready/installed agents */}
+                  {fetchedAgents.filter(a => a.installed !== false && a.name !== activeAgentName).length > 0 ? (
+                    <div className="mt-4 border-t border-[rgba(255,255,255,0.06)] pt-3">
+                      <div className="text-[11px] text-[rgba(255,255,255,0.5)] mb-2">
+                        Or switch to an installed agent ready on your system:
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {fetchedAgents
+                          .filter(a => a.installed !== false && a.name !== activeAgentName)
+                          .map(a => (
+                            <button
+                              key={a.name}
+                              type="button"
+                              onClick={() => void handleAgentChange(a.name)}
+                              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[11px] text-[#f3efea] transition hover:bg-[rgba(255,255,255,0.08)] hover:border-[rgba(255,255,255,0.15)]"
+                            >
+                              <AgentTileIcon seed={{ label: a.name }} className="h-3.5 w-3.5 border-none bg-transparent" />
+                              <span>{a.label || a.name}</span>
+                              <ArrowRight className="h-2.5 w-2.5 opacity-60 ml-0.5" />
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                  No dispatcher activity yet.
+                </div>
+              )
             ) : (
               payload.entries.map((entry) => (
                 <SessionFeedMessage key={entry.id} entry={entry} session={session} />
@@ -1698,6 +1854,7 @@ export function DispatcherSessionPane({
                 project={repository}
                 disabled={repositoryLoading}
                 saving={savingAgent}
+                agents={fetchedAgents}
                 onChange={(value) => void handleAgentChange(value)}
               />
             ) : null}
@@ -1815,8 +1972,12 @@ export function DispatcherSessionPane({
           <textarea
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
-            placeholder="Ask the dispatcher to shape work, create tasks, or update the board..."
-            disabled={!canContinue || sending}
+            placeholder={
+              !isActiveInstalled
+                ? `Please install ${formatAgentName(activeAgentName)} or switch agents to send messages...`
+                : "Ask the dispatcher to shape work, create tasks, or update the board..."
+            }
+            disabled={!canContinue || sending || !isActiveInstalled}
             rows={2}
             className="w-full resize-none bg-transparent text-[15px] leading-5 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60 sm:text-[16px] sm:leading-6"
           />
@@ -1838,7 +1999,7 @@ export function DispatcherSessionPane({
                 type="submit"
                 variant="outline"
                 size="sm"
-                disabled={!canContinue || sending || composerValue.trim().length === 0}
+                disabled={!canContinue || sending || composerValue.trim().length === 0 || !isActiveInstalled}
                 className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
               >
                 {sending ? (
