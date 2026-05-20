@@ -1762,9 +1762,14 @@ export function DispatcherSessionPane({
                           onClick={() => {
                             const cmd = activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint;
                             if (cmd) {
-                              void navigator.clipboard.writeText(cmd);
-                              setCommandCopied(true);
-                              setTimeout(() => setCommandCopied(false), 2000);
+                              navigator.clipboard.writeText(cmd)
+                                .then(() => {
+                                  setCommandCopied(true);
+                                  setTimeout(() => setCommandCopied(false), 2000);
+                                })
+                                .catch((err) => {
+                                  console.error("Failed to copy installation command to clipboard:", err);
+                                });
                             }
                           }}
                           className="p-1 rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[rgba(255,255,255,0.06)] hover:text-white transition"
