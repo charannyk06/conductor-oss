@@ -11,7 +11,7 @@
     "test": "tsx --test src/lib/auth.test.ts src/lib/security.test.ts src/lib/types.test.ts src/sessions/SessionStore.test.ts src/browser/tunnel.test.ts"
   },
   "dependencies": {
-    "@puppeteer/browsers": "^2.13.0",
+    "@puppeteer/browsers": "^3.0.3",
     "fastify": "^5.8.5",
     "puppeteer-core": "^24.38.0"
   },
