@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
 
       - name: Run Scorecards
-        uses: ossf/scorecard-action@v2 # stable tag; exact SHA not available locally
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           results_file: results.sarif
