@@ -32,7 +32,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run dependency audit
-        run: bun pm audit
+        run: bun audit
         continue-on-error: ${{ github.event_name == 'pull_request' }}
 
       - name: Install Rust toolchain
