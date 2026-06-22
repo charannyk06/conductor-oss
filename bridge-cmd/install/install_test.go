@@ -105,14 +105,16 @@ func TestBuildRestartCommandWindows(t *testing.T) {
 
 	script := cmd.args[1]
 	for _, want := range []string{
-		"taskkill /F /IM conductor-bridge.exe /T",
-		"taskkill /F /IM conductor-bridge /T",
-		"timeout /t 1 /nobreak",
-		"start \"\" /B",
+		"start \"Conductor Bridge\" /MIN",
 		"daemon",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("windows restart script %q does not contain %q", script, want)
+		}
+	}
+	for _, forbidden := range []string{"taskkill", "timeout /t"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("windows restart script %q should not contain %q", script, forbidden)
 		}
 	}
 }

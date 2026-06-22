@@ -230,16 +230,16 @@ func Run(ctx context.Context, opts Options) error {
 
 func ensureStartupDaemon(ctx context.Context, relayURL string, store *token.Store, stdout io.Writer, stderr io.Writer) error {
 	if err := restartBridgeService(); err == nil {
-		fmt.Fprintln(stdout, "Bridge background service restarted.")
+		announceBackgroundRestarted(stdout)
 		return nil
 	} else {
 		fmt.Fprintf(stderr, "bridge service restart unavailable, attempting automatic service install: %v\n", err)
 	}
 
 	if err := installBridgeService(); err == nil {
-		fmt.Fprintln(stdout, "Bridge background service installed.")
+		announceBackgroundInstalled(stdout)
 		if err := restartBridgeService(); err == nil {
-			fmt.Fprintln(stdout, "Bridge background service restarted.")
+			announceBackgroundRestarted(stdout)
 			return nil
 		}
 		fmt.Fprintln(stderr, "bridge service install completed, but automatic restart still failed. Continuing in the current terminal.")
@@ -253,6 +253,22 @@ func ensureStartupDaemon(ctx context.Context, relayURL string, store *token.Stor
 		Store:    store,
 		Stderr:   stderr,
 	})
+}
+
+func announceBackgroundInstalled(stdout io.Writer) {
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(stdout, "Bridge startup launcher installed.")
+		return
+	}
+	fmt.Fprintln(stdout, "Bridge background service installed.")
+}
+
+func announceBackgroundRestarted(stdout io.Writer) {
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(stdout, "Bridge background daemon started.")
+		return
+	}
+	fmt.Fprintln(stdout, "Bridge background service restarted.")
 }
 
 func loadSavedDashboardURL(store *dashboardurl.Store) (string, error) {

@@ -249,7 +249,20 @@ func findTtyd() (string, error) {
 			return loc, nil
 		}
 	}
-	return "", fmt.Errorf("ttyd not found in PATH or common locations; install: brew install ttyd")
+	return "", fmt.Errorf("ttyd not found in PATH or common locations; %s", ttydInstallHintForGOOS(runtime.GOOS))
+}
+
+func ttydInstallHintForGOOS(goos string) string {
+	switch goos {
+	case "darwin":
+		return "install with Homebrew: brew install ttyd"
+	case "linux":
+		return "install ttyd with your system package manager or from https://github.com/tsl0922/ttyd"
+	case "windows":
+		return "ttyd is optional on Windows; install a Windows ttyd build or continue without the legacy direct terminal mirror"
+	default:
+		return "ttyd is optional; install it for the legacy direct terminal mirror if needed"
+	}
 }
 
 func runSession(ctx context.Context, opts sessionOptions) (bool, error) {

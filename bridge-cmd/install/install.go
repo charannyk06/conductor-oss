@@ -293,7 +293,7 @@ func buildRestartCommand(goos, home string) (restartCommand, error) {
 			binaryPath = filepath.Join(home, ".conductor", "bin", "conductor-bridge")
 		}
 		script := fmt.Sprintf(
-			"@echo off\r\ntaskkill /F /IM conductor-bridge.exe /T >nul 2>&1\r\ntaskkill /F /IM conductor-bridge /T >nul 2>&1\r\ntimeout /t 1 /nobreak >nul\r\nstart \"\" /B \"%s\" daemon\r\n",
+			"@echo off\r\nstart \"Conductor Bridge\" /MIN \"%s\" daemon\r\n",
 			binaryPath,
 		)
 		return restartCommand{

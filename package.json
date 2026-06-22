@@ -32,9 +32,9 @@
     "smoke:openclaw": "bun scripts/openclaw-dispatcher-smoke.mjs"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.30.0",
+    "@changesets/cli": "^2.31.0",
     "@types/node": "^25.3.3",
-    "puppeteer": "^24.38.0",
+    "puppeteer": "^25.1.0",
     "typescript": "^6.0.3"
   },
   "overrides": {
@@ -44,7 +44,8 @@
     "ip-address": "10.2.0",
     "picomatch": "2.3.2",
     "postcss": "8.5.15",
-    "ws": "8.21.0"
+    "ws": "8.21.0",
+    "js-yaml": "4.2.0"
   },
   "homepage": "https://github.com/charannyk06/conductor-oss",
   "keywords": [

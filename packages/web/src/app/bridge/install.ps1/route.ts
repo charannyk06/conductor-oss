@@ -29,12 +29,39 @@ $SourceArchiveUrl = "${sourceArchiveUrl}"
 $ConductorHome = Join-Path $HOME ".conductor"
 $InstallBinDir = Join-Path $ConductorHome "bin"
 $ConductorNpmPrefix = Join-Path $ConductorHome "npm"
-$ConductorNpmBinDir = Join-Path $ConductorNpmPrefix "bin"
+$ConductorNpmBinDir = $ConductorNpmPrefix
 $BridgeBin = Join-Path $InstallBinDir "conductor-bridge.exe"
 $LocalGoRoot = Join-Path $ConductorHome "go"
 
+function Resolve-WindowsArchitecture {
+  $runtimeInformation = [type]::GetType("System.Runtime.InteropServices.RuntimeInformation")
+  if ($runtimeInformation -and $runtimeInformation::OSArchitecture) {
+    return $runtimeInformation::OSArchitecture.ToString()
+  }
+
+  $processorArchitecture = ""
+  if ($env:PROCESSOR_ARCHITECTURE) {
+    $processorArchitecture = $env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()
+  }
+  switch ($processorArchitecture) {
+    "AMD64" { return "X64" }
+    "ARM64" { return "Arm64" }
+    default {
+      $wow64Architecture = ""
+      if ($env:PROCESSOR_ARCHITEW6432) {
+        $wow64Architecture = $env:PROCESSOR_ARCHITEW6432.ToUpperInvariant()
+      }
+      switch ($wow64Architecture) {
+        "AMD64" { return "X64" }
+        "ARM64" { return "Arm64" }
+        default { throw "Unsupported Windows architecture. Set PROCESSOR_ARCHITECTURE to AMD64 or ARM64 and retry." }
+      }
+    }
+  }
+}
+
 function Resolve-GoArchiveUrl {
-  $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+  $arch = Resolve-WindowsArchitecture
   switch ($arch) {
     "X64" { return "https://go.dev/dl/go$GoVersion.windows-amd64.zip" }
     "Arm64" { return "https://go.dev/dl/go$GoVersion.windows-arm64.zip" }
@@ -198,6 +225,8 @@ function Ensure-ConductorCli {
 
 function Resolve-ConductorCommandPath {
   $candidates = @(
+    (Join-Path $ConductorNpmPrefix "conductor.cmd"),
+    (Join-Path $ConductorNpmPrefix "conductor"),
     (Join-Path $ConductorNpmPrefix "bin\\conductor.cmd"),
     (Join-Path $ConductorNpmPrefix "bin\\conductor"),
     (Join-Path $HOME ".local\\bin\\conductor.cmd"),
@@ -247,7 +276,7 @@ $goExe = Ensure-Go
 Build-Bridge $goExe
 Ensure-ConductorCli
 Configure-UserPath
-Write-Host "Installing bridge background service..."
+Write-Host "Installing bridge startup launcher..."
 & $BridgeBin install
 if ($LASTEXITCODE -ne 0) {
   throw "Bridge install failed with exit code $LASTEXITCODE"
@@ -255,11 +284,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Installed conductor-bridge to $BridgeBin"
 if ($DashboardUrl) {
-  Write-Host "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url $DashboardUrl"
+  Write-Host "Bridge startup launcher installed. Future reconnects can use: conductor-bridge connect --dashboard-url $DashboardUrl"
 } else {
-  Write-Host "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
+  Write-Host "Bridge startup launcher installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
 }
-Write-Host "Conductor CLI installed for local backend. Bridge service ready."
+Write-Host "Conductor CLI installed for local backend. Bridge startup launcher ready."
 Run-Connect
 `;
 }
