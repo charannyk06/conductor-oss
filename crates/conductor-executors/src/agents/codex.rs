@@ -20,6 +20,44 @@ pub struct CodexExecutor {
     binary: PathBuf,
 }
 
+fn normalize_codex_model(model: Option<&str>) -> Option<String> {
+    model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_codex_reasoning_effort(reasoning_effort: Option<&str>) -> Option<String> {
+    let normalized = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_ascii_lowercase();
+
+    let normalized = match normalized.as_str() {
+        "minimal" | "min" | "low" => "low",
+        "medium" | "med" => "medium",
+        "high" => "high",
+        "max" | "xhigh" | "extra-high" | "extra_high" | "extra high" => "xhigh",
+        _ => return None,
+    };
+
+    Some(normalized.to_string())
+}
+
+fn push_codex_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_codex_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
+fn push_codex_reasoning_arg(args: &mut Vec<String>, reasoning_effort: Option<&str>) {
+    if let Some(reasoning_effort) = normalize_codex_reasoning_effort(reasoning_effort) {
+        args.push("-c".to_string());
+        args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+    }
+}
+
 fn build_codex_spawn_env(overrides: &HashMap<String, String>) -> HashMap<String, String> {
     let mut env = HashMap::new();
     for key in [
@@ -442,15 +480,8 @@ impl Executor for CodexExecutor {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-
-            if let Some(reasoning_effort) = &options.reasoning_effort {
-                args.push("-c".to_string());
-                args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-            }
+            push_codex_model_arg(&mut args, options.model.as_deref());
+            push_codex_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
             args.extend(options.sanitized_extra_args());
 
@@ -475,15 +506,8 @@ impl Executor for CodexExecutor {
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
 
-                if let Some(model) = &options.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-
-                if let Some(reasoning_effort) = &options.reasoning_effort {
-                    args.push("-c".to_string());
-                    args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-                }
+                push_codex_model_arg(&mut args, options.model.as_deref());
+                push_codex_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
                 if options.skip_permissions {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -494,15 +518,8 @@ impl Executor for CodexExecutor {
                 return args;
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-
-            if let Some(reasoning_effort) = &options.reasoning_effort {
-                args.push("-c".to_string());
-                args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-            }
+            push_codex_model_arg(&mut args, options.model.as_deref());
+            push_codex_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
             if options.skip_permissions {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -527,15 +544,8 @@ impl Executor for CodexExecutor {
             args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
 
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if let Some(reasoning_effort) = &options.reasoning_effort {
-            args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
-        }
+        push_codex_model_arg(&mut args, options.model.as_deref());
+        push_codex_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
         args.extend(options.sanitized_extra_args());
 
@@ -1115,6 +1125,28 @@ mod tests {
         assert!(args.contains(&"gpt-5".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+    }
+
+    #[test]
+    fn build_args_normalizes_legacy_reasoning_aliases() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            reasoning_effort: Some("max".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(args.contains(&"model_reasoning_effort=\"xhigh\"".to_string()));
+        assert!(!args.contains(&"model_reasoning_effort=\"max\"".to_string()));
     }
 
     #[test]

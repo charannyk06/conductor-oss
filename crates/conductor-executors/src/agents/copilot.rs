@@ -10,6 +10,25 @@ use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{spawn_process, spawn_process_no_stdin};
 
+fn normalize_copilot_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "gpt-5" | "gpt-5.4" | "gpt-5.5" => Some("gpt-5.2".to_string()),
+        model if model.starts_with("gpt-") || model.starts_with("claude-") => {
+            Some(value.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn push_copilot_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_copilot_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
 #[derive(Clone)]
 pub struct CopilotExecutor {
     binary: PathBuf,
@@ -82,10 +101,7 @@ impl Executor for CopilotExecutor {
                 args.push("--allow-all".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+            push_copilot_model_arg(&mut args, options.model.as_deref());
             push_reasoning_effort_arg(&mut args, options.reasoning_effort.as_deref());
 
             args.extend(options.sanitized_extra_args());
@@ -106,10 +122,7 @@ impl Executor for CopilotExecutor {
             "on".to_string(),
             "--allow-all-tools".to_string(),
         ];
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
+        push_copilot_model_arg(&mut args, options.model.as_deref());
         push_reasoning_effort_arg(&mut args, options.reasoning_effort.as_deref());
         if options.skip_permissions {
             args.push("--allow-all".to_string());
@@ -214,15 +227,22 @@ impl Executor for CopilotExecutor {
 }
 
 fn push_reasoning_effort_arg(args: &mut Vec<String>, reasoning_effort: Option<&str>) {
-    let Some(reasoning_effort) = reasoning_effort
+    let Some(raw_reasoning_effort) = reasoning_effort
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
         return;
     };
+    let normalized = match raw_reasoning_effort.to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "medium" | "med" => "medium",
+        "high" => "high",
+        "xhigh" | "extra-high" | "extra_high" | "extra high" | "max" => "xhigh",
+        _ => return,
+    };
 
     args.push("--reasoning-effort".to_string());
-    args.push(reasoning_effort.to_ascii_lowercase());
+    args.push(normalized.to_string());
 }
 
 fn extract_copilot_text(data: &Value) -> Option<String> {
@@ -369,7 +389,7 @@ mod tests {
 
         assert!(args.contains(&"--allow-all".to_string()));
         assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"gpt-5".to_string()));
+        assert!(args.contains(&"gpt-5.2".to_string()));
         assert!(args.contains(&"--foo".to_string()));
         assert_eq!(
             args.iter().position(|arg| arg == "-i"),

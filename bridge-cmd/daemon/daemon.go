@@ -19,6 +19,8 @@ import (
 
 var ErrNotPaired = errors.New("bridge is not paired")
 
+const defaultPairingValidationTimeout = 8 * time.Second
+
 type Options struct {
 	RelayURL     string
 	Store        *token.Store
@@ -54,10 +56,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		return err
 	}
-	if err := validateSavedPairing(ctx, opts.RelayURL, refreshToken); err != nil {
-		if errors.Is(err, ErrNotPaired) {
-			fmt.Fprintln(stderr, "Saved bridge pairing is invalid or expired. Run 'conductor-bridge connect' again.")
-		}
+	if err := validateSavedPairingBestEffort(ctx, opts.RelayURL, refreshToken, stderr, defaultPairingValidationTimeout); err != nil {
 		return err
 	}
 
@@ -118,6 +117,26 @@ func Run(ctx context.Context, opts Options) error {
 			clientCancel, clientDone = startClient(ctx, opts.RelayURL, currentToken, stderr)
 		}
 	}
+}
+
+func validateSavedPairingBestEffort(ctx context.Context, relayURL string, refreshToken string, stderr io.Writer, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultPairingValidationTimeout
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if err := validateSavedPairing(validationCtx, relayURL, refreshToken); err != nil {
+		if errors.Is(err, ErrNotPaired) {
+			fmt.Fprintln(stderr, "Saved bridge pairing is invalid or expired. Run 'conductor-bridge connect' again.")
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fmt.Fprintf(stderr, "saved bridge pairing validation unavailable; continuing with cached pairing: %v\n", err)
+	}
+	return nil
 }
 
 func validateSavedPairing(ctx context.Context, relayURL string, refreshToken string) error {

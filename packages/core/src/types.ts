@@ -1072,10 +1072,10 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
           "Sonnet 4"
         ),
         modelOption(
-          "opus",
+          "opus-4.1",
           "Cursor Agent's Opus preset alias.",
           ["default"],
-          "Opus"
+          "Opus 4.1"
         ),
       ],
     },

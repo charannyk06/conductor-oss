@@ -465,7 +465,7 @@ fn read_text_file(path: &Path) -> Option<String> {
 async fn read_command_output(commands: &[&str], args: &[&str]) -> Option<String> {
     for cmd in commands {
         let result = tokio::time::timeout(
-            Duration::from_millis(3_000),
+            Duration::from_millis(8_000),
             Command::new(cmd).args(args).output(),
         )
         .await
@@ -487,7 +487,7 @@ async fn read_command_output(commands: &[&str], args: &[&str]) -> Option<String>
 async fn read_command_help(commands: &[&str]) -> Option<String> {
     for cmd in commands {
         let result = tokio::time::timeout(
-            Duration::from_millis(1_500),
+            Duration::from_millis(6_000),
             Command::new(cmd).arg("--help").output(),
         )
         .await
@@ -1026,7 +1026,7 @@ fn collect_claude_stats_models(stats: &Value) -> Vec<String> {
 
 async fn detect_claude_reasoning_options(binary_path: &Path) -> Vec<Value> {
     let output = tokio::time::timeout(
-        Duration::from_millis(1_500),
+        Duration::from_millis(6_000),
         Command::new(binary_path).arg("--help").output(),
     )
     .await
@@ -1593,7 +1593,7 @@ async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Optio
     }
 
     if models.is_empty() {
-        return None;
+        return default_access_catalog("cursor-cli", vec![], None, Some("auto"), vec![], None);
     }
 
     default_access_catalog(
@@ -1761,7 +1761,13 @@ fn parse_pi_list_models_output(output: &str) -> Vec<PiModelRow> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if line.starts_with("provider") || line.starts_with("npm ") {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("provider")
+            || lower.starts_with("npm ")
+            || lower.starts_with("no models available")
+            || lower.starts_with("use /login")
+            || lower.starts_with("see:")
+        {
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -1770,7 +1776,13 @@ fn parse_pi_list_models_output(output: &str) -> Vec<PiModelRow> {
         }
         let provider = parts[0].trim();
         let model = parts[1].trim();
-        if provider.is_empty() || model.is_empty() {
+        if provider.is_empty()
+            || model.is_empty()
+            || !provider
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            || model.eq_ignore_ascii_case("models")
+        {
             continue;
         }
         let id = format!("{provider}/{model}");
@@ -2046,6 +2058,23 @@ fn read_copilot_config_model() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn is_valid_copilot_model_id(model_id: &str) -> bool {
+    let normalized = model_id.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if matches!(
+        normalized.as_str(),
+        "text" | "json" | "auto" | "default" | "interactive" | "plan" | "autopilot"
+    ) {
+        return false;
+    }
+    normalized.starts_with("gpt-")
+        || normalized.starts_with("claude-")
+        || normalized.starts_with("gemini-")
+        || normalized.starts_with("o")
+}
+
 fn collect_copilot_session_observations(contents: &[String]) -> (Vec<String>, Option<String>) {
     let mut seen_models = HashSet::new();
     let mut models = Vec::new();
@@ -2071,7 +2100,7 @@ fn collect_copilot_session_observations(contents: &[String]) -> (Vec<String>, Op
                 else {
                     continue;
                 };
-                if seen_models.insert(model_id.to_string()) {
+                if is_valid_copilot_model_id(model_id) && seen_models.insert(model_id.to_string()) {
                     models.push(model_id.to_string());
                 }
             }
@@ -2108,12 +2137,15 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
     let mut seen = HashSet::new();
     let mut model_ids = Vec::new();
     for model_id in extract_quoted_choices_from_help(&help, "--model <model>") {
-        if seen.insert(model_id.clone()) {
+        if is_valid_copilot_model_id(&model_id) && seen.insert(model_id.clone()) {
             model_ids.push(model_id);
         }
     }
 
-    if let Some(config_model_id) = config_model.clone() {
+    if let Some(config_model_id) = config_model
+        .clone()
+        .filter(|model_id| is_valid_copilot_model_id(model_id))
+    {
         if seen.insert(config_model_id.clone()) {
             model_ids.push(config_model_id);
         }
@@ -2140,7 +2172,7 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
         .collect();
 
     if model_ids.is_empty() {
-        return None;
+        model_ids.push("gpt-5.2".to_string());
     }
 
     let models: Vec<Value> = model_ids
@@ -2508,6 +2540,14 @@ anthropic claude-haiku 200K     8K       no        no",
     }
 
     #[test]
+    fn parse_pi_list_models_output_ignores_no_models_message() {
+        let rows = parse_pi_list_models_output(
+            "No models available. Use /login to log into a provider via OAuth or API key. See:\n  docs/providers.md",
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[test]
     fn parse_opencode_verbose_models_collects_reasoning_variants() {
         let output = r#"
 opencode/gpt-5-nano
@@ -2539,7 +2579,9 @@ opencode/gpt-5-nano
         let contents = vec![r#"
 {"type":"session.model_change","data":{"newModel":"claude-haiku-4.5","reasoningEffort":"xhigh"}}
 {"type":"tool.execution_complete","data":{"model":"gpt-5.4"}}
+{"type":"tool.execution_complete","data":{"model":"json"}}
 {"type":"session.shutdown","data":{"currentModel":"claude-sonnet-4.6"}}
+{"type":"session.mode_change","data":{"currentModel":"auto"}}
 "#
         .to_string()];
 
