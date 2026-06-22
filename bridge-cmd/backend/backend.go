@@ -51,6 +51,19 @@ func isNodeScriptBinary(binaryPath string) bool {
 	return strings.Contains(firstLine, "node")
 }
 
+func isWindowsCommandShim(binaryPath string) bool {
+	switch strings.ToLower(filepath.Ext(binaryPath)) {
+	case ".cmd", ".bat":
+		return true
+	default:
+		return false
+	}
+}
+
+func isJavaScriptCliLauncher(binaryPath string) bool {
+	return isNodeScriptBinary(binaryPath) || isWindowsCommandShim(binaryPath)
+}
+
 func resolveBundledNativeConductorBinary(binaryPath string) string {
 	if !isNodeScriptBinary(binaryPath) {
 		return ""
@@ -258,9 +271,13 @@ func ensureConductorCli() error {
 	}
 
 	npmPrefix := filepath.Join(homeDir, ".conductor", "npm")
+	npmExecutableDir := npmGlobalExecutableDir(npmPrefix)
 	wrapperDir := filepath.Join(homeDir, ".conductor", "bin")
 	if mkErr := os.MkdirAll(npmPrefix, 0o700); mkErr != nil {
 		return fmt.Errorf("create npm prefix: %w", mkErr)
+	}
+	if mkErr := os.MkdirAll(npmExecutableDir, 0o700); mkErr != nil {
+		return fmt.Errorf("create npm executable dir: %w", mkErr)
 	}
 	if mkErr := os.MkdirAll(wrapperDir, 0o700); mkErr != nil {
 		return fmt.Errorf("create wrapper dir: %w", mkErr)
@@ -283,20 +300,64 @@ func ensureConductorCli() error {
 		}
 	}
 
-	// Locate the installed binary and symlink into ~/.conductor/bin.
-	candidate := filepath.Join(npmPrefix, "bin", "conductor")
-	if info, statErr := os.Stat(candidate); statErr != nil || info.IsDir() {
-		return fmt.Errorf("conductor-oss installed but binary not found at %s", candidate)
+	// Locate the installed binary and expose it through ~/.conductor/bin.
+	candidate := firstExistingFile(conductorCommandCandidates(npmExecutableDir, "conductor"))
+	if candidate == "" {
+		return fmt.Errorf("conductor-oss installed but binary not found under %s", npmExecutableDir)
 	}
 
-	symlinkPath := filepath.Join(wrapperDir, "conductor")
-	_ = os.Remove(symlinkPath) // ignore errors — may not exist
-	if linkErr := os.Symlink(candidate, symlinkPath); linkErr != nil {
-		return fmt.Errorf("create conductor symlink: %w", linkErr)
+	if runtime.GOOS == "windows" {
+		shimPath := filepath.Join(wrapperDir, "conductor.cmd")
+		_ = os.Remove(shimPath) // ignore errors — may not exist
+		contents := fmt.Sprintf("@echo off\r\ncall \"%s\" %%*\r\n", candidate)
+		if writeErr := os.WriteFile(shimPath, []byte(contents), 0o700); writeErr != nil {
+			return fmt.Errorf("create conductor shim: %w", writeErr)
+		}
+	} else {
+		symlinkPath := filepath.Join(wrapperDir, "conductor")
+		_ = os.Remove(symlinkPath) // ignore errors — may not exist
+		if linkErr := os.Symlink(candidate, symlinkPath); linkErr != nil {
+			return fmt.Errorf("create conductor symlink: %w", linkErr)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Installed conductor-oss CLI to %s\n", candidate)
 	return nil
+}
+
+func npmGlobalExecutableDir(npmPrefix string) string {
+	if runtime.GOOS == "windows" {
+		return npmPrefix
+	}
+	return filepath.Join(npmPrefix, "bin")
+}
+
+func conductorCommandCandidates(dir string, command string) []string {
+	candidates := []string{filepath.Join(dir, command)}
+	if runtime.GOOS == "windows" {
+		candidates = append(candidates,
+			filepath.Join(dir, command+".exe"),
+			filepath.Join(dir, command+".cmd"),
+			filepath.Join(dir, command+".bat"),
+		)
+	}
+	return candidates
+}
+
+func firstExistingFile(candidates []string) string {
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func conductorBackendArgs(conductorPath string, workspace string, port int) []string {
+	if isJavaScriptCliLauncher(conductorPath) {
+		return []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace}
+	}
+	return []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
 }
 
 func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan, error) {
@@ -326,10 +387,7 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 				env:  updateEnv,
 			}, nil
 		}
-		args := []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
-		if isNodeScriptBinary(conductorPath) {
-			args = []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace}
-		}
+		args := conductorBackendArgs(conductorPath, workspace, port)
 		launch := resolveBinaryLaunch(conductorPath, args)
 		launch.env = updateEnv
 		return launch, nil
@@ -356,10 +414,7 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 					env:  updateEnv,
 				}, nil
 			}
-			args := []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
-			if isNodeScriptBinary(conductorPath) {
-				args = []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace}
-			}
+			args := conductorBackendArgs(conductorPath, workspace, port)
 			launch := resolveBinaryLaunch(conductorPath, args)
 			launch.env = updateEnv
 			return launch, nil
@@ -670,6 +725,8 @@ func findConductorBinary(command string) string {
 
 	candidates := []string{
 		filepath.Join(homeDir, ".conductor", "bin", command),
+		filepath.Join(homeDir, ".conductor", "npm", command),
+		filepath.Join(homeDir, ".conductor", "npm", "bin", command),
 		filepath.Join(homeDir, ".local", "bin", command),
 		filepath.Join(homeDir, ".npm-global", "bin", command),
 		filepath.Join("/opt/homebrew/bin", command),
@@ -678,10 +735,12 @@ func findConductorBinary(command string) string {
 	}
 
 	if runtime.GOOS == "windows" {
-		withExtensions := make([]string, 0, len(candidates)*2)
+		withExtensions := make([]string, 0, len(candidates)*4)
 		for _, candidate := range candidates {
 			withExtensions = append(withExtensions, candidate)
 			withExtensions = append(withExtensions, candidate+".exe")
+			withExtensions = append(withExtensions, candidate+".cmd")
+			withExtensions = append(withExtensions, candidate+".bat")
 		}
 		candidates = withExtensions
 	}

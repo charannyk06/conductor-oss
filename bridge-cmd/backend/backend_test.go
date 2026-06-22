@@ -77,6 +77,24 @@ func TestResolveLaunchPlanCarriesCliUpdateMetadataForNodeScriptBinaries(t *testi
 	}
 }
 
+func TestConductorBackendArgsTreatsWindowsCommandShimsAsJavaScriptLaunchers(t *testing.T) {
+	got := conductorBackendArgs(filepath.Join("C:", "Users", "test", "AppData", "Roaming", "npm", "conductor.cmd"), `C:\Users\test\.conductor\bridge-home`, 4749)
+	want := []string{"start", "--no-dashboard", "--backend-port", "4749", "--workspace", `C:\Users\test\.conductor\bridge-home`}
+
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("conductorBackendArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestConductorBackendArgsKeepsNativeRustCliArgumentOrder(t *testing.T) {
+	got := conductorBackendArgs(filepath.Join("target", "debug", "conductor"), "/tmp/bridge-home", 4749)
+	want := []string{"--workspace", "/tmp/bridge-home", "start", "--host", "127.0.0.1", "--port", "4749"}
+
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("conductorBackendArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestInferCliPackageManifestSupportsBunGlobalInstallationLayout(t *testing.T) {
 	tempDir := t.TempDir()
 	workspace := filepath.Join(tempDir, ".bun", "install", "global", "node_modules", "conductor-oss")

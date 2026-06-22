@@ -3,6 +3,7 @@ package relay
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +111,22 @@ func TestResolveTerminalTokenPayloadAcceptsLegacyTTYDURL(t *testing.T) {
 	}
 	if wsURL != "ws://127.0.0.1:7681/ws" {
 		t.Fatalf("wsURL = %q, want %q", wsURL, "ws://127.0.0.1:7681/ws")
+	}
+}
+
+func TestTtydInstallHintForGOOS(t *testing.T) {
+	t.Parallel()
+
+	windowsHint := ttydInstallHintForGOOS("windows")
+	if strings.Contains(windowsHint, "brew install ttyd") {
+		t.Fatalf("Windows ttyd hint should not mention Homebrew: %q", windowsHint)
+	}
+	if !strings.Contains(windowsHint, "optional on Windows") {
+		t.Fatalf("Windows ttyd hint = %q, want optional Windows guidance", windowsHint)
+	}
+
+	darwinHint := ttydInstallHintForGOOS("darwin")
+	if !strings.Contains(darwinHint, "brew install ttyd") {
+		t.Fatalf("Darwin ttyd hint = %q, want Homebrew guidance", darwinHint)
 	}
 }
