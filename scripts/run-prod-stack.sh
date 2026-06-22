@@ -22,6 +22,7 @@ fi
 
 CONFIG="${CO_CONFIG_PATH:-$WORKSPACE_ROOT/conductor.yaml}"
 DASHBOARD_PORT="${CONDUCTOR_PROD_DASHBOARD_PORT:-${PORT:-4747}}"
+DASHBOARD_HOST="${CONDUCTOR_PROD_DASHBOARD_HOST:-127.0.0.1}"
 BACKEND_PORT="${CONDUCTOR_PROD_BACKEND_PORT:-${CONDUCTOR_BACKEND_PORT:-4748}}"
 BACKEND_BIN="${CONDUCTOR_BACKEND_BIN:-$APP_ROOT/target/release/conductor}"
 WEB_DIR="$APP_ROOT/packages/web"
@@ -29,6 +30,8 @@ STANDALONE_DIR="$WEB_DIR/.next/standalone"
 STANDALONE_SERVER="$STANDALONE_DIR/packages/web/server.js"
 SOURCE_STATIC_DIR="$WEB_DIR/.next/static"
 TARGET_STATIC_DIR="$STANDALONE_DIR/packages/web/.next/static"
+SOURCE_PUBLIC_DIR="$WEB_DIR/public"
+TARGET_PUBLIC_DIR="$STANDALONE_DIR/packages/web/public"
 
 if [ ! -x "$BACKEND_BIN" ]; then
   echo "Missing Rust backend binary at $BACKEND_BIN. Run bun run prod:prepare first." >&2
@@ -40,9 +43,16 @@ if [ ! -f "$STANDALONE_SERVER" ]; then
   exit 1
 fi
 
-if [ -d "$SOURCE_STATIC_DIR" ] && [ ! -d "$TARGET_STATIC_DIR" ]; then
+if [ -d "$SOURCE_STATIC_DIR" ]; then
+  rm -rf "$TARGET_STATIC_DIR"
   mkdir -p "$(dirname "$TARGET_STATIC_DIR")"
   cp -R "$SOURCE_STATIC_DIR" "$TARGET_STATIC_DIR"
+fi
+
+if [ -d "$SOURCE_PUBLIC_DIR" ]; then
+  rm -rf "$TARGET_PUBLIC_DIR"
+  mkdir -p "$(dirname "$TARGET_PUBLIC_DIR")"
+  cp -R "$SOURCE_PUBLIC_DIR" "$TARGET_PUBLIC_DIR"
 fi
 
 if [ -z "${CONDUCTOR_GITHUB_WEBHOOK_SECRET:-}" ]; then
@@ -82,12 +92,13 @@ if [ "$backend_ready" -ne 1 ]; then
 fi
 
 echo "Rust backend: http://127.0.0.1:$BACKEND_PORT"
-echo "Dashboard:    http://127.0.0.1:$DASHBOARD_PORT"
+echo "Dashboard:    http://$DASHBOARD_HOST:$DASHBOARD_PORT"
 
 cd "$STANDALONE_DIR"
 CONDUCTOR_WORKSPACE="$WORKSPACE_ROOT" \
 CO_CONFIG_PATH="$CONFIG" \
 CONDUCTOR_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
+CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED="${CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED:-true}" \
 PORT="$DASHBOARD_PORT" \
-HOSTNAME="0.0.0.0" \
+HOSTNAME="$DASHBOARD_HOST" \
 node "$STANDALONE_SERVER"
