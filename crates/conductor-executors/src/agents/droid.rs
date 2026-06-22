@@ -28,7 +28,7 @@ fn normalize_droid_model(model: Option<&str>) -> Option<String> {
                 || other.starts_with("claude-")
                 || other.starts_with("gemini-") =>
         {
-            return Some(value.to_string());
+            return Some(normalized);
         }
         _ => return None,
     };
@@ -355,6 +355,18 @@ fn tool_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_droid_model_lowercases_runtime_prefixed_ids() {
+        assert_eq!(
+            normalize_droid_model(Some("Claude-Sonnet-4-6")),
+            Some("claude-sonnet-4-6".to_string())
+        );
+        assert_eq!(
+            normalize_droid_reasoning_effort(Some("xhigh"), Some("Claude-Sonnet-4-6")),
+            Some("max".to_string())
+        );
+    }
 
     #[test]
     fn parse_auth_failure_requests_input() {

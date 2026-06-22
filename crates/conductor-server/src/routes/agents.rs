@@ -2072,7 +2072,10 @@ fn is_valid_copilot_model_id(model_id: &str) -> bool {
     normalized.starts_with("gpt-")
         || normalized.starts_with("claude-")
         || normalized.starts_with("gemini-")
-        || normalized.starts_with("o")
+        || normalized
+            .strip_prefix('o')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| ch.is_ascii_digit())
 }
 
 fn collect_copilot_session_observations(contents: &[String]) -> (Vec<String>, Option<String>) {
@@ -2572,6 +2575,17 @@ opencode/gpt-5-nano
                 "high".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn is_valid_copilot_model_id_accepts_real_models_only() {
+        assert!(is_valid_copilot_model_id("gpt-5.2"));
+        assert!(is_valid_copilot_model_id("claude-sonnet-4.6"));
+        assert!(is_valid_copilot_model_id("gemini-3-pro"));
+        assert!(is_valid_copilot_model_id("o3-mini"));
+        assert!(!is_valid_copilot_model_id("output"));
+        assert!(!is_valid_copilot_model_id("off"));
+        assert!(!is_valid_copilot_model_id("auto"));
     }
 
     #[test]

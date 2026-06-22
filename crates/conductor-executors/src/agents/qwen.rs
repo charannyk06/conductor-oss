@@ -20,9 +20,7 @@ fn normalize_qwen_model(model: Option<&str>) -> Option<String> {
         "coder-model" | "qwen-max" | "qwen-plus" | "qwen-turbo" | "qwen3-coder-plus" => {
             Some(normalized)
         }
-        model if model.starts_with("qwen") || model.starts_with("dashscope/") => {
-            Some(value.to_string())
-        }
+        model if model.starts_with("qwen") || model.starts_with("dashscope/") => Some(normalized),
         _ => None,
     }
 }
@@ -208,6 +206,18 @@ fn is_qwen_login_prompt(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_qwen_model_lowercases_prefixed_models() {
+        assert_eq!(
+            normalize_qwen_model(Some("QWEN3-Coder-Plus")),
+            Some("qwen3-coder-plus".to_string())
+        );
+        assert_eq!(
+            normalize_qwen_model(Some("DashScope/Qwen3-Coder-Plus")),
+            Some("dashscope/qwen3-coder-plus".to_string())
+        );
+    }
 
     #[test]
     fn build_args_interactive_uses_prompt_interactive_flag() {

@@ -12,10 +12,13 @@ import (
 )
 
 func TestValidateSavedPairingBestEffortContinuesOnNetworkFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.Close()
+
 	var stderr bytes.Buffer
 	err := validateSavedPairingBestEffort(
 		context.Background(),
-		"http://127.0.0.1:1",
+		server.URL,
 		"cached-refresh-token",
 		&stderr,
 		50*time.Millisecond,

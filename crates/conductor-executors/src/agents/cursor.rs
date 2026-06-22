@@ -28,7 +28,7 @@ fn normalize_cursor_model(model: Option<&str>) -> Option<String> {
         s if s.starts_with("gpt-")
             || s.starts_with("composer-")
             || s.starts_with("sonnet-")
-            || s.starts_with("opus")
+            || s.starts_with("opus-")
             || s.starts_with("claude-")
             || s.starts_with("gemini-")
             || s.starts_with("grok-")
@@ -442,6 +442,11 @@ mod tests {
             normalize_cursor_model(Some("opus")),
             Some("opus-4.1".to_string())
         );
+        assert_eq!(
+            normalize_cursor_model(Some("opus-4.1")),
+            Some("opus-4.1".to_string())
+        );
+        assert_eq!(normalize_cursor_model(Some("opustypo")), None);
         assert_eq!(normalize_cursor_model(Some("openai/gpt-5")), None);
         assert_eq!(normalize_cursor_model(None), None);
     }
