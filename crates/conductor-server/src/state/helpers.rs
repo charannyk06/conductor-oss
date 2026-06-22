@@ -681,19 +681,19 @@ pub(crate) fn runtime_tool_metadata(line: &str) -> Option<Value> {
     None
 }
 
-pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
+pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) -> bool {
     let trimmed = fragment.trim();
     if trimmed.is_empty() {
-        return;
+        return false;
     }
 
     if current.is_empty() {
         current.push_str(trimmed);
-        return;
+        return true;
     }
 
     if current == trimmed || current.ends_with(trimmed) {
-        return;
+        return false;
     }
     // Cap contains check to last 512 bytes to avoid O(n*m) on large buffers.
     let mut tail_start = current.len().saturating_sub(512);
@@ -702,17 +702,18 @@ pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
     }
     let check_region = &current[tail_start..];
     if check_region.contains(trimmed) {
-        return;
+        return false;
     }
 
     if trimmed.starts_with(current.as_str()) {
         current.clear();
         current.push_str(trimmed);
-        return;
+        return true;
     }
 
     current.push('\n');
     current.push_str(trimmed);
+    true
 }
 
 fn is_runtime_transport_event_line(line: &str) -> bool {
@@ -1633,6 +1634,20 @@ mod tests {
     fn sanitize_terminal_text_strips_ansi_and_control_sequences() {
         let input = "\u{001b}[90m{\"type\":\"assistant\"}\u{001b}[0m\u{0008}";
         assert_eq!(sanitize_terminal_text(input), "{\"type\":\"assistant\"}");
+    }
+
+    #[test]
+    fn merge_assistant_fragment_reports_whether_text_changed() {
+        let mut current = "Working".to_string();
+
+        assert!(!merge_assistant_fragment(&mut current, "Working"));
+        assert_eq!(current, "Working");
+
+        assert!(merge_assistant_fragment(&mut current, "Working on it"));
+        assert_eq!(current, "Working on it");
+
+        assert!(!merge_assistant_fragment(&mut current, "on it"));
+        assert_eq!(current, "Working on it");
     }
 
     #[test]

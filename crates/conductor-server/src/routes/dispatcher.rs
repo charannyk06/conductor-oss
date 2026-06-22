@@ -5,8 +5,11 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
@@ -26,6 +29,7 @@ type ApiResponse = (StatusCode, Json<Value>);
 
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
+const DISPATCHER_FEED_KEEP_ALIVE_INTERVAL_SECS: u64 = 15;
 const DISPATCHER_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const DISPATCHER_APPROVAL_REQUIRED: &str = "approval_required";
 const DISPATCHER_APPROVAL_PARSER_STATE_KEY: &str = "parserState";
@@ -866,6 +870,15 @@ fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> O
         .iter()
         .take(shared_prefix_len)
         .zip(next_entries.iter().take(shared_prefix_len))
+        .all(|(left, right)| feed_entry_patch_signature(left) == feed_entry_patch_signature(right))
+    {
+        return None;
+    }
+
+    if !previous_entries
+        .iter()
+        .take(shared_prefix_len)
+        .zip(next_entries.iter().take(shared_prefix_len))
         .all(|(left, right)| left == right)
     {
         return None;
@@ -915,6 +928,27 @@ fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> O
         "entry": next_last,
         "textDelta": text_delta,
     }))
+}
+
+fn feed_entry_patch_signature(entry: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    entry.get("id").and_then(Value::as_str).hash(&mut hasher);
+    entry.get("kind").and_then(Value::as_str).hash(&mut hasher);
+    entry
+        .get("source")
+        .and_then(Value::as_str)
+        .hash(&mut hasher);
+    entry
+        .get("streaming")
+        .and_then(Value::as_bool)
+        .hash(&mut hasher);
+    if let Some(text) = entry.get("text").and_then(Value::as_str) {
+        text.len().hash(&mut hasher);
+        text.hash(&mut hasher);
+    } else {
+        0usize.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
@@ -1078,7 +1112,12 @@ async fn feed_stream(
         })
         .filter_map(|item| item);
 
-    Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
+    let keep_alive = KeepAlive::new()
+        .interval(Duration::from_secs(
+            DISPATCHER_FEED_KEEP_ALIVE_INTERVAL_SECS,
+        ))
+        .event(SseEvent::default().event("ping").data("ping"));
+    Sse::new(initial_stream.chain(updates)).keep_alive(keep_alive)
 }
 
 async fn send_to_dispatcher(
