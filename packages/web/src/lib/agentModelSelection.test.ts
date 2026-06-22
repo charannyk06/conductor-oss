@@ -102,3 +102,98 @@ test("openclaw suppresses frontend model and reasoning selection", () => {
   });
   assert.deepEqual(getSelectableAgentModels("openclaw", {}, {}), []);
 });
+
+test("empty runtime catalogs suppress stale static and custom model choices", () => {
+  const emptyCursorCatalog: RuntimeAgentModelCatalog = {
+    agent: "cursor-cli",
+    customModelPlaceholder: "auto",
+    defaultModelByAccess: {},
+    modelsByAccess: {},
+  };
+
+  assert.deepEqual(
+    getSelectableAgentModels(
+      "cursor-cli",
+      { cursorCli: "default" },
+      { "cursor-cli": emptyCursorCatalog },
+    ),
+    [],
+  );
+
+  const selection = buildModelSelection(
+    "cursor-cli",
+    { cursorCli: "default" },
+    { "cursor-cli": emptyCursorCatalog },
+    "gpt-5.3-codex",
+    "high",
+  );
+  assert.deepEqual(selection, {
+    catalogModel: "",
+    customModel: "",
+    reasoningEffort: "",
+  });
+});
+
+test("buildModelSelection normalizes stale saved model and reasoning aliases", () => {
+  const cursorCatalog: RuntimeAgentModelCatalog = {
+    agent: "cursor-cli",
+    customModelPlaceholder: "gpt-5",
+    defaultModelByAccess: { default: "gpt-5" },
+    modelsByAccess: {
+      default: [
+        {
+          id: "gpt-5",
+          label: "GPT-5",
+          description: "Runtime Cursor model",
+          access: ["default"],
+        },
+      ],
+    },
+  };
+  const claudeCatalog: RuntimeAgentModelCatalog = {
+    agent: "claude-code",
+    customModelPlaceholder: "claude-sonnet-4-6",
+    defaultModelByAccess: { pro: "claude-sonnet-4-6" },
+    modelsByAccess: {
+      pro: [
+        {
+          id: "claude-sonnet-4-6",
+          label: "Claude Sonnet 4.6",
+          description: "Runtime Claude model",
+          access: ["pro"],
+        },
+      ],
+    },
+    reasoningOptionsByAccess: {
+      pro: [
+        { id: "low", label: "Low", description: "Low" },
+        { id: "medium", label: "Medium", description: "Medium" },
+        { id: "high", label: "High", description: "High" },
+        { id: "max", label: "Max", description: "Max" },
+      ],
+    },
+    defaultReasoningByAccess: { pro: "high" },
+  };
+
+  assert.deepEqual(
+    buildModelSelection(
+      "cursor-cli",
+      { cursorCli: "default" },
+      { "cursor-cli": cursorCatalog },
+      "gpt-5.3-codex",
+      null,
+    ),
+    { catalogModel: "gpt-5", customModel: "", reasoningEffort: "" },
+  );
+
+  assert.deepEqual(
+    buildModelSelection(
+      "claude-code",
+      { claudeCode: "pro" },
+      { "claude-code": claudeCatalog },
+      "sonnet",
+      "xhigh",
+    ),
+    { catalogModel: "claude-sonnet-4-6", customModel: "", reasoningEffort: "max" },
+  );
+});

@@ -15,16 +15,28 @@ use crate::process::{spawn_process, spawn_process_no_stdin};
 /// unrecognized names so the agent falls back to `auto` (its default).
 fn normalize_cursor_model(model: Option<&str>) -> Option<String> {
     let value = model.map(str::trim).filter(|v| !v.is_empty())?;
-    match value {
-        // Cursor-native names pass through unchanged
-        "auto" | "composer-2-fast" | "composer-2" | "composer-1.5" => Some(value.to_string()),
-        // Cursor uses gpt-5.x-codex naming, not bare gpt-5
-        "gpt-5" => Some("gpt-5.3-codex".to_string()),
-        "gpt-5-fast" => Some("gpt-5.3-codex-fast".to_string()),
-        "gpt-5-high" => Some("gpt-5.3-codex-high".to_string()),
-        // Already a Cursor-compatible model id (gpt-5.x-codex-*, etc.)
-        s if s.starts_with("gpt-5.") => Some(value.to_string()),
-        s if s.starts_with("composer-") => Some(value.to_string()),
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" => Some("auto".to_string()),
+        // Preserve older saved Cursor aliases by remapping them onto the
+        // current GPT-5 preset family that the CLI still accepts.
+        "gpt-5.3-codex" => Some("gpt-5".to_string()),
+        "gpt-5.3-codex-fast" => Some("gpt-5-fast".to_string()),
+        "gpt-5.3-codex-high" => Some("gpt-5-high".to_string()),
+        "opus" => Some("opus-4.1".to_string()),
+        // Cursor-native names and runtime-discovered model ids pass through.
+        s if s.starts_with("gpt-")
+            || s.starts_with("composer-")
+            || s.starts_with("sonnet-")
+            || s.starts_with("opus-")
+            || s.starts_with("claude-")
+            || s.starts_with("gemini-")
+            || s.starts_with("grok-")
+            || s.starts_with("kimi-")
+            || s.starts_with("qwen-") =>
+        {
+            Some(value.to_string())
+        }
         // Unrecognized model: let Cursor pick its default
         _ => None,
     }
@@ -383,9 +395,7 @@ mod tests {
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--force".to_string()));
-        // gpt-5 should be mapped to a Cursor-compatible model name
-        assert!(args.contains(&"gpt-5.3-codex".to_string()));
-        assert!(!args.contains(&"gpt-5".to_string()));
+        assert!(args.contains(&"gpt-5".to_string()));
     }
 
     #[test]
@@ -394,7 +404,7 @@ mod tests {
         let args = executor.build_args(&SpawnOptions {
             cwd: PathBuf::from("/tmp/demo"),
             prompt: "hello".to_string(),
-            model: Some("claude-sonnet-4".to_string()),
+            model: Some("not-a-cursor-model".to_string()),
             reasoning_effort: None,
             skip_permissions: false,
             extra_args: Vec::new(),
@@ -407,14 +417,14 @@ mod tests {
         });
 
         assert!(!args.contains(&"--model".to_string()));
-        assert!(!args.contains(&"claude-sonnet-4".to_string()));
+        assert!(!args.contains(&"not-a-cursor-model".to_string()));
     }
 
     #[test]
     fn normalize_cursor_model_maps_common_names() {
         assert_eq!(
             normalize_cursor_model(Some("gpt-5")),
-            Some("gpt-5.3-codex".to_string())
+            Some("gpt-5".to_string())
         );
         assert_eq!(
             normalize_cursor_model(Some("auto")),
@@ -422,9 +432,22 @@ mod tests {
         );
         assert_eq!(
             normalize_cursor_model(Some("gpt-5.3-codex-high")),
-            Some("gpt-5.3-codex-high".to_string())
+            Some("gpt-5-high".to_string())
         );
-        assert_eq!(normalize_cursor_model(Some("claude-sonnet-4")), None);
+        assert_eq!(
+            normalize_cursor_model(Some("sonnet-4")),
+            Some("sonnet-4".to_string())
+        );
+        assert_eq!(
+            normalize_cursor_model(Some("opus")),
+            Some("opus-4.1".to_string())
+        );
+        assert_eq!(
+            normalize_cursor_model(Some("opus-4.1")),
+            Some("opus-4.1".to_string())
+        );
+        assert_eq!(normalize_cursor_model(Some("opustypo")), None);
+        assert_eq!(normalize_cursor_model(Some("openai/gpt-5")), None);
         assert_eq!(normalize_cursor_model(None), None);
     }
 

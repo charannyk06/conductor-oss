@@ -96,7 +96,10 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     );
     assert_filters_blocked_flags(&hermes);
 
-    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&options("ccr prompt"));
+    let mut ccr_options = options("ccr prompt");
+    ccr_options.model = Some("sonnet".to_string());
+    ccr_options.reasoning_effort = Some("xhigh".to_string());
+    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&ccr_options);
     assert_contains(
         &ccr,
         &[
@@ -104,15 +107,20 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--print",
             "--output-format",
             "stream-json",
+            "--model",
+            "claude-sonnet-4-6",
             "--effort",
-            "high",
+            "max",
             "ccr prompt",
         ],
     );
     assert_filters_blocked_flags(&ccr);
 
+    let mut claude_options = options("claude");
+    claude_options.model = Some("sonnet".to_string());
+    claude_options.reasoning_effort = Some("xhigh".to_string());
     let claude =
-        ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&options("claude"));
+        ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&claude_options);
     assert_contains(
         &claude,
         &[
@@ -120,9 +128,9 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--output-format",
             "stream-json",
             "--model",
-            "gpt-5",
+            "claude-sonnet-4-6",
             "--effort",
-            "high",
+            "max",
             "claude",
         ],
     );
@@ -157,6 +165,8 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--stream",
             "on",
             "--allow-all-tools",
+            "--model",
+            "gpt-5.2",
             "--reasoning-effort",
             "high",
         ],
@@ -173,7 +183,7 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--output-format",
             "stream-json",
             "--model",
-            "gpt-5.3-codex",
+            "gpt-5",
             "cursor",
         ],
     );
@@ -187,7 +197,7 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--output-format",
             "json",
             "--model",
-            "gpt-5",
+            "gpt-5.4-fast",
             "--reasoning-effort",
             "high",
             "droid",
@@ -195,13 +205,14 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     );
     assert_filters_blocked_flags(&droid);
 
-    let gemini =
-        GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).build_args(&options("gemini"));
+    let mut gemini_options = options("gemini");
+    gemini_options.model = Some("gemini-3.1-pro-preview".to_string());
+    let gemini = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).build_args(&gemini_options);
     assert_contains(
         &gemini,
         &[
             "--model",
-            "gpt-5",
+            "gemini-3.1-pro-preview",
             "--output-format",
             "stream-json",
             "--prompt",
@@ -281,9 +292,12 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     assert_no_flag(&amp, "--reasoning-effort");
     assert_no_flag(&amp, "--variant");
 
-    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&interactive);
-    assert_has_pair(&ccr, "--model", "gpt-5");
-    assert_has_pair(&ccr, "--effort", "high");
+    let mut ccr_interactive = interactive.clone();
+    ccr_interactive.model = Some("sonnet".to_string());
+    ccr_interactive.reasoning_effort = Some("xhigh".to_string());
+    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&ccr_interactive);
+    assert_has_pair(&ccr, "--model", "claude-sonnet-4-6");
+    assert_has_pair(&ccr, "--effort", "max");
 
     let hermes = HermesExecutor::new(PathBuf::from("/usr/bin/hermes")).build_args(&interactive);
     assert_contains(&hermes, &["--toolsets", "terminal"]);
@@ -292,9 +306,13 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     assert_no_flag(&hermes, "--reasoning-effort");
     assert_no_flag(&hermes, "-q");
 
-    let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
-    assert_has_pair(&claude, "--model", "gpt-5");
-    assert_has_pair(&claude, "--effort", "high");
+    let mut claude_interactive = interactive.clone();
+    claude_interactive.model = Some("sonnet".to_string());
+    claude_interactive.reasoning_effort = Some("xhigh".to_string());
+    let claude =
+        ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&claude_interactive);
+    assert_has_pair(&claude, "--model", "claude-sonnet-4-6");
+    assert_has_pair(&claude, "--effort", "max");
 
     let codex = CodexExecutor::new(PathBuf::from("/usr/bin/codex")).build_args(&interactive);
     assert_has_pair(&codex, "--model", "gpt-5");
@@ -303,23 +321,26 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
         .any(|arg| arg == "model_reasoning_effort=\"high\""));
 
     let copilot = CopilotExecutor::new(PathBuf::from("/usr/bin/copilot")).build_args(&interactive);
-    assert_has_pair(&copilot, "--model", "gpt-5");
+    assert_has_pair(&copilot, "--model", "gpt-5.2");
     assert_no_flag(&copilot, "--effort");
     assert_has_pair(&copilot, "--reasoning-effort", "high");
 
     let cursor =
         CursorExecutor::new(PathBuf::from("/usr/bin/cursor-agent")).build_args(&interactive);
-    assert_has_pair(&cursor, "--model", "gpt-5.3-codex");
+    assert_has_pair(&cursor, "--model", "gpt-5");
     assert_no_flag(&cursor, "--effort");
     assert_no_flag(&cursor, "--reasoning-effort");
     assert_no_flag(&cursor, "--variant");
 
     let droid = DroidExecutor::new(PathBuf::from("/usr/bin/droid")).build_args(&interactive);
-    assert_has_pair(&droid, "--model", "gpt-5");
+    assert_has_pair(&droid, "--model", "gpt-5.4-fast");
     assert_has_pair(&droid, "--reasoning-effort", "high");
 
-    let gemini = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).build_args(&interactive);
-    assert_has_pair(&gemini, "--model", "gpt-5");
+    let mut gemini_interactive = interactive.clone();
+    gemini_interactive.model = Some("gemini-3.1-pro-preview".to_string());
+    let gemini =
+        GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).build_args(&gemini_interactive);
+    assert_has_pair(&gemini, "--model", "gemini-3.1-pro-preview");
     assert_no_flag(&gemini, "--effort");
     assert_no_flag(&gemini, "--reasoning-effort");
 
@@ -355,7 +376,7 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
 fn cursor_wrapper_binary_uses_agent_subcommand() {
     let args = CursorExecutor::new(PathBuf::from("/usr/bin/cursor")).build_args(&options("cursor"));
     assert_eq!(args.first().map(String::as_str), Some("agent"));
-    assert_has_pair(&args, "--model", "gpt-5.3-codex");
+    assert_has_pair(&args, "--model", "gpt-5");
 }
 
 #[test]

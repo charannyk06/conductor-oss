@@ -24,8 +24,111 @@ export type ModelSelectionState = {
   reasoningEffort: string;
 };
 
+const STALE_GEMINI_FLASH_MODEL_ID = "gemini-3.1-flash-preview";
+const GEMINI_FLASH_MODEL_ID = "gemini-3-flash-preview";
+
 function usesBackendManagedModelConfig(agent: string): boolean {
   return normalizeAgentName(agent) === "openclaw";
+}
+
+function normalizePreferredModel(agent: string, model: string | null | undefined): string {
+  const trimmed = model?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return "";
+  }
+
+  const normalizedAgent = normalizeAgentName(agent);
+  const normalizedModel = trimmed.toLowerCase();
+
+  if (normalizedAgent === "gemini" && normalizedModel === STALE_GEMINI_FLASH_MODEL_ID) {
+    return GEMINI_FLASH_MODEL_ID;
+  }
+
+  if (normalizedAgent === "cursor-cli") {
+    if (normalizedModel === "gpt-5.3-codex") return "gpt-5";
+    if (normalizedModel === "gpt-5.3-codex-fast") return "gpt-5-fast";
+    if (normalizedModel === "gpt-5.3-codex-high") return "gpt-5-high";
+    if (normalizedModel === "opus") return "opus-4.1";
+  }
+
+  if (normalizedAgent === "claude-code" || normalizedAgent === "ccr") {
+    if (normalizedModel === "sonnet" || normalizedModel === "sonnet-4") {
+      return "claude-sonnet-4-6";
+    }
+    if (normalizedModel === "opus" || normalizedModel === "opus-4") {
+      return "claude-opus-4-6";
+    }
+    if (normalizedModel === "haiku" || normalizedModel === "haiku-4" || normalizedModel === "haiku-4-5") {
+      return "claude-haiku-4-5";
+    }
+  }
+
+  return trimmed;
+}
+
+function normalizePreferredReasoning(agent: string, reasoningEffort: string | null | undefined): string {
+  const normalizedAgent = normalizeAgentName(agent);
+  const normalizedReasoning = reasoningEffort?.trim().toLowerCase() ?? "";
+  if (normalizedReasoning.length === 0) {
+    return "";
+  }
+
+  if (normalizedAgent === "claude-code" || normalizedAgent === "ccr") {
+    if (["minimal", "min", "off", "none", "low"].includes(normalizedReasoning)) return "low";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (normalizedReasoning === "high") return "high";
+    if (["max", "xhigh", "extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) {
+      return "max";
+    }
+    return normalizedReasoning;
+  }
+
+  if (normalizedAgent === "github-copilot") {
+    if (["minimal", "min", "off", "none", "low"].includes(normalizedReasoning)) return "low";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (normalizedReasoning === "high") return "high";
+    if (["max", "xhigh", "extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) {
+      return "xhigh";
+    }
+    return normalizedReasoning;
+  }
+
+  if (normalizedAgent === "codex") {
+    if (["minimal", "min", "low"].includes(normalizedReasoning)) return "low";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (normalizedReasoning === "high") return "high";
+    if (["max", "xhigh", "extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) {
+      return "xhigh";
+    }
+    return normalizedReasoning;
+  }
+
+  if (normalizedAgent === "droid") {
+    if (["minimal", "min"].includes(normalizedReasoning)) return "minimal";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (["extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) return "xhigh";
+    return normalizedReasoning;
+  }
+
+  if (normalizedAgent === "opencode") {
+    if (["minimal", "min"].includes(normalizedReasoning)) return "minimal";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (["xhigh", "extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) {
+      return "max";
+    }
+    return normalizedReasoning;
+  }
+
+  if (normalizedAgent === "pi") {
+    if (["minimal", "min"].includes(normalizedReasoning)) return "minimal";
+    if (["medium", "med"].includes(normalizedReasoning)) return "medium";
+    if (["max", "xhigh", "extra-high", "extra_high", "extra high"].includes(normalizedReasoning)) {
+      return "xhigh";
+    }
+    return normalizedReasoning;
+  }
+
+  return normalizedReasoning;
 }
 
 export function emptyModelSelection(): ModelSelectionState {
@@ -79,7 +182,7 @@ export function getSelectableAgentModels(
   const scopedModels = getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
   const allRuntimeModels = getAllRuntimeCatalogModels(runtimeCatalog);
 
-  if (allRuntimeModels.length > 0) {
+  if (runtimeCatalog) {
     const merged: AgentModelOption[] = [];
     const seen = new Set<string>();
     for (const model of [...scopedModels, ...allRuntimeModels]) {
@@ -182,12 +285,12 @@ export function buildModelSelection(
     return emptyModelSelection();
   }
 
-  const trimmedPreferred = preferredModel?.trim() ?? "";
-  const trimmedPreferredReasoning = preferredReasoningEffort?.trim().toLowerCase() ?? "";
+  const trimmedPreferred = normalizePreferredModel(agent, preferredModel);
+  const trimmedPreferredReasoning = normalizePreferredReasoning(agent, preferredReasoningEffort);
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
   const defaultModel = getSelectableDefaultAgentModel(agent, modelAccess, runtimeModelCatalogs);
-  const runtimeModelsAreAuthoritative = hasRuntimeModels(runtimeCatalog);
+  const runtimeModelsAreAuthoritative = runtimeCatalog !== null;
 
   const resolveReasoningEffort = (resolvedModel: string | null | undefined): string => {
     const options = getSelectableAgentReasoningOptions(

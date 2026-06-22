@@ -163,10 +163,9 @@ fn normalize_variant(reasoning_effort: Option<&str>) -> Option<String> {
         .to_ascii_lowercase();
 
     let variant = match normalized.as_str() {
-        "minimal" | "low" => "minimal",
-        "medium" | "high" => "high",
-        "xhigh" | "extra-high" | "extra_high" | "extra high" | "max" => "max",
-        other => other,
+        "minimal" | "low" | "medium" | "high" | "max" | "off" | "none" => normalized.as_str(),
+        "xhigh" | "extra-high" | "extra_high" | "extra high" => "max",
+        _ => return None,
     };
 
     Some(variant.to_string())

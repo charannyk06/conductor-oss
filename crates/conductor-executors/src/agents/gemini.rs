@@ -10,6 +10,26 @@ use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{spawn_process, spawn_process_no_stdin};
 
+fn normalize_gemini_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    let stripped = normalized.strip_prefix("models/").unwrap_or(&normalized);
+    match stripped {
+        "gemini-pro" | "gemini-3.1-pro" => Some("gemini-3.1-pro-preview".to_string()),
+        "gemini-flash" | "gemini-3-flash" => Some("gemini-3-flash-preview".to_string()),
+        "gemini-3.1-flash-preview" => Some("gemini-3-flash-preview".to_string()),
+        model if model.starts_with("gemini-") => Some(stripped.to_string()),
+        _ => None,
+    }
+}
+
+fn push_gemini_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_gemini_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
 /// Gemini CLI executor.
 #[derive(Clone)]
 pub struct GeminiExecutor {
@@ -81,10 +101,7 @@ impl Executor for GeminiExecutor {
                 args.push("stream-json".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+            push_gemini_model_arg(&mut args, options.model.as_deref());
             if options.skip_permissions {
                 args.push("--yolo".to_string());
             }
@@ -109,10 +126,7 @@ impl Executor for GeminiExecutor {
             args.push("--yolo".to_string());
         }
 
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
+        push_gemini_model_arg(&mut args, options.model.as_deref());
 
         args.push("--output-format".to_string());
         args.push("stream-json".to_string());

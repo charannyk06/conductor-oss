@@ -14,6 +14,49 @@ pub struct CcrExecutor {
     binary: PathBuf,
 }
 
+fn normalize_ccr_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "sonnet" | "sonnet-4" | "claude-sonnet-4" => Some("claude-sonnet-4-6".to_string()),
+        "opus" | "opus-4" | "claude-opus-4" => Some("claude-opus-4-6".to_string()),
+        "haiku" | "haiku-4" | "haiku-4-5" | "claude-haiku-4" => {
+            Some("claude-haiku-4-5".to_string())
+        }
+        model if model.starts_with("claude-") => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_ccr_reasoning_effort(reasoning_effort: Option<&str>) -> Option<String> {
+    let value = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_ascii_lowercase();
+    let normalized = match value.as_str() {
+        "minimal" | "min" | "off" | "none" | "low" => "low",
+        "medium" | "med" => "medium",
+        "high" => "high",
+        "max" | "xhigh" | "extra-high" | "extra_high" | "extra high" => "max",
+        _ => return None,
+    };
+    Some(normalized.to_string())
+}
+
+fn push_ccr_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_ccr_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
+fn push_ccr_reasoning_arg(args: &mut Vec<String>, reasoning_effort: Option<&str>) {
+    if let Some(reasoning_effort) = normalize_ccr_reasoning_effort(reasoning_effort) {
+        args.push("--effort".to_string());
+        args.push(reasoning_effort);
+    }
+}
+
 impl CcrExecutor {
     pub fn new(binary: PathBuf) -> Self {
         Self { binary }
@@ -82,14 +125,8 @@ impl Executor for CcrExecutor {
                 args.push("--verbose".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-            if let Some(reasoning_effort) = &options.reasoning_effort {
-                args.push("--effort".to_string());
-                args.push(reasoning_effort.clone());
-            }
+            push_ccr_model_arg(&mut args, options.model.as_deref());
+            push_ccr_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
             if options.skip_permissions {
                 args.push("--dangerously-skip-permissions".to_string());
             }
@@ -115,15 +152,8 @@ impl Executor for CcrExecutor {
             args.push("--dangerously-skip-permissions".to_string());
         }
 
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if let Some(reasoning_effort) = &options.reasoning_effort {
-            args.push("--effort".to_string());
-            args.push(reasoning_effort.clone());
-        }
+        push_ccr_model_arg(&mut args, options.model.as_deref());
+        push_ccr_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
         args.extend(options.sanitized_extra_args());
         args.push(options.prompt.clone());
@@ -163,5 +193,28 @@ mod tests {
             panic!("expected needs-input output");
         };
         assert!(prompt.contains("ccr model"));
+    }
+
+    #[test]
+    fn build_args_normalizes_claude_aliases_for_ccr() {
+        let executor = CcrExecutor::new(PathBuf::from("/usr/bin/ccr"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("haiku".to_string()),
+            reasoning_effort: Some("max".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(args.contains(&"claude-haiku-4-5".to_string()));
+        assert!(args.contains(&"max".to_string()));
+        assert!(!args.contains(&"xhigh".to_string()));
     }
 }

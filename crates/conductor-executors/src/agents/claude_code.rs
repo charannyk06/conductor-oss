@@ -16,6 +16,49 @@ pub struct ClaudeCodeExecutor {
     binary: PathBuf,
 }
 
+fn normalize_claude_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "sonnet" | "sonnet-4" | "claude-sonnet-4" => Some("claude-sonnet-4-6".to_string()),
+        "opus" | "opus-4" | "claude-opus-4" => Some("claude-opus-4-6".to_string()),
+        "haiku" | "haiku-4" | "haiku-4-5" | "claude-haiku-4" => {
+            Some("claude-haiku-4-5".to_string())
+        }
+        model if model.starts_with("claude-") => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_claude_reasoning_effort(reasoning_effort: Option<&str>) -> Option<String> {
+    let value = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_ascii_lowercase();
+    let normalized = match value.as_str() {
+        "minimal" | "min" | "off" | "none" | "low" => "low",
+        "medium" | "med" => "medium",
+        "high" => "high",
+        "max" | "xhigh" | "extra-high" | "extra_high" | "extra high" => "max",
+        _ => return None,
+    };
+    Some(normalized.to_string())
+}
+
+fn push_claude_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_claude_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
+fn push_claude_reasoning_arg(args: &mut Vec<String>, reasoning_effort: Option<&str>) {
+    if let Some(reasoning_effort) = normalize_claude_reasoning_effort(reasoning_effort) {
+        args.push("--effort".to_string());
+        args.push(reasoning_effort);
+    }
+}
+
 impl ClaudeCodeExecutor {
     pub fn new(binary: PathBuf) -> Self {
         Self { binary }
@@ -96,15 +139,8 @@ impl Executor for ClaudeCodeExecutor {
                     args.push("--dangerously-skip-permissions".to_string());
                 }
 
-                if let Some(model) = &options.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-
-                if let Some(reasoning_effort) = &options.reasoning_effort {
-                    args.push("--effort".to_string());
-                    args.push(reasoning_effort.clone());
-                }
+                push_claude_model_arg(&mut args, options.model.as_deref());
+                push_claude_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
                 args.extend(sanitized_extra_args);
                 return args;
@@ -114,15 +150,8 @@ impl Executor for ClaudeCodeExecutor {
                 args.push("--dangerously-skip-permissions".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-
-            if let Some(reasoning_effort) = &options.reasoning_effort {
-                args.push("--effort".to_string());
-                args.push(reasoning_effort.clone());
-            }
+            push_claude_model_arg(&mut args, options.model.as_deref());
+            push_claude_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
             args.extend(sanitized_extra_args);
             if !options.prompt.trim().is_empty() {
@@ -148,15 +177,8 @@ impl Executor for ClaudeCodeExecutor {
             args.push("--dangerously-skip-permissions".to_string());
         }
 
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-
-        if let Some(reasoning_effort) = &options.reasoning_effort {
-            args.push("--effort".to_string());
-            args.push(reasoning_effort.clone());
-        }
+        push_claude_model_arg(&mut args, options.model.as_deref());
+        push_claude_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
         // Add extra args.
         args.extend(sanitized_extra_args);
@@ -502,9 +524,32 @@ mod tests {
         });
 
         assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"sonnet".to_string()));
+        assert!(args.contains(&"claude-sonnet-4-6".to_string()));
         assert!(args.contains(&"--effort".to_string()));
         assert!(args.contains(&"medium".to_string()));
+    }
+
+    #[test]
+    fn build_args_normalizes_reasoning_aliases_to_claude_supported_levels() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("opus".to_string()),
+            reasoning_effort: Some("xhigh".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(args.contains(&"claude-opus-4-6".to_string()));
+        assert!(args.contains(&"max".to_string()));
+        assert!(!args.contains(&"xhigh".to_string()));
     }
 
     #[test]

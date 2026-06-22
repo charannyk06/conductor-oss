@@ -10,6 +10,75 @@ use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{spawn_process, spawn_process_no_stdin};
 
+fn normalize_droid_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    let mapped = match normalized.as_str() {
+        "gpt-5" | "gpt-5.4" => "gpt-5.4-fast",
+        "claude-sonnet" | "sonnet" | "sonnet-4" | "claude-sonnet-4" => "claude-sonnet-4-6",
+        "claude-opus" | "opus" | "opus-4" | "claude-opus-4" => "claude-opus-4-6",
+        "claude-haiku" | "haiku" | "haiku-4" | "claude-haiku-4" => "claude-haiku-4-5-20251001",
+        "gemini-pro" | "gemini-3.1-pro" => "gemini-3.1-pro-preview",
+        "gemini-flash" | "gemini-3-flash" => "gemini-3-flash-preview",
+        "glm-4.7" | "glm-5" | "kimi-k2.5" | "minimax-m2.5" | "minimax-m2.7" => {
+            return Some(normalized);
+        }
+        other
+            if other.starts_with("gpt-5.")
+                || other.starts_with("claude-")
+                || other.starts_with("gemini-") =>
+        {
+            return Some(normalized);
+        }
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+fn normalize_droid_reasoning_effort(
+    reasoning_effort: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
+    let value = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_ascii_lowercase();
+    let model = normalize_droid_model(model);
+    let is_claude_model = model
+        .as_deref()
+        .is_some_and(|model| model.starts_with("claude-"));
+    let mapped = match value.as_str() {
+        "off" | "none" => "none",
+        "minimal" | "min" => "minimal",
+        "low" => "low",
+        "medium" | "med" => "medium",
+        "high" => "high",
+        "max" => "max",
+        "xhigh" | "extra-high" | "extra_high" | "extra high" if is_claude_model => "max",
+        "xhigh" | "extra-high" | "extra_high" | "extra high" => "xhigh",
+        _ => return None,
+    };
+    Some(mapped.to_string())
+}
+
+fn push_droid_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_droid_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
+fn push_droid_reasoning_arg(
+    args: &mut Vec<String>,
+    reasoning_effort: Option<&str>,
+    model: Option<&str>,
+) {
+    if let Some(reasoning_effort) = normalize_droid_reasoning_effort(reasoning_effort, model) {
+        args.push("--reasoning-effort".to_string());
+        args.push(reasoning_effort);
+    }
+}
+
 #[derive(Clone)]
 pub struct DroidExecutor {
     binary: PathBuf,
@@ -76,15 +145,12 @@ impl Executor for DroidExecutor {
                 args.push("json".to_string());
             }
 
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-
-            if let Some(reasoning_effort) = &options.reasoning_effort {
-                args.push("--reasoning-effort".to_string());
-                args.push(reasoning_effort.clone());
-            }
+            push_droid_model_arg(&mut args, options.model.as_deref());
+            push_droid_reasoning_arg(
+                &mut args,
+                options.reasoning_effort.as_deref(),
+                options.model.as_deref(),
+            );
 
             if options.skip_permissions {
                 args.push("--skip-permissions-unsafe".to_string());
@@ -103,14 +169,12 @@ impl Executor for DroidExecutor {
             "--output-format".to_string(),
             "json".to_string(),
         ];
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-        if let Some(reasoning_effort) = &options.reasoning_effort {
-            args.push("--reasoning-effort".to_string());
-            args.push(reasoning_effort.clone());
-        }
+        push_droid_model_arg(&mut args, options.model.as_deref());
+        push_droid_reasoning_arg(
+            &mut args,
+            options.reasoning_effort.as_deref(),
+            options.model.as_deref(),
+        );
         if options.skip_permissions {
             args.push("--skip-permissions-unsafe".to_string());
         }
@@ -291,6 +355,18 @@ fn tool_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_droid_model_lowercases_runtime_prefixed_ids() {
+        assert_eq!(
+            normalize_droid_model(Some("Claude-Sonnet-4-6")),
+            Some("claude-sonnet-4-6".to_string())
+        );
+        assert_eq!(
+            normalize_droid_reasoning_effort(Some("xhigh"), Some("Claude-Sonnet-4-6")),
+            Some("max".to_string())
+        );
+    }
 
     #[test]
     fn parse_auth_failure_requests_input() {

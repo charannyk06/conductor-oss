@@ -13,6 +13,25 @@ use crate::process::{spawn_process_no_stdin_with_env_removals, spawn_process_wit
 
 const QWEN_ENV_REMOVE_KEYS: &[&str] = &["NO_COLOR", "FORCE_COLOR", "CLICOLOR_FORCE"];
 
+fn normalize_qwen_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "coder-model" | "qwen-max" | "qwen-plus" | "qwen-turbo" | "qwen3-coder-plus" => {
+            Some(normalized)
+        }
+        model if model.starts_with("qwen") || model.starts_with("dashscope/") => Some(normalized),
+        _ => None,
+    }
+}
+
+fn push_qwen_model_arg(args: &mut Vec<String>, model: Option<&str>) {
+    if let Some(model) = normalize_qwen_model(model) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+}
+
 #[derive(Clone)]
 pub struct QwenCodeExecutor {
     binary: PathBuf,
@@ -106,10 +125,7 @@ impl Executor for QwenCodeExecutor {
             if options.skip_permissions {
                 args.push("--yolo".to_string());
             }
-            if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
+            push_qwen_model_arg(&mut args, options.model.as_deref());
             if let Some(resume_target) = &options.resume_target {
                 args.push("--resume".to_string());
                 args.push(resume_target.clone());
@@ -126,10 +142,7 @@ impl Executor for QwenCodeExecutor {
         if options.skip_permissions {
             args.push("--yolo".to_string());
         }
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
+        push_qwen_model_arg(&mut args, options.model.as_deref());
         args.push("--output-format".to_string());
         args.push("stream-json".to_string());
         args.push("--include-partial-messages".to_string());
@@ -193,6 +206,18 @@ fn is_qwen_login_prompt(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_qwen_model_lowercases_prefixed_models() {
+        assert_eq!(
+            normalize_qwen_model(Some("QWEN3-Coder-Plus")),
+            Some("qwen3-coder-plus".to_string())
+        );
+        assert_eq!(
+            normalize_qwen_model(Some("DashScope/Qwen3-Coder-Plus")),
+            Some("dashscope/qwen3-coder-plus".to_string())
+        );
+    }
 
     #[test]
     fn build_args_interactive_uses_prompt_interactive_flag() {
