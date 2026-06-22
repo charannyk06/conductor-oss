@@ -1100,9 +1100,11 @@ fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bo
 
     if let Some(last) = session.conversation.last_mut() {
         if last.kind == "assistant_message" && last.source == "runtime" {
-            merge_assistant_fragment(&mut last.text, normalized);
-            last.created_at = Utc::now().to_rfc3339();
-            return true;
+            if merge_assistant_fragment(&mut last.text, normalized) {
+                last.created_at = Utc::now().to_rfc3339();
+                return true;
+            }
+            return false;
         }
     }
 
