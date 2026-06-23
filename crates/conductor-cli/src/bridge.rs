@@ -353,10 +353,11 @@ async fn proxy_preview_request(
         ),
     }
 
-    // SSRF protection — check host before any connection is made
+    // Preview requests intentionally target the paired machine's own dev server.
+    // Keep the bridge path loopback-only, but do not block localhost itself.
     let host = parsed_url.host_str().unwrap_or("");
-    if let Some(blocked) = check_host_for_ssrf(host, parsed_url.port()) {
-        tracing::warn!(target: "conductor-bridge", "ssrf blocked: {}", blocked);
+    if let Some(blocked) = check_preview_host_allowed(host, parsed_url.port()) {
+        tracing::warn!(target: "conductor-bridge", "preview host blocked: {}", blocked);
         anyhow::bail!("request to {} is not allowed", host);
     }
 
@@ -418,110 +419,35 @@ async fn proxy_preview_request(
     })
 }
 
-/// Returns true if the IP is in a private, loopback, link-local, or reserved range.
-fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+fn is_allowed_preview_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || is_cloud_metadata_ip(&std::net::IpAddr::V4(*v4))
-                || is_broadcast_ip(&std::net::IpAddr::V4(*v4))
-                || is_documentation_ip(&std::net::IpAddr::V4(*v4))
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unicast_link_local()
-                || v6.is_multicast()
-                || is_ipv6_unique_local(&std::net::IpAddr::V6(*v6))
-                || is_ipv6_teredo(&std::net::IpAddr::V6(*v6))
-        }
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
     }
 }
 
-fn is_cloud_metadata_ip(ip: &std::net::IpAddr) -> bool {
-    // 169.254.169.254, 169.254.169.253, 169.254.169.255 — AWS/GCP/Azure metadata endpoints
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            octets[0] == 169 && octets[1] == 254 && octets[2] == 169
-        }
-        _ => false,
-    }
-}
-
-fn is_broadcast_ip(ip: &std::net::IpAddr) -> bool {
-    // 255.255.255.255
-    matches!(ip, std::net::IpAddr::V4(v4) if v4.octets() == [255, 255, 255, 255])
-}
-
-fn is_documentation_ip(ip: &std::net::IpAddr) -> bool {
-    // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — RFC 5737 documentation ranges
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            octets[0] == 192 && octets[1] == 0 && octets[2] == 2
-                || octets[0] == 198 && octets[1] == 51 && octets[2] == 100
-                || octets[0] == 203 && octets[1] == 0 && octets[2] == 113
-        }
-        _ => false,
-    }
-}
-
-fn is_ipv6_unique_local(ip: &std::net::IpAddr) -> bool {
-    // fc00::/7 — IPv6 unique local addresses
-    matches!(ip, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xfe00 == 0xfc00)
-}
-
-fn is_ipv6_teredo(ip: &std::net::IpAddr) -> bool {
-    // 2001::/32 — IPv6 Teredo tunnel addresses
-    matches!(ip, std::net::IpAddr::V6(v6) if v6.segments()[0] == 0x2001)
-}
-
-/// Resolve a hostname and check all resulting IPs against blocked ranges.
-/// Returns the first blocked IP found, if any.
-fn check_host_for_ssrf(host: &str, port: Option<u16>) -> Option<String> {
-    // Block obvious internal hostnames before DNS lookup
+/// Resolve a hostname and allow only paired-device loopback preview targets.
+/// Returns the block reason, if any.
+fn check_preview_host_allowed(host: &str, _port: Option<u16>) -> Option<String> {
     let host_lower = host.to_ascii_lowercase();
     if host_lower == "localhost"
         || host_lower == "ip6-localhost"
         || host_lower == "ip6-loopback"
+        || host_lower == "::1"
         || host_lower == "[::1]"
         || host_lower == "0.0.0.0"
-        || host_lower == "*"
-        || host_lower.ends_with(".local")
-        || host_lower.ends_with(".internal")
-        || host_lower.ends_with(".private")
     {
-        return Some(format!("blocked hostname: {host}"));
-    }
-
-    // Try to parse as IP directly first
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_blocked_ip(&ip) {
-            return Some(format!("blocked IP: {host}"));
-        }
         return None;
     }
 
-    // Strip brackets from IPv6 hosts in URL format
-    let host_for_dns = host.trim_start_matches('[').trim_end_matches(']');
-
-    // Attempt DNS resolution and check all IPs against blocked ranges
-    let ip_addrs: Vec<std::net::SocketAddr> =
-        match std::net::ToSocketAddrs::to_socket_addrs(&(host_for_dns, port.unwrap_or(0))) {
-            Ok(addrs) => addrs.collect(),
-            Err(_) => return None, // Let reqwest handle invalid hostnames
-        };
-
-    for addr in &ip_addrs {
-        if is_blocked_ip(&addr.ip()) {
-            return Some(format!("DNS resolved to blocked IP: {host} -> {addr}"));
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_allowed_preview_ip(&ip) {
+            return None;
         }
+        return Some(format!("non-loopback preview IP: {host}"));
     }
 
-    None
+    Some(format!("non-loopback preview hostname: {host}"))
 }
 
 /// Strips CR/LF characters from header names and values to prevent response splitting attacks.
@@ -1194,5 +1120,20 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("tty")
         );
+    }
+
+    #[test]
+    fn preview_host_allows_loopback_dev_servers() {
+        assert_eq!(check_preview_host_allowed("localhost", Some(3000)), None);
+        assert_eq!(check_preview_host_allowed("127.0.0.1", Some(3000)), None);
+        assert_eq!(check_preview_host_allowed("[::1]", Some(3000)), None);
+        assert_eq!(check_preview_host_allowed("0.0.0.0", Some(3000)), None);
+    }
+
+    #[test]
+    fn preview_host_blocks_non_loopback_targets() {
+        assert!(check_preview_host_allowed("192.168.1.1", Some(80)).is_some());
+        assert!(check_preview_host_allowed("example.com", Some(443)).is_some());
+        assert!(check_preview_host_allowed("metadata.google.internal", Some(80)).is_some());
     }
 }

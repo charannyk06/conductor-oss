@@ -14,6 +14,12 @@ export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
+function readPreviewUrlHint(request: NextRequest): string | null {
+  const value = request.nextUrl.searchParams.get("previewUrlHint");
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
@@ -32,6 +38,7 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   const previewContext = await loadPreviewSessionContext(id, {
     request,
     headers: forwardedHeaders,
+    previewUrlHint: readPreviewUrlHint(request),
   });
   if (!previewContext.session && !previewContext.error) {
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
