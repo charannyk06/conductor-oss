@@ -5,6 +5,7 @@ import { agentModelAccessBadgeLabel, agentSetupStatusLabel } from "./agentSetupS
 
 test("agentSetupStatusLabel separates CLI readiness from auth and install state", () => {
   assert.equal(agentSetupStatusLabel(null), "Install needed");
+  assert.equal(agentSetupStatusLabel({ checking: true, installed: false, ready: false, configured: false }), "Checking install");
   assert.equal(agentSetupStatusLabel({ installed: false, ready: false, configured: false }), "Install needed");
   assert.equal(agentSetupStatusLabel({ installed: true, ready: false, configured: false }), "Auth needed");
   assert.equal(agentSetupStatusLabel({ installed: true, ready: false, configured: true }), "Setup needed");

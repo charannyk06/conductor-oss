@@ -138,8 +138,11 @@ async function refreshAgents(scopeKey: string, bridgeId?: string | null, force =
     return store.inFlight;
   }
 
-  store.loading = true;
-  emitChange(scopeKey);
+  const hasCachedAgents = store.agents.length > 0;
+  if (!force || !hasCachedAgents) {
+    store.loading = true;
+    emitChange(scopeKey);
+  }
 
   store.inFlight = (async () => {
     try {
