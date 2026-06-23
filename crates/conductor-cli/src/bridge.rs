@@ -428,7 +428,7 @@ fn is_allowed_preview_ip(ip: &std::net::IpAddr) -> bool {
 
 /// Resolve a hostname and allow only paired-device loopback preview targets.
 /// Returns the block reason, if any.
-fn check_preview_host_allowed(host: &str, port: Option<u16>) -> Option<String> {
+fn check_preview_host_allowed(host: &str, _port: Option<u16>) -> Option<String> {
     let host_lower = host.to_ascii_lowercase();
     if host_lower == "localhost"
         || host_lower == "ip6-localhost"
@@ -436,7 +436,6 @@ fn check_preview_host_allowed(host: &str, port: Option<u16>) -> Option<String> {
         || host_lower == "::1"
         || host_lower == "[::1]"
         || host_lower == "0.0.0.0"
-        || host_lower.ends_with(".localhost")
     {
         return None;
     }
@@ -448,27 +447,7 @@ fn check_preview_host_allowed(host: &str, port: Option<u16>) -> Option<String> {
         return Some(format!("non-loopback preview IP: {host}"));
     }
 
-    let host_for_dns = host.trim_start_matches('[').trim_end_matches(']');
-    let ip_addrs: Vec<std::net::SocketAddr> =
-        match std::net::ToSocketAddrs::to_socket_addrs(&(host_for_dns, port.unwrap_or(0))) {
-            Ok(addrs) => addrs.collect(),
-            Err(_) => return Some(format!("unverified preview hostname: {host}")),
-        };
-
-    if ip_addrs.is_empty() {
-        return Some(format!("unresolved preview hostname: {host}"));
-    }
-
-    if ip_addrs
-        .iter()
-        .all(|addr| is_allowed_preview_ip(&addr.ip()))
-    {
-        return None;
-    }
-
-    Some(format!(
-        "preview hostname resolved outside loopback: {host}"
-    ))
+    Some(format!("non-loopback preview hostname: {host}"))
 }
 
 /// Strips CR/LF characters from header names and values to prevent response splitting attacks.
