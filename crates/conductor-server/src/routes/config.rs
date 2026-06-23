@@ -2,6 +2,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::future::join_all;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1050,22 +1051,27 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
             .map(|(kind, executor)| (kind.clone(), executor.binary_path().to_path_buf()))
             .collect::<Vec<_>>()
     };
-    let mut agents = Vec::with_capacity(executor_entries.len());
-    for (kind, binary_path) in executor_entries {
-        let (description, homepage, icon_url) = agent_metadata(&kind);
-        agents.push(json!({
-            "name": kind.to_string(),
-            "description": description,
-            "version": Value::Null,
-            "homepage": homepage,
-            "iconUrl": icon_url,
-            "installed": true,
-            "configured": true,
-            "ready": true,
-            "runtimeModelCatalog": build_runtime_model_catalog(&kind, &binary_path).await,
-            "binary": binary_path.display().to_string(),
-        }));
-    }
+
+    let agent_tasks = executor_entries
+        .into_iter()
+        .map(|(kind, binary_path)| async move {
+            let (description, homepage, icon_url) = agent_metadata(&kind);
+            let runtime_model_catalog = build_runtime_model_catalog(&kind, &binary_path).await;
+            json!({
+                "name": kind.to_string(),
+                "description": description,
+                "version": Value::Null,
+                "homepage": homepage,
+                "iconUrl": icon_url,
+                "installed": true,
+                "configured": true,
+                "ready": true,
+                "runtimeModelCatalog": runtime_model_catalog,
+                "binary": binary_path.display().to_string(),
+            })
+        });
+
+    let agents = join_all(agent_tasks).await;
     Json(json!({ "agents": agents }))
 }
 

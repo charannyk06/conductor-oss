@@ -494,6 +494,7 @@ type RepositorySettingsPayload = {
 
 type AgentSetupState = {
   name: string;
+  checking: boolean;
   ready: boolean;
   installed: boolean;
   configured: boolean;
@@ -991,7 +992,7 @@ export default function DashboardClient({
   const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig(effectiveBridgeId, {
     enabled: scopeRequestsEnabled,
   });
-  const { agents } = useAgents(effectiveBridgeId, { enabled: scopeRequestsEnabled });
+  const { agents, loading: agentsLoading } = useAgents(effectiveBridgeId, { enabled: scopeRequestsEnabled });
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
@@ -1528,6 +1529,7 @@ export default function DashboardClient({
     for (const known of KNOWN_AGENTS) {
       states[normalizeAgentName(known.name)] = {
         name: known.name,
+        checking: agentsLoading,
         ready: false,
         installed: false,
         configured: false,
@@ -1558,6 +1560,7 @@ export default function DashboardClient({
       const known = getKnownAgent(agent.name);
       states[normalizeAgentName(agent.name)] = {
         name: known?.name ?? agent.name,
+        checking: false,
         ready: agent.ready === true,
         installed: agent.installed !== false,
         configured: agent.configured === true,
@@ -1580,7 +1583,7 @@ export default function DashboardClient({
     }
 
     return states;
-  }, [agents]);
+  }, [agents, agentsLoading]);
 
   const runtimeModelCatalogs = useMemo(() => {
     const catalogs: Record<string, RuntimeAgentModelCatalog> = {};
@@ -1787,6 +1790,10 @@ export default function DashboardClient({
 
     const effectiveAgent = resolveTerminalAgent(selectedAgent || DEFAULT_AGENT, DEFAULT_AGENT);
     const selectedAgentState = agentStatesByName[normalizeAgentName(effectiveAgent)] ?? null;
+    if (selectedAgentState?.checking) {
+      setCreateError(`${getAgentLabel(effectiveAgent)} is still checking installation status. Try again in a moment.`);
+      return false;
+    }
     if (selectedAgentState && !selectedAgentState.ready) {
       setCreateError(
         selectedAgentState.installed
