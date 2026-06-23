@@ -8,7 +8,7 @@
     "type": "git",
     "url": "https://github.com/charannyk06/conductor-oss.git"
   },
-  "description": "Markdown-native AI agent orchestrator — dispatch coding tasks from a kanban board",
+  "description": "Local-first control surface for AI coding agents, workspaces, worktrees, terminals, diffs, previews, and paired-device access",
   "packageManager": "bun@1.3.11",
   "workspaces": [
     "packages/*",
@@ -52,7 +52,11 @@
     "ai",
     "agent",
     "coding",
-    "kanban",
+    "coding-agents",
+    "local-first",
+    "worktrees",
+    "terminal",
+    "dashboard",
     "orchestrator",
     "claude",
     "codex",
