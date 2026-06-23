@@ -2,9 +2,9 @@
 
 # Conductor OSS
 
-### Run real AI coding agents across your repos, from one dashboard
+### Local-first control surface for real AI coding agents
 
-**Real terminals. Git worktrees. Local-first control.**
+**Workspaces. Native terminals. Git worktrees. Paired-device access.**
 
 [![npm version](https://img.shields.io/npm/v/conductor-oss?style=flat-square&color=0ea5e9)](https://www.npmjs.com/package/conductor-oss)
 [![CI](https://img.shields.io/github/actions/workflow/status/charannyk06/conductor-oss/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml)
@@ -16,13 +16,14 @@
 
 ---
 
-Conductor OSS is a local-first orchestration layer for AI coding agents.
+Conductor OSS is a local-first control surface for the coding CLIs you already use.
 
 It helps you:
 - connect a repo or local folder as a workspace
 - launch Claude Code, Codex, Gemini, and other coding CLIs in isolated git worktrees
 - watch the agent inside a real terminal, not a fake chat shell
 - review diffs, previews, retries, restores, and reviewer feedback from one dashboard
+- reach the same local runtime from a hosted dashboard through the paired-device bridge
 - keep project state in normal local files like `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db`
 
 ## Read this first, there are two ways to use Conductor

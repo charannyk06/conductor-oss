@@ -36,12 +36,16 @@
   "engines": {
     "node": ">=18"
   },
-  "description": "Markdown-native AI agent orchestrator. Write tasks in a kanban board, agents do the work.",
+  "description": "Local-first control surface for AI coding agents, workspaces, worktrees, terminals, diffs, previews, and paired-device access.",
   "keywords": [
     "ai",
     "agent",
     "orchestrator",
-    "kanban",
+    "coding-agents",
+    "local-first",
+    "worktrees",
+    "terminal",
+    "dashboard",
     "claude",
     "codex",
     "automation",

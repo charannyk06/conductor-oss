@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * Conductor CLI — `co`
+ * Conductor CLI: `co`
  *
- * Markdown-native AI agent orchestrator.
- * Dispatch tasks from a kanban board, track PRs, CI, and reviews.
+ * Local-first control surface for AI coding agents.
+ * Run coding CLIs across workspaces, worktrees, terminals, diffs, previews, and bridge-paired devices.
  */
 
 import { readFileSync } from "node:fs";
@@ -36,7 +36,7 @@ const program = new Command();
 
 program
   .name("co")
-  .description("Conductor — markdown-native AI agent orchestrator")
+  .description("Conductor: local-first control surface for AI coding agents")
   .version(cliPackage.version || "0.0.0");
 
 registerSpawn(program);
