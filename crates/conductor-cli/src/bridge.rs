@@ -459,11 +459,16 @@ fn check_preview_host_allowed(host: &str, port: Option<u16>) -> Option<String> {
         return Some(format!("unresolved preview hostname: {host}"));
     }
 
-    if ip_addrs.iter().all(|addr| is_allowed_preview_ip(&addr.ip())) {
+    if ip_addrs
+        .iter()
+        .all(|addr| is_allowed_preview_ip(&addr.ip()))
+    {
         return None;
     }
 
-    Some(format!("preview hostname resolved outside loopback: {host}"))
+    Some(format!(
+        "preview hostname resolved outside loopback: {host}"
+    ))
 }
 
 /// Strips CR/LF characters from header names and values to prevent response splitting attacks.
