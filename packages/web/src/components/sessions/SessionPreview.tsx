@@ -565,6 +565,8 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       const searchParams = new URLSearchParams();
       if (frameId) searchParams.set("frameId", frameId);
       if (interactiveOnly) searchParams.set("interactiveOnly", "1");
+      const previewUrlHint = urlInput.trim();
+      if (previewUrlHint) searchParams.set("previewUrlHint", previewUrlHint);
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview/dom?${searchParams.toString()}`, {
         cache: "no-store",
       });
@@ -583,7 +585,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     } finally {
       setDomLoading(false);
     }
-  }, [interactiveOnly, sessionId, status?.connected]);
+  }, [interactiveOnly, sessionId, status?.connected, urlInput]);
 
   useEffect(() => {
     if (!shouldRunPreview) {
@@ -719,11 +721,17 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     };
   }, [active, domNodes.length, pageVisible, previewInspectorTab, previewMode, sessionId, shouldRunPreview, status?.connected, status?.screenshotKey]);
 
-  const screenshotUrl = useMemo(() => (
-    status?.connected
-      ? `/api/sessions/${encodeURIComponent(sessionId)}/preview/screenshot?ts=${encodeURIComponent(status.screenshotKey)}`
-      : null
-  ), [sessionId, status?.connected, status?.screenshotKey]);
+  const screenshotUrl = useMemo(() => {
+    if (!status?.connected) {
+      return null;
+    }
+    const searchParams = new URLSearchParams({ ts: status.screenshotKey });
+    const previewUrlHint = urlInput.trim();
+    if (previewUrlHint) {
+      searchParams.set("previewUrlHint", previewUrlHint);
+    }
+    return `/api/sessions/${encodeURIComponent(sessionId)}/preview/screenshot?${searchParams.toString()}`;
+  }, [sessionId, status?.connected, status?.screenshotKey, urlInput]);
   const preferredUrlInputCandidate = autoConnectCandidate ?? status?.candidateUrls[0] ?? null;
 
   const activeFrame = useMemo(

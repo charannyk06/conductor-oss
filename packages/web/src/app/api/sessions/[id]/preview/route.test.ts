@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { GET, POST } from "./route";
+import { GET as GET_DOM } from "./dom/route";
+import { GET as GET_SCREENSHOT } from "./screenshot/route";
 
 const originalBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
 const originalBridgeRelayUrl = process.env.CONDUCTOR_BRIDGE_RELAY_URL;
@@ -489,6 +491,88 @@ test("POST clones the bridge request before preview lookup so body reuse does no
     assert.ok(!payload.error.includes("Body is unusable"));
     assert.deepEqual(payload.status.candidateUrls, ["http://localhost:3002/"]);
     assert.ok(payload.status.lastError === null || !payload.status.lastError.includes("Body is unusable"));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("bridge DOM and screenshot routes preserve explicit previewUrlHint", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "https://api.example.com";
+  process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
+
+  const seenPaths: string[] = [];
+
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+
+    assert.equal(url, "https://relay.example.com/api/devices/bridge-1/proxy");
+    assert.equal(init?.method, "POST");
+
+    const body = JSON.parse(String(init?.body)) as { path: string };
+    seenPaths.push(body.path);
+
+    if (body.path === "/api/sessions/session-1") {
+      return new Response(JSON.stringify({
+        id: "session-1",
+        projectId: "demo",
+        status: "working",
+        activity: "active",
+        branch: "feature/demo",
+        issueId: null,
+        summary: null,
+        createdAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        pr: null,
+        metadata: {},
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (body.path === "/api/sessions/session-1/output?lines=400") {
+      return new Response(JSON.stringify({ output: "" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (body.path === "/api/repositories") {
+      return new Response(JSON.stringify({ repositories: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ error: "not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const screenshotResponse = await GET_SCREENSHOT(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/preview/screenshot?previewUrlHint=http%3A%2F%2Flocalhost%3A3002%2F"),
+      { params: Promise.resolve({ id: "bridge:bridge-1:session-1" }) },
+    );
+    assert.equal(screenshotResponse.status, 404);
+
+    const domResponse = await GET_DOM(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/preview/dom?interactiveOnly=1&previewUrlHint=http%3A%2F%2Flocalhost%3A3002%2F"),
+      { params: Promise.resolve({ id: "bridge:bridge-1:session-1" }) },
+    );
+    assert.equal(domResponse.status, 400);
+
+    assert.deepEqual(seenPaths, [
+      "/api/sessions/session-1",
+      "/api/sessions/session-1/output?lines=400",
+      "/api/sessions/session-1",
+      "/api/sessions/session-1/output?lines=400",
+    ]);
   } finally {
     global.fetch = originalFetch;
   }

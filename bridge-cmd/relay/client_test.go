@@ -130,3 +130,53 @@ func TestTtydInstallHintForGOOS(t *testing.T) {
 		t.Fatalf("Darwin ttyd hint = %q, want Homebrew guidance", darwinHint)
 	}
 }
+
+func TestNormalizePreviewURLAllowsLoopbackDevServers(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"http://localhost:3000",
+		"http://127.0.0.1:3000/app",
+		"http://[::1]:3000",
+	}
+	for _, raw := range cases {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			if _, err := normalizePreviewURL(raw); err != nil {
+				t.Fatalf("normalizePreviewURL(%q) returned error: %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestNormalizePreviewURLRewritesUnspecifiedHost(t *testing.T) {
+	t.Parallel()
+
+	parsed, err := normalizePreviewURL("http://0.0.0.0:3000")
+	if err != nil {
+		t.Fatalf("normalizePreviewURL returned error: %v", err)
+	}
+	if parsed.Host != "127.0.0.1:3000" {
+		t.Fatalf("Host = %q, want 127.0.0.1:3000", parsed.Host)
+	}
+}
+
+func TestNormalizePreviewURLRejectsNonLoopbackHosts(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"https://example.com",
+		"http://192.168.1.10",
+		"file:///tmp/app.html",
+	}
+	for _, raw := range cases {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			if _, err := normalizePreviewURL(raw); err == nil {
+				t.Fatalf("normalizePreviewURL(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
