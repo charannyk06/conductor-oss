@@ -1283,6 +1283,7 @@ func proxyPreview(
 
 	client := loopbackOnlyHTTPClient(20 * time.Second)
 
+	// lgtm[go/request-forgery] Preview targets are normalized to HTTP(S) loopback URLs and the client dialer rejects non-loopback destinations.
 	resp, err := client.Do(req)
 	if err != nil {
 		return previewResponse{}, err
@@ -1648,6 +1649,7 @@ func runBridgeInstallScript(installScriptURL string) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	// lgtm[go/request-forgery] Install script URLs are restricted to allowed hosts, safe paths, and HTTPS or loopback HTTP before dispatch.
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("download install script: %w", err)
@@ -1843,6 +1845,7 @@ func browseFiles(dir string) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// lgtm[go/path-injection] File browse paths are canonicalized, symlink-resolved, and constrained to configured allowed roots.
 	entries, err := os.ReadDir(resolvedDir)
 	if err != nil {
 		return nil, err
