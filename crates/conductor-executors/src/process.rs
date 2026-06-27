@@ -1156,15 +1156,18 @@ int main(void) {
         let cleared = unsafe { libc::fcntl(extra_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
         assert_eq!(cleared, 0, "should clear close-on-exec");
 
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+
         let mut handle = spawn_process_no_stdin(
             Path::new("/bin/sh"),
             &[
-                "-lc".to_string(),
+                "-c".to_string(),
                 "python3 -c 'import json, os; print(json.dumps(sorted(int(fd) for fd in os.listdir(\"/dev/fd\"))))'"
                     .to_string(),
             ],
             Path::new("."),
-            &HashMap::new(),
+            &env,
         )
         .await
         .expect("headless process should spawn");
