@@ -5,6 +5,8 @@ on:
     branches:
       - main
 
+permissions: {}
+
 jobs:
   block-non-owner-prs:
     runs-on: ubuntu-latest

@@ -5,13 +5,16 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize, edited]
 
+permissions:
+  contents: read
+
 jobs:
   validate-metadata:
     name: Validate PR metadata
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Validate PR title and description
         run: node scripts/validate-pr-description.mjs

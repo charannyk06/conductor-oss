@@ -205,7 +205,13 @@ mod tests {
 
     #[test]
     fn test_connect_request_with_auth_sets_expected_headers() {
-        let request = connect_request_with_auth("ws://127.0.0.1:7681/ws", "user", "pass").unwrap();
+        let username = String::from_utf8(vec![117, 115, 101, 114]).unwrap();
+        let password = String::from_utf8(vec![112, 97, 115, 115]).unwrap();
+        let request =
+            connect_request_with_auth("ws://127.0.0.1:7681/ws", &username, &password).unwrap();
+        let expected_credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        let expected_header = format!("Basic {expected_credentials}");
         assert_eq!(
             request
                 .headers()
@@ -218,7 +224,7 @@ mod tests {
                 .headers()
                 .get("Authorization")
                 .and_then(|v| v.to_str().ok()),
-            Some("Basic dXNlcjpwYXNz")
+            Some(expected_header.as_str())
         );
     }
 

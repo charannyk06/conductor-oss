@@ -47,6 +47,18 @@
     "ws": "8.21.0",
     "js-yaml": "4.2.0"
   },
+  "pnpm": {
+    "overrides": {
+      "yauzl": "3.3.1",
+      "basic-ftp": "5.3.1",
+      "fast-uri": "3.1.2",
+      "ip-address": "10.2.0",
+      "picomatch": "2.3.2",
+      "postcss": "8.5.15",
+      "ws": "8.21.0",
+      "js-yaml": "4.2.0"
+    }
+  },
   "homepage": "https://github.com/charannyk06/conductor-oss",
   "keywords": [
     "ai",

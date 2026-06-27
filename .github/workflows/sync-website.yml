@@ -13,12 +13,15 @@ on:
       - "packages/cli/**"
       - "docs/manifest.json"
 
+permissions:
+  contents: read
+
 jobs:
   validate-and-notify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout conductor-oss
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install jq
         run: sudo apt-get install -y jq
@@ -27,7 +30,7 @@ jobs:
         run: bash scripts/validate-docs.sh
 
       - name: Notify conductor-website
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
           repository: charannyk06/conductor-website

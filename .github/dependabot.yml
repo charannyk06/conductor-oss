@@ -22,6 +22,19 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-patch"]
 
+  # Preview worker Docker package lock
+  - package-ecosystem: npm
+    directory: /preview-worker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    open-pull-requests-limit: 5
+    ignore:
+      # Skip patch bumps to reduce noise
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+
   # Rust / Cargo
   - package-ecosystem: cargo
     directory: /

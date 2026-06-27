@@ -1,8 +1,11 @@
 package relay
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -169,6 +172,9 @@ func TestNormalizePreviewURLRejectsNonLoopbackHosts(t *testing.T) {
 		"https://example.com",
 		"http://192.168.1.10",
 		"file:///tmp/app.html",
+		"http://localhost.evil.com:3000",
+		"http://127.0.0.1.evil.com",
+		"http://notlocalhost.test",
 	}
 	for _, raw := range cases {
 		raw := raw
@@ -178,5 +184,121 @@ func TestNormalizePreviewURLRejectsNonLoopbackHosts(t *testing.T) {
 				t.Fatalf("normalizePreviewURL(%q) succeeded, want error", raw)
 			}
 		})
+	}
+}
+
+func TestBuildLocalBackendURLRejectsAbsoluteOrAuthorityPaths(t *testing.T) {
+	t.Parallel()
+
+	valid, err := buildLocalBackendURL("/api/sessions?limit=1")
+	if err != nil {
+		t.Fatalf("buildLocalBackendURL returned error for valid path: %v", err)
+	}
+	if got := valid.String(); got != "http://127.0.0.1:4749/api/sessions?limit=1" {
+		t.Fatalf("backend URL = %q", got)
+	}
+
+	validWithURLQuery, err := buildLocalBackendURL("/api/proxy?url=http%3A%2F%2Fexample.com%2Fapp")
+	if err != nil {
+		t.Fatalf("buildLocalBackendURL rejected a URL-shaped query value: %v", err)
+	}
+	if got := validWithURLQuery.String(); got != "http://127.0.0.1:4749/api/proxy?url=http%3A%2F%2Fexample.com%2Fapp" {
+		t.Fatalf("backend URL with query = %q", got)
+	}
+
+	cases := []string{
+		"@evil.com/api",
+		"//evil.com/api",
+		"http://evil.com/api",
+		"?next=http://evil.com",
+		"/api/sessions\r\nHost: evil.com",
+	}
+	for _, raw := range cases {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			if _, err := buildLocalBackendURL(raw); err == nil {
+				t.Fatalf("buildLocalBackendURL(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+func TestResolveTerminalTokenPayloadRejectsRemoteWebsocketHost(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"wsUrl":"wss://evil.example/ws"}`)
+	if _, _, err := resolveTerminalTokenPayload(payload, http.StatusOK); err == nil {
+		t.Fatal("resolveTerminalTokenPayload accepted a remote websocket host")
+	}
+}
+
+func TestDecodeBridgeInstallScriptURLRestrictsRepairSources(t *testing.T) {
+	t.Setenv(bridgeInstallHostsEnv, "")
+
+	valid, err := decodeBridgeInstallScriptURL(map[string]interface{}{
+		"installScriptUrl": "https://app.conductross.com/bridge/install.sh",
+	})
+	if err != nil {
+		t.Fatalf("decodeBridgeInstallScriptURL returned error for official URL: %v", err)
+	}
+	if valid != "https://app.conductross.com/bridge/install.sh" {
+		t.Fatalf("install URL = %q", valid)
+	}
+
+	cases := []string{
+		"http://app.conductross.com/bridge/install.sh",
+		"https://evil.example/bridge/install.sh",
+		"https://app.conductross.com/other.sh",
+		"https://user:pass@app.conductross.com/bridge/install.sh",
+		"https://localhost.evil.com/bridge/install.sh",
+	}
+	for _, raw := range cases {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodeBridgeInstallScriptURL(map[string]interface{}{"installScriptUrl": raw})
+			if err == nil {
+				t.Fatalf("decodeBridgeInstallScriptURL(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+func TestDecodeBase64BoundedAllowsExactlyMaxDecodedBytes(t *testing.T) {
+	t.Parallel()
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("abcd"))
+	decoded, err := decodeBase64Bounded(encoded, 4, "payload")
+	if err != nil {
+		t.Fatalf("decodeBase64Bounded rejected exact max payload: %v", err)
+	}
+	if string(decoded) != "abcd" {
+		t.Fatalf("decoded payload = %q", string(decoded))
+	}
+}
+
+func TestBrowseFilesRestrictsToAllowedRoots(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "project")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	t.Setenv(bridgeFileRootsEnv, root)
+
+	entries, err := browseFiles(nested)
+	if err != nil {
+		t.Fatalf("browseFiles returned error for allowed root: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries length = %d, want 1", len(entries))
+	}
+
+	outside := string(filepath.Separator) + "etc"
+	if _, err := browseFiles(outside); err == nil {
+		t.Fatalf("browseFiles(%q) succeeded, want root restriction error", outside)
 	}
 }
