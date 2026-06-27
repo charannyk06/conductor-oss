@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"os"
@@ -233,7 +234,7 @@ func TestResolveTerminalTokenPayloadRejectsRemoteWebsocketHost(t *testing.T) {
 }
 
 func TestDecodeBridgeInstallScriptURLRestrictsRepairSources(t *testing.T) {
-	t.Parallel()
+	t.Setenv(bridgeInstallHostsEnv, "")
 
 	valid, err := decodeBridgeInstallScriptURL(map[string]interface{}{
 		"installScriptUrl": "https://app.conductross.com/bridge/install.sh",
@@ -261,6 +262,19 @@ func TestDecodeBridgeInstallScriptURLRestrictsRepairSources(t *testing.T) {
 				t.Fatalf("decodeBridgeInstallScriptURL(%q) succeeded, want error", raw)
 			}
 		})
+	}
+}
+
+func TestDecodeBase64BoundedAllowsExactlyMaxDecodedBytes(t *testing.T) {
+	t.Parallel()
+
+	encoded := base64.StdEncoding.EncodeToString([]byte("abcd"))
+	decoded, err := decodeBase64Bounded(encoded, 4, "payload")
+	if err != nil {
+		t.Fatalf("decodeBase64Bounded rejected exact max payload: %v", err)
+	}
+	if string(decoded) != "abcd" {
+		t.Fatalf("decoded payload = %q", string(decoded))
 	}
 }
 

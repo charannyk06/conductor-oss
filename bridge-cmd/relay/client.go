@@ -79,7 +79,8 @@ type bridgeEnvelope struct {
 	SessionID  string `json:"session_id,omitempty"`
 
 	// file_browse / file_tree
-	Entries []any `json:"entries,omitempty"`
+	Entries []any  `json:"entries,omitempty"`
+	Error   string `json:"error,omitempty"`
 
 	// terminal_resize
 	Cols int `json:"cols,omitempty"`
@@ -245,7 +246,7 @@ func decodeBase64Bounded(encoded string, maxBytes int, label string) ([]byte, er
 	if trimmed == "" {
 		return nil, fmt.Errorf("missing %s", label)
 	}
-	if base64.StdEncoding.DecodedLen(len(trimmed)) > maxBytes {
+	if len(trimmed) > base64.StdEncoding.EncodedLen(maxBytes) {
 		return nil, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(trimmed)
@@ -611,6 +612,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				if browseErr != nil {
 					response.Status = http.StatusBadRequest
 					response.Body = map[string]string{"error": browseErr.Error()}
+					response.Error = browseErr.Error()
 					response.Entries = []any{}
 				}
 				_ = send(response)
@@ -1846,8 +1848,14 @@ func browseFiles(dir string) ([]any, error) {
 		return nil, err
 	}
 	// lgtm[go/path-injection] File browse paths are canonicalized, symlink-resolved, and constrained to configured allowed roots.
-	entries, err := os.ReadDir(resolvedDir)
+	dirHandle, err := os.Open(resolvedDir)
 	if err != nil {
+		return nil, err
+	}
+	defer dirHandle.Close()
+
+	entries, err := dirHandle.ReadDir(maxFileBrowseEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	if len(entries) > maxFileBrowseEntries {

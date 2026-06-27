@@ -18,8 +18,9 @@ RUN apk add --no-cache \
 
 RUN set -eux; \
     case "${TARGETARCH}" in \
+      "amd64") cloudflared_arch="amd64"; expected_sha="${CLOUDFLARED_AMD64_SHA256}" ;; \
       "arm64") cloudflared_arch="arm64"; expected_sha="${CLOUDFLARED_ARM64_SHA256}" ;; \
-      *) cloudflared_arch="amd64"; expected_sha="${CLOUDFLARED_AMD64_SHA256}" ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH:-<unset>}" >&2; exit 1 ;; \
     esac; \
     wget -O /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cloudflared_arch}"; \
     echo "${expected_sha}  /usr/local/bin/cloudflared" | sha256sum -c -; \
@@ -33,6 +34,10 @@ RUN npm ci --include=dev
 COPY src ./src
 
 RUN npm run build && npm prune --omit=dev
+
+RUN chown -R node:node /app
+
+USER node
 
 EXPOSE 3099
 

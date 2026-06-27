@@ -34,6 +34,12 @@ function asError(value: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
+function extractBridgeError(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const error = (value as { error?: unknown }).error;
+  return typeof error === "string" && error.trim().length > 0 ? error : null;
+}
+
 function normalizeTerminalChunk(value: string): { reset: boolean; data: string } {
   if (value.startsWith("\u000c")) {
     return { reset: true, data: value.slice(1) };
@@ -247,7 +253,12 @@ export function useBridgeTunnel(scope: string = BRIDGE_CONNECTION_SCOPE): Bridge
           case "file_tree": {
             const pending = pendingBrowseRef.current;
             if (pending && pending.path === payload.path) {
-              pending.resolve(payload.entries);
+              const error = payload.error ?? extractBridgeError(payload.body);
+              if (error || (payload.status !== undefined && payload.status >= 400)) {
+                pending.reject(new Error(error ?? `Bridge file browse failed with status ${payload.status}.`));
+              } else {
+                pending.resolve(payload.entries);
+              }
               pendingBrowseRef.current = null;
             }
             break;

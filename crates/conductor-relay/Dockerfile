@@ -1,7 +1,7 @@
 FROM rust:1.88@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p conductor-relay
+RUN cargo build --locked --release -p conductor-relay
 
 FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 RUN useradd --system --create-home --home-dir /var/lib/conductor-relay --shell /usr/sbin/nologin conductor \

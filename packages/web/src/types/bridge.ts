@@ -44,6 +44,9 @@ export type BridgeToBrowserMessage =
   | {
       type: "file_tree";
       path: string;
+      status?: number;
+      body?: unknown;
+      error?: string;
       entries: FileEntry[];
     }
   | {
