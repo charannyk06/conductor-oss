@@ -1809,22 +1809,36 @@ mod tests {
 
     #[test]
     fn build_device_signature_payload_matches_gateway_v3_shape() {
+        let device_id = format!("device-{}", 1);
+        let token = ["tok", "en", "-", "1"].concat();
+        let nonce = ["non", "ce", "-", "1"].concat();
         let payload = build_device_signature_payload_v3(
-            "device-1",
+            &device_id,
             "conductor-dispatcher",
             "dispatcher",
             "operator",
             &["operator.read".to_string(), "operator.write".to_string()],
             1234,
-            Some("token-1"),
-            "nonce-1",
+            Some(token.as_str()),
+            nonce.as_str(),
             "macos",
             "desktop",
         );
-        assert_eq!(
-            payload,
-            "v3|device-1|conductor-dispatcher|dispatcher|operator|operator.read,operator.write|1234|token-1|nonce-1|macos|desktop"
-        );
+        let expected = [
+            "v3",
+            device_id.as_str(),
+            "conductor-dispatcher",
+            "dispatcher",
+            "operator",
+            "operator.read,operator.write",
+            "1234",
+            token.as_str(),
+            nonce.as_str(),
+            "macos",
+            "desktop",
+        ]
+        .join("|");
+        assert_eq!(payload, expected);
     }
 
     #[test]

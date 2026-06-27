@@ -25,7 +25,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 notify-rust = { path = "../notify-rust" }
-jsonwebtoken = "9"
+jsonwebtoken = { workspace = true }
 regex = "1"
 libc = "0.2"
 glob = { workspace = true }
@@ -41,7 +41,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"
-rand = "0.8"
+rand = "0.8.6"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]

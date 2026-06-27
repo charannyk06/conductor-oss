@@ -35,7 +35,7 @@ serde_yaml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "derive"] }
 
 # Git
-git2 = { version = "0.19", default-features = false }
+git2 = { version = "0.21", default-features = false }
 
 # File watching
 notify = "7.0"
@@ -66,7 +66,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto", "use_pem"] }
 
 # HTTP client (for webhooks, GitHub API)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

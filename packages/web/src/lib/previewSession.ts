@@ -4,10 +4,10 @@ import { requireRustBackendUrl, resolveRustBackendUrl } from "@/lib/backendUrl";
 import { decodeBridgeSessionId, decorateBridgeSession } from "@/lib/bridgeSessionIds";
 import type { DashboardSession } from "@/lib/types";
 
-const LOCAL_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
 const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>`]+/gi;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
-const BARE_LOCAL_URL_PATTERN = /(?<!:\/\/)(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?::\d+)?(?:\/[^\s"'<>`]*)?/gi;
+const BARE_LOCAL_URL_PATTERN = /(?<!:\/\/)(?<![A-Za-z0-9.-])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s"'<>`]*)?/gi;
+const TRAILING_URL_PUNCTUATION = new Set([")", ",", ".", ";"]);
 const DIRECT_URL_METADATA_KEYS = new Set([
   "previewUrl",
   "devServerUrl",
@@ -272,8 +272,25 @@ function buildBridgePreviewConfig(
   };
 }
 
+function stripTrailingUrlPunctuation(value: string): string {
+  let end = value.length;
+  while (end > 0 && TRAILING_URL_PUNCTUATION.has(value[end - 1])) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)]$/, "$1").replace(/\.$/, "");
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "0.0.0.0"
+    || normalized === "::1";
+}
+
 function normalizeCandidateUrl(value: string): string {
-  const trimmed = value.trim().replace(/[),.;]+$/, "");
+  const trimmed = stripTrailingUrlPunctuation(value.trim());
+  BARE_LOCAL_URL_PATTERN.lastIndex = 0;
   const normalizedInput = URL_SCHEME_PATTERN.test(trimmed)
     ? trimmed
     : BARE_LOCAL_URL_PATTERN.test(trimmed)
@@ -326,7 +343,7 @@ function extractUrlsFromText(value: string | null | undefined): string[] {
 function isLoopbackUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
-    return LOCAL_HOST_PATTERN.test(parsed.hostname);
+    return isLoopbackHostname(parsed.hostname);
   } catch {
     return false;
   }

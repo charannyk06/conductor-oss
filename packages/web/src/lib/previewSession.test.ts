@@ -91,6 +91,69 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
   }
 });
 
+test("discoverPreviewCandidateUrls strips trailing URL punctuation without regex backtracking", async () => {
+  const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
+  const previousFetch = global.fetch;
+
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  global.fetch = (async () => new Response(JSON.stringify({ output: "" }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })) as typeof fetch;
+
+  try {
+    const session = buildSession({
+      localUrl: `http://localhost:3000/app${")".repeat(50000)},.;`,
+    });
+
+    const urls = await discoverPreviewCandidateUrls(session);
+
+    assert.equal(urls[0], "http://localhost:3000/app");
+  } finally {
+    process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
+    global.fetch = previousFetch;
+  }
+});
+
+test("loadPreviewSessionContext keeps lookalike localhost hosts out of bridge preview origins", async () => {
+  const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
+  const previousFetch = global.fetch;
+
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  global.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/sessions/session-1")) {
+      return new Response(JSON.stringify({
+        ...buildSession({
+          devServerUrl: "http://localhost.evil.com:3000",
+          localUrl: "http://127.0.0.1:3001",
+          other: "http://notlocalhost.test:3002 http://127.0.0.1.evil.com:3003",
+        }),
+        bridgeId: "bridge-1",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.endsWith("/api/sessions/session-1/output?lines=400")) {
+      return new Response(JSON.stringify({ output: "" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const context = await loadPreviewSessionContext("session-1");
+
+    assert.deepEqual(context.bridgePreview?.allowedOrigins, ["http://127.0.0.1:3001"]);
+  } finally {
+    process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
+    global.fetch = previousFetch;
+  }
+});
+
 test("discoverPreviewCandidateUrls skips bridge output without request context", async () => {
   const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
   const previousFetch = global.fetch;

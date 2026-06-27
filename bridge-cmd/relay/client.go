@@ -25,17 +25,27 @@ import (
 )
 
 const (
-	defaultScope              = "conductor-bridge-control"
-	defaultHeartbeatInterval  = 30 * time.Second
-	maxReconnectBackoff       = 30 * time.Second
-	terminalAttachMaxAttempts = 12
-	ttydPortRangeStart        = 7681
-	ttydPortRangeEnd          = 8699
-	bridgeProxyMetaKey        = "$bridgeProxy"
-	bridgeRequestMetaKey      = "$bridgeRequest"
-	bridgeInstallPath         = "/_bridge/install"
-	bridgeServiceRestartPath  = "/_bridge/service/restart"
-	maxPreviewResponseBytes   = 10 * 1024 * 1024
+	defaultScope                   = "conductor-bridge-control"
+	defaultHeartbeatInterval       = 30 * time.Second
+	maxReconnectBackoff            = 30 * time.Second
+	terminalAttachMaxAttempts      = 12
+	ttydPortRangeStart             = 7681
+	ttydPortRangeEnd               = 8699
+	bridgeProxyMetaKey             = "$bridgeProxy"
+	bridgeRequestMetaKey           = "$bridgeRequest"
+	bridgeInstallPath              = "/_bridge/install"
+	bridgeServiceRestartPath       = "/_bridge/service/restart"
+	maxPreviewResponseBytes        = 10 * 1024 * 1024
+	maxPreviewRequestBodyBytes     = 10 * 1024 * 1024
+	maxProxyRequestBodyBytes       = 10 * 1024 * 1024
+	maxBackendResponseBytes        = 10 * 1024 * 1024
+	maxTerminalTokenResponseBytes  = 64 * 1024
+	maxBridgeInstallScriptBytes    = 512 * 1024
+	maxFileBrowseEntries           = 2000
+	maxBridgeWebSocketMessageBytes = 10 * 1024 * 1024
+	legacyTTYDMirrorEnv            = "CONDUCTOR_ENABLE_LEGACY_TTYD_MIRROR"
+	bridgeInstallHostsEnv          = "CONDUCTOR_BRIDGE_INSTALL_HOSTS"
+	bridgeFileRootsEnv             = "CONDUCTOR_BRIDGE_FILE_ROOTS"
 )
 
 type Options struct {
@@ -220,6 +230,131 @@ type sessionOptions struct {
 
 var backendEnsureMu sync.Mutex
 
+func legacyTTYDMirrorEnabled() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(legacyTTYDMirrorEnv)))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeBase64Bounded(encoded string, maxBytes int, label string) ([]byte, error) {
+	trimmed := strings.TrimSpace(encoded)
+	if trimmed == "" {
+		return nil, fmt.Errorf("missing %s", label)
+	}
+	if base64.StdEncoding.DecodedLen(len(trimmed)) > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", label, err)
+	}
+	if len(decoded) > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	return decoded, nil
+}
+
+func readAllBounded(reader io.Reader, maxBytes int, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, int64(maxBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", label, err)
+	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("%s exceeded %d bytes", label, maxBytes)
+	}
+	return data, nil
+}
+
+func normalizeHTTPMethod(method string) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(method))
+	if normalized == "" {
+		normalized = http.MethodGet
+	}
+	switch normalized {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("HTTP method %q is not allowed", method)
+	}
+}
+
+func buildLocalBackendURL(rawPath string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		trimmed = "/"
+	}
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return nil, fmt.Errorf("backend path contains invalid characters")
+	}
+	if !strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "//") {
+		return nil, fmt.Errorf("backend path must be a slash-prefixed relative path")
+	}
+	parsed, err := url.ParseRequestURI(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend path: %w", err)
+	}
+	if parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
+		return nil, fmt.Errorf("backend path must not include a scheme or host")
+	}
+	return &url.URL{
+		Scheme:   "http",
+		Host:     "127.0.0.1:4749",
+		Path:     parsed.Path,
+		RawQuery: parsed.RawQuery,
+	}, nil
+}
+
+func requireLoopbackDialTarget(ctx context.Context, address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	host = strings.Trim(host, "[]")
+	if parsedIP := net.ParseIP(host); parsedIP != nil {
+		if parsedIP.IsLoopback() || parsedIP.IsUnspecified() {
+			return nil
+		}
+		return fmt.Errorf("non-loopback preview address %q is not allowed", host)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("resolve preview host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("preview host %q did not resolve", host)
+	}
+	for _, resolved := range ips {
+		if !resolved.IP.IsLoopback() && !resolved.IP.IsUnspecified() {
+			return fmt.Errorf("preview host %q resolved to non-loopback address %s", host, resolved.IP.String())
+		}
+	}
+	return nil
+}
+
+func loopbackOnlyHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: timeout}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if err := requireLoopbackDialTarget(ctx, address); err != nil {
+				return nil, err
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // findFreePort asks the OS for a free port in the ttyd range.
 func findFreePort() (int, error) {
 	for port := ttydPortRangeStart; port <= ttydPortRangeEnd; port++ {
@@ -282,72 +417,79 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 	// 1. ttyd is optional for the initial bridge connection. If it is missing,
 	// keep the device online and fall back to API + session-terminal proxy flows.
-	if ttydPath, err := findTtyd(); err == nil {
-		port, err := findFreePort()
-		if err != nil {
-			fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
-		} else {
-			cmd = exec.Command(ttydPath, []string{
-				"-p", fmt.Sprintf("%d", port),
-				"-i", "127.0.0.1",
-				"-W", // accept any origin (relay->bridge->browser)
-				"bash",
-			}...)
-			cmd.Env = os.Environ()
-			ttydOut, pipeErr := cmd.StdoutPipe()
-			if pipeErr != nil {
-				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
-				stopTtyd()
-			} else if ttydErr, pipeErr := cmd.StderrPipe(); pipeErr != nil {
-				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
-				stopTtyd()
-			} else if startErr := cmd.Start(); startErr != nil {
-				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", startErr)
-				stopTtyd()
+	if legacyTTYDMirrorEnabled() {
+		if ttydPath, err := findTtyd(); err == nil {
+			port, err := findFreePort()
+			if err != nil {
+				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
 			} else {
-				go func(stdoutPipe io.ReadCloser) {
-					buf := make([]byte, 1024)
-					for {
-						n, err := stdoutPipe.Read(buf)
-						if n > 0 {
-							fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-						}
-						if err != nil {
-							break
-						}
-					}
-				}(ttydOut)
-				go func(stderrPipe io.ReadCloser) {
-					buf := make([]byte, 1024)
-					for {
-						n, err := stderrPipe.Read(buf)
-						if n > 0 {
-							fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-						}
-						if err != nil {
-							break
-						}
-					}
-				}(ttydErr)
-
-				time.Sleep(500 * time.Millisecond)
-				if cmd == nil || cmd.Process == nil {
-					fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: ttyd process not started\n")
+				// findTtyd only returns an existing ttyd binary path. Legacy mirror is disabled by default.
+				// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+				cmd = exec.Command(ttydPath, []string{
+					"-p", fmt.Sprintf("%d", port),
+					"-i", "127.0.0.1",
+					"-W", // accept any origin (relay->bridge->browser)
+					"bash",
+				}...)
+				cmd.Env = os.Environ()
+				ttydOut, pipeErr := cmd.StdoutPipe()
+				if pipeErr != nil {
+					fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
+					stopTtyd()
+				} else if ttydErr, pipeErr := cmd.StderrPipe(); pipeErr != nil {
+					fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
+					stopTtyd()
+				} else if startErr := cmd.Start(); startErr != nil {
+					fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", startErr)
 					stopTtyd()
 				} else {
-					ttydURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
-					ttydWS, _, dialErr := websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
-					if dialErr != nil {
-						fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", dialErr)
+					go func(stdoutPipe io.ReadCloser) {
+						buf := make([]byte, 1024)
+						for {
+							n, err := stdoutPipe.Read(buf)
+							if n > 0 {
+								fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+							}
+							if err != nil {
+								break
+							}
+						}
+					}(ttydOut)
+					go func(stderrPipe io.ReadCloser) {
+						buf := make([]byte, 1024)
+						for {
+							n, err := stderrPipe.Read(buf)
+							if n > 0 {
+								fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+							}
+							if err != nil {
+								break
+							}
+						}
+					}(ttydErr)
+
+					time.Sleep(500 * time.Millisecond)
+					if cmd == nil || cmd.Process == nil {
+						fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: ttyd process not started\n")
 						stopTtyd()
 					} else {
-						ttydConn = ttydWS
+						ttydURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
+						ttydWS, _, dialErr := websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
+						if dialErr != nil {
+							fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", dialErr)
+							stopTtyd()
+						} else {
+							ttydWS.SetReadLimit(maxBridgeWebSocketMessageBytes)
+							ttydConn = ttydWS
+						}
 					}
 				}
 			}
+		} else {
+			fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
 		}
 	} else {
-		fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
+		fmt.Fprintf(opts.stderr, "legacy ttyd mirror disabled; bridge will use the authenticated backend terminal proxy. Set %s=true to re-enable the legacy mirror.\n", legacyTTYDMirrorEnv)
 	}
 
 	// 2. Connect to relay.
@@ -362,6 +504,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 		return false, fmt.Errorf("dial relay: %w", err)
 	}
 	defer relayConn.Close()
+	relayConn.SetReadLimit(maxBridgeWebSocketMessageBytes)
 	defer stopTtyd()
 
 	// 3. Tell relay we are connected and ready.
@@ -459,12 +602,18 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				}
 
 			case "file_browse":
-				entries, _ := browseFiles(env.Path)
-				_ = send(bridgeEnvelope{
+				entries, browseErr := browseFiles(env.Path)
+				response := bridgeEnvelope{
 					Type:    "file_tree",
 					Path:    env.Path,
 					Entries: entries,
-				})
+				}
+				if browseErr != nil {
+					response.Status = http.StatusBadRequest
+					response.Body = map[string]string{"error": browseErr.Error()}
+					response.Entries = []any{}
+				}
+				_ = send(response)
 
 			case "terminal_proxy_start":
 				terminalID := strings.TrimSpace(env.TerminalID)
@@ -650,6 +799,13 @@ func resolveTerminalTokenPayload(body []byte, statusCode int) (string, backendTe
 		return "", "", &terminalAttachError{err: fmt.Errorf("unsupported terminal websocket scheme %q", resolved.Scheme)}
 	}
 
+	if protocol == backendTerminalProtocolNative && !isLoopbackHostname(resolved.Hostname()) {
+		return "", "", &terminalAttachError{err: fmt.Errorf("native terminal websocket host %q is not allowed", resolved.Hostname())}
+	}
+	if protocol == backendTerminalProtocolTTYD && !isLoopbackHostname(resolved.Hostname()) {
+		return "", "", &terminalAttachError{err: fmt.Errorf("ttyd terminal websocket host %q is not allowed", resolved.Hostname())}
+	}
+
 	return resolved.String(), protocol, nil
 }
 
@@ -667,13 +823,14 @@ func fetchSessionTerminalWSURL(sessionID string) (string, backendTerminalProtoco
 		return "", "", fmt.Errorf("build terminal token request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", &terminalAttachError{err: fmt.Errorf("request terminal token: %w", err)}
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAllBounded(resp.Body, maxTerminalTokenResponseBytes, "terminal token response")
 	if err != nil {
 		return "", "", &terminalAttachError{err: fmt.Errorf("read terminal token response: %w", err)}
 	}
@@ -961,6 +1118,7 @@ func proxyTerminalSession(
 		return err
 	}
 	defer backendConn.Close()
+	backendConn.SetReadLimit(maxBridgeWebSocketMessageBytes)
 
 	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID)
 	if err != nil {
@@ -972,6 +1130,7 @@ func proxyTerminalSession(
 		return fmt.Errorf("connect relay terminal socket: %w", err)
 	}
 	defer relayConn.Close()
+	relayConn.SetReadLimit(maxBridgeWebSocketMessageBytes)
 
 	if protocol == backendTerminalProtocolTTYD {
 		return proxyTTYDTerminalSession(ctx, backendConn, relayConn)
@@ -992,6 +1151,7 @@ type previewResponse struct {
 
 func isLoopbackHostname(hostname string) bool {
 	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
+	normalized = strings.TrimSuffix(normalized, ".")
 	switch normalized {
 	case "127.0.0.1", "localhost", "::1", "0.0.0.0":
 		return true
@@ -1072,9 +1232,9 @@ func decodeProxyRequestBody(body interface{}) ([]byte, string, bool, error) {
 		return nil, "", true, fmt.Errorf("missing bridge request payload")
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	decoded, err := decodeBase64Bounded(encoded, maxProxyRequestBodyBytes, "bridge request payload")
 	if err != nil {
-		return nil, "", true, fmt.Errorf("decode bridge request payload: %w", err)
+		return nil, "", true, err
 	}
 
 	contentType, _ := meta["contentType"].(string)
@@ -1101,27 +1261,27 @@ func proxyPreview(
 		return previewResponse{}, err
 	}
 
+	method, err = normalizeHTTPMethod(method)
+	if err != nil {
+		return previewResponse{}, err
+	}
+
 	var requestBody io.Reader
 	if strings.TrimSpace(bodyBase64) != "" {
-		decoded, err := base64.StdEncoding.DecodeString(bodyBase64)
+		decoded, err := decodeBase64Bounded(bodyBase64, maxPreviewRequestBodyBytes, "preview body")
 		if err != nil {
-			return previewResponse{}, fmt.Errorf("decode preview body: %w", err)
+			return previewResponse{}, err
 		}
 		requestBody = bytes.NewReader(decoded)
 	}
 
-	req, err := http.NewRequest(strings.TrimSpace(method), targetURL.String(), requestBody)
+	req, err := http.NewRequest(method, targetURL.String(), requestBody)
 	if err != nil {
 		return previewResponse{}, err
 	}
 	req.Header = sanitizePreviewRequestHeaders(headers)
 
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := loopbackOnlyHTTPClient(20 * time.Second)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1129,13 +1289,9 @@ func proxyPreview(
 	}
 	defer resp.Body.Close()
 
-	limitedBody := io.LimitReader(resp.Body, maxPreviewResponseBytes+1)
-	responseBytes, err := io.ReadAll(limitedBody)
+	responseBytes, err := readAllBounded(resp.Body, maxPreviewResponseBytes, "preview response")
 	if err != nil {
-		return previewResponse{}, fmt.Errorf("read preview response: %w", err)
-	}
-	if len(responseBytes) > maxPreviewResponseBytes {
-		return previewResponse{}, fmt.Errorf("preview response exceeded %d bytes", maxPreviewResponseBytes)
+		return previewResponse{}, err
 	}
 
 	return previewResponse{
@@ -1190,7 +1346,7 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	responseBytes, err := io.ReadAll(resp.Body)
+	responseBytes, err := readAllBounded(resp.Body, maxBackendResponseBytes, "backend response")
 	if err != nil {
 		return apiResponse{Status: resp.StatusCode, Body: map[string]any{
 			"error": err.Error(),
@@ -1202,11 +1358,8 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 		return apiResponse{Status: resp.StatusCode, Body: map[string]any{}}, nil
 	}
 
-	if strings.Contains(strings.ToLower(responseContentType), "application/json") {
-		var respBody interface{}
-		if err := json.Unmarshal(responseBytes, &respBody); err == nil {
-			return apiResponse{Status: resp.StatusCode, Body: respBody}, nil
-		}
+	if strings.Contains(strings.ToLower(responseContentType), "application/json") && json.Valid(responseBytes) {
+		return apiResponse{Status: resp.StatusCode, Body: json.RawMessage(responseBytes)}, nil
 	}
 
 	if strings.HasPrefix(strings.ToLower(responseContentType), "text/") {
@@ -1366,13 +1519,20 @@ func resolveLocalConductorVersion() string {
 }
 
 func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
-	backendURL := "http://127.0.0.1:4749" + path
+	backendURL, err := buildLocalBackendURL(path)
+	if err != nil {
+		return nil, err
+	}
+	method, err = normalizeHTTPMethod(method)
+	if err != nil {
+		return nil, err
+	}
 	var requestBody io.Reader
 	if len(requestBodyBytes) > 0 {
 		requestBody = bytes.NewReader(requestBodyBytes)
 	}
 
-	req, err := http.NewRequest(method, backendURL, requestBody)
+	req, err := http.NewRequest(method, backendURL.String(), requestBody)
 	if err != nil {
 		return nil, err
 	}
@@ -1380,7 +1540,12 @@ func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentTy
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	client := &http.Client{Timeout: backendRequestTimeout(path)}
+	client := &http.Client{
+		Timeout: backendRequestTimeout(backendURL.Path),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return client.Do(req)
 }
 
@@ -1393,6 +1558,48 @@ func ensureLocalBackendForProxy() error {
 		StartupTimeout: 45 * time.Second,
 	})
 	return err
+}
+
+func allowedBridgeInstallHosts() map[string]struct{} {
+	hosts := map[string]struct{}{
+		"app.conductross.com": {},
+		"conductross.com":     {},
+		"localhost":           {},
+		"127.0.0.1":           {},
+		"::1":                 {},
+	}
+	for _, raw := range strings.Split(os.Getenv(bridgeInstallHostsEnv), ",") {
+		host := strings.TrimSuffix(strings.Trim(strings.ToLower(strings.TrimSpace(raw)), "[]"), ".")
+		if host != "" {
+			hosts[host] = struct{}{}
+		}
+	}
+	return hosts
+}
+
+func validateBridgeInstallScriptURL(parsed *url.URL) error {
+	if parsed == nil || parsed.Hostname() == "" {
+		return fmt.Errorf("installScriptUrl must include a host")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("installScriptUrl must not include credentials")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("installScriptUrl must not include a fragment")
+	}
+	host := strings.TrimSuffix(strings.Trim(strings.ToLower(strings.TrimSpace(parsed.Hostname())), "[]"), ".")
+	if parsed.Scheme != "https" {
+		if !(parsed.Scheme == "http" && isLoopbackHostname(host)) {
+			return fmt.Errorf("installScriptUrl scheme %q is not allowed", parsed.Scheme)
+		}
+	}
+	if _, ok := allowedBridgeInstallHosts()[host]; !ok {
+		return fmt.Errorf("installScriptUrl host %q is not allowed; set %s to allow self-hosted repair URLs", parsed.Hostname(), bridgeInstallHostsEnv)
+	}
+	if parsed.Path != "/bridge/install.sh" && parsed.Path != "/bridge/install.ps1" {
+		return fmt.Errorf("installScriptUrl path %q is not allowed", parsed.Path)
+	}
+	return nil
 }
 
 func decodeBridgeInstallScriptURL(body interface{}) (string, error) {
@@ -1415,20 +1622,32 @@ func decodeBridgeInstallScriptURL(body interface{}) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse installScriptUrl: %w", err)
 	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", fmt.Errorf("unsupported installScriptUrl scheme %q", parsed.Scheme)
+	if err := validateBridgeInstallScriptURL(parsed); err != nil {
+		return "", err
 	}
 
 	return parsed.String(), nil
 }
 
 func runBridgeInstallScript(installScriptURL string) error {
-	request, err := http.NewRequest(http.MethodGet, installScriptURL, nil)
+	parsed, err := url.Parse(strings.TrimSpace(installScriptURL))
+	if err != nil {
+		return fmt.Errorf("parse install script URL: %w", err)
+	}
+	if err := validateBridgeInstallScriptURL(parsed); err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return fmt.Errorf("build install script request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("download install script: %w", err)
@@ -1439,9 +1658,12 @@ func runBridgeInstallScript(installScriptURL string) error {
 		return fmt.Errorf("download install script failed with status %d", response.StatusCode)
 	}
 
-	scriptBytes, err := io.ReadAll(io.LimitReader(response.Body, 512*1024))
+	scriptBytes, err := readAllBounded(response.Body, maxBridgeInstallScriptBytes, "install script")
 	if err != nil {
-		return fmt.Errorf("read install script: %w", err)
+		return err
+	}
+	if len(bytes.TrimSpace(scriptBytes)) == 0 {
+		return fmt.Errorf("install script is empty")
 	}
 
 	if runtime.GOOS == "windows" {
@@ -1526,13 +1748,107 @@ type fileEntry struct {
 	Kind string `json:"kind"`
 }
 
-func browseFiles(dir string) ([]any, error) {
-	if dir == "" {
-		dir = "/"
+func normalizeFileBrowseRoot(root string) (string, error) {
+	trimmed := strings.TrimSpace(root)
+	if trimmed == "" {
+		return "", fmt.Errorf("empty file browse root")
 	}
-	entries, err := os.ReadDir(dir)
+	expanded := trimmed
+	if strings.HasPrefix(expanded, "~/") || expanded == "~" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			expanded = filepath.Join(home, strings.TrimPrefix(expanded, "~/"))
+		}
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		abs = resolved
+	}
+	return filepath.Clean(abs), nil
+}
+
+func allowedFileBrowseRoots() []string {
+	seen := map[string]struct{}{}
+	var roots []string
+	add := func(raw string) {
+		root, err := normalizeFileBrowseRoot(raw)
+		if err != nil || root == string(filepath.Separator) {
+			return
+		}
+		if _, ok := seen[root]; !ok {
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(home)
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		add(cwd)
+	}
+	for _, raw := range strings.Split(os.Getenv(bridgeFileRootsEnv), string(os.PathListSeparator)) {
+		add(raw)
+	}
+	return roots
+}
+
+func isPathWithinRoot(path string, root string) bool {
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
+}
+
+func resolveFileBrowseDir(dir string) (string, error) {
+	roots := allowedFileBrowseRoots()
+	if len(roots) == 0 {
+		return "", fmt.Errorf("no file browse roots are configured")
+	}
+	trimmed := strings.TrimSpace(dir)
+	if trimmed == "" {
+		return roots[0], nil
+	}
+	if strings.ContainsAny(trimmed, "\x00\r\n") {
+		return "", fmt.Errorf("file browse path contains invalid characters")
+	}
+	if !filepath.IsAbs(trimmed) {
+		trimmed = filepath.Join(roots[0], trimmed)
+	}
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		abs = resolved
+	}
+	cleaned := filepath.Clean(abs)
+	for _, root := range roots {
+		if isPathWithinRoot(cleaned, root) {
+			return cleaned, nil
+		}
+	}
+	return "", fmt.Errorf("file browse path is outside allowed roots; set %s to add roots", bridgeFileRootsEnv)
+}
+
+func browseFiles(dir string) ([]any, error) {
+	resolvedDir, err := resolveFileBrowseDir(dir)
 	if err != nil {
 		return nil, err
+	}
+	entries, err := os.ReadDir(resolvedDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) > maxFileBrowseEntries {
+		entries = entries[:maxFileBrowseEntries]
 	}
 	var result []any
 	for _, e := range entries {

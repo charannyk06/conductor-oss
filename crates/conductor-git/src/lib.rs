@@ -77,7 +77,7 @@ impl GitOps {
         let worktrees = self.repo.worktrees()?;
         Ok(worktrees
             .iter()
-            .filter_map(|w| w.map(String::from))
+            .filter_map(|w| w.ok().flatten().map(String::from))
             .collect())
     }
 
