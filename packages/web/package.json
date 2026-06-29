@@ -22,7 +22,7 @@
     "@conductor-oss/core": "workspace:*",
     "@pierre/diffs": "^1.0.11",
     "@primer/octicons-react": "^19.15.0",
-    "@puppeteer/browsers": "^2.13.0",
+    "@puppeteer/browsers": "^3.0.5",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-scroll-area": "^1.2.10",
