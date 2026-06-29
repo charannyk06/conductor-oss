@@ -22,7 +22,7 @@
     "test": "tsx --test src/adapter.test.ts src/client.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^25.3.3",
+    "@types/node": "^26.0.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
