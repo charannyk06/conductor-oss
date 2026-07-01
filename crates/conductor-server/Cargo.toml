@@ -41,7 +41,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"
-rand = "0.8.6"
+rand = "0.9.3"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
