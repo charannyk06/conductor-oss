@@ -22,8 +22,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::helpers::prepare_detached_runtime_env;
 use super::types::{
-    DETACHED_PID_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY,
-    TTYD_PORT_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
+    DETACHED_PID_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TTYD_AUTH_PASSWORD_METADATA_KEY,
+    TTYD_AUTH_USERNAME_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_PORT_METADATA_KEY,
+    TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
 };
 use super::RuntimeLaunch;
 use crate::routes::ttyd_protocol;
@@ -51,12 +52,19 @@ const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 20;
 const TTYD_MAX_SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
 const TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
 const FALLBACK_INTERACTIVE_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash", "/bin/sh"];
+const TTYD_AUTH_USERNAME: &str = "conductor";
 
 struct TtydSessionOwnerChannels {
     output_tx: mpsc::Sender<ExecutorOutput>,
     input_rx: mpsc::Receiver<ExecutorInput>,
     resize_rx: mpsc::Receiver<PtyDimensions>,
     ready_tx: Option<oneshot::Sender<Result<()>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TtydAuthCredentials {
+    username: String,
+    password: String,
 }
 
 #[derive(Debug)]
@@ -75,6 +83,50 @@ impl std::fmt::Display for SessionExceededMaxDurationError {
 }
 
 impl std::error::Error for SessionExceededMaxDurationError {}
+
+fn generate_ttyd_auth_credentials() -> TtydAuthCredentials {
+    TtydAuthCredentials {
+        username: TTYD_AUTH_USERNAME.to_string(),
+        password: uuid::Uuid::new_v4().simple().to_string(),
+    }
+}
+
+fn session_ttyd_auth_credentials(
+    session: &crate::state::SessionRecord,
+) -> Option<TtydAuthCredentials> {
+    let username = session
+        .metadata
+        .get(TTYD_AUTH_USERNAME_METADATA_KEY)
+        .map(String::as_str)
+        .unwrap_or(TTYD_AUTH_USERNAME)
+        .trim();
+    let password = session
+        .metadata
+        .get(TTYD_AUTH_PASSWORD_METADATA_KEY)?
+        .trim();
+
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+
+    Some(TtydAuthCredentials {
+        username: username.to_string(),
+        password: password.to_string(),
+    })
+}
+
+async fn terminate_ttyd_process_group(pid: u32) {
+    #[cfg(unix)]
+    if pid > 0 {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
 
 fn candidate_ttyd_paths(workspace_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -291,18 +343,15 @@ pub async fn spawn_ttyd_runtime(
     let terminal_shell = resolve_interactive_shell(&options.env);
     let ttyd_shell_args = build_ttyd_shell_args(&terminal_shell, Some(&binary), &args);
     let port = reserve_ttyd_port()?;
-
-    // TODO(P3): Add ttyd -c credential flag to prevent unauthorized local
-    // connections to the terminal port. Requires updating the session owner
-    // WebSocket handshake to include Basic auth. Currently blocked by ttyd's
-    // auth flow requiring a JSON handshake step after HTTP upgrade.
-    // let ttyd_auth_token = hex::encode(uuid::Uuid::new_v4().as_bytes());
+    let ttyd_auth = generate_ttyd_auth_credentials();
 
     let mut cmd = tokio::process::Command::new(ttyd_binary);
     cmd.arg("-p")
         .arg(port.to_string())
         .arg("-i")
         .arg("127.0.0.1")
+        .arg("-c")
+        .arg(format!("{}:{}", ttyd_auth.username, ttyd_auth.password))
         .arg("-W")
         .arg("-w")
         .arg(&options.cwd)
@@ -435,6 +484,7 @@ pub async fn spawn_ttyd_runtime(
     let st2 = state.clone();
     let sid2 = session_id.to_string();
     let url2 = ttyd_ws_url.clone();
+    let owner_auth = ttyd_auth.clone();
     let owner_executor = executor.clone();
     let (owner_ready_tx, owner_ready_rx) = oneshot::channel();
     tokio::spawn(async move {
@@ -442,6 +492,7 @@ pub async fn spawn_ttyd_runtime(
             &st2,
             &sid2,
             &url2,
+            Some(owner_auth),
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -485,7 +536,7 @@ pub async fn spawn_ttyd_runtime(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut metadata = HashMap::from([
+    let metadata = HashMap::from([
         (
             RUNTIME_MODE_METADATA_KEY.to_string(),
             TTYD_RUNTIME_MODE.to_string(),
@@ -493,6 +544,14 @@ pub async fn spawn_ttyd_runtime(
         (TTYD_PORT_METADATA_KEY.to_string(), port.to_string()),
         (TTYD_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
         (TTYD_WS_URL_METADATA_KEY.to_string(), ttyd_ws_url),
+        (
+            TTYD_AUTH_USERNAME_METADATA_KEY.to_string(),
+            ttyd_auth.username,
+        ),
+        (
+            TTYD_AUTH_PASSWORD_METADATA_KEY.to_string(),
+            ttyd_auth.password,
+        ),
         (DETACHED_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
         ("agentLaunchCommand".to_string(), launch_command),
         (
@@ -504,74 +563,6 @@ pub async fn spawn_ttyd_runtime(
             session_start_secs.to_string(),
         ),
     ]);
-
-    // Try to establish a Cloudflare tunnel for direct browser access.
-    // This is non-blocking: if cloudflared is not installed or the tunnel
-    // fails, the session falls back to the existing backend proxy facade.
-    let _tunnel_result = if super::tunnel_launcher::resolve_cloudflared_binary().is_some() {
-        match super::tunnel_launcher::spawn_tunnel(port).await {
-            Ok((mut tunnel_child, tunnel_url)) => {
-                let Some(tunnel_pid) = tunnel_child.id().filter(|pid| *pid > 0) else {
-                    tracing::warn!(
-                        session_id,
-                        port,
-                        "Cloudflare tunnel started without exposing a non-zero PID, skipping tunnel metadata"
-                    );
-                    return Ok(RuntimeLaunch {
-                        handle,
-                        metadata,
-                        streams_terminal_bytes: true,
-                    });
-                };
-                tracing::info!(
-                    session_id,
-                    port,
-                    %tunnel_url,
-                    tunnel_pid,
-                    "Cloudflare tunnel established for session"
-                );
-                metadata.insert(
-                    super::types::TTYD_TUNNEL_URL_METADATA_KEY.to_string(),
-                    tunnel_url.clone(),
-                );
-                metadata.insert(
-                    super::types::TUNNEL_PID_METADATA_KEY.to_string(),
-                    tunnel_pid.to_string(),
-                );
-
-                // Reap the cloudflared process when it exits to prevent zombies.
-                // The tunnel lives until kill_tunnel() is called on session end.
-                let reap_sid = session_id.to_string();
-                let reap_state = state.clone();
-                tokio::spawn(async move {
-                    let _ = tunnel_child.wait().await;
-                    tracing::info!(session_id = %reap_sid, "cloudflared tunnel process exited");
-                    let mut sessions = reap_state.sessions.write().await;
-                    if let Some(session) = sessions.get_mut(&reap_sid) {
-                        session
-                            .metadata
-                            .remove(super::types::TTYD_TUNNEL_URL_METADATA_KEY);
-                        session
-                            .metadata
-                            .remove(super::types::TUNNEL_PID_METADATA_KEY);
-                    }
-                });
-
-                Some(tunnel_url)
-            }
-            Err(err) => {
-                tracing::warn!(
-                    session_id,
-                    error = %err,
-                    "Cloudflare tunnel failed, falling back to backend proxy"
-                );
-                None
-            }
-        }
-    } else {
-        tracing::debug!(session_id, "cloudflared not found, skipping tunnel");
-        None
-    };
 
     Ok(RuntimeLaunch {
         handle,
@@ -637,6 +628,20 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
         return Ok(());
     }
 
+    let Some(auth) = session_ttyd_auth_credentials(&session) else {
+        tracing::warn!(
+            session_id,
+            pid,
+            "refusing to restore legacy ttyd session without credentials"
+        );
+        terminate_ttyd_process_group(pid).await;
+        super::tunnel_launcher::kill_tunnel(state, session_id).await;
+        state
+            .apply_runtime_event(session_id, ExecutorOutput::Completed { exit_code: 0 })
+            .await?;
+        return Ok(());
+    };
+
     tracing::info!(session_id, pid, %ws_url, "Restoring ttyd session");
 
     let executors = state.executors.read().await;
@@ -694,6 +699,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
     let st2 = state.clone();
     let sid2 = session_id.to_string();
     let url2 = ws_url;
+    let owner_auth = auth;
     let owner_executor = executor.clone();
     let (owner_ready_tx, owner_ready_rx) = oneshot::channel();
     tokio::spawn(async move {
@@ -701,6 +707,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
             &st2,
             &sid2,
             &url2,
+            Some(owner_auth),
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -756,6 +763,7 @@ async fn run_ttyd_session_owner_with_retry(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
+    auth: Option<TtydAuthCredentials>,
     executor: Arc<dyn Executor>,
     initial_channels: TtydSessionOwnerChannels,
 ) -> Result<()> {
@@ -779,9 +787,16 @@ async fn run_ttyd_session_owner_with_retry(
         .unwrap_or_else(tokio::time::Instant::now);
 
     loop {
-        let result =
-            run_ttyd_session_owner(state, sid, url, executor.clone(), channels, session_start)
-                .await;
+        let result = run_ttyd_session_owner(
+            state,
+            sid,
+            url,
+            auth.as_ref(),
+            executor.clone(),
+            channels,
+            session_start,
+        )
+        .await;
 
         match &result {
             Ok(()) => return Ok(()),
@@ -942,6 +957,7 @@ async fn run_ttyd_session_owner(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
+    auth: Option<&TtydAuthCredentials>,
     _executor: Arc<dyn Executor>,
     mut channels: TtydSessionOwnerChannels,
     session_start: tokio::time::Instant,
@@ -949,7 +965,13 @@ async fn run_ttyd_session_owner(
     use futures_util::{SinkExt, StreamExt};
     let connect_deadline = tokio::time::Instant::now() + TTYD_OWNER_ATTACH_TIMEOUT;
     let (ws, _) = loop {
-        let request = ttyd_protocol::connect_request(url).context("mirror request")?;
+        let request = match auth {
+            Some(auth) => {
+                ttyd_protocol::connect_request_with_auth(url, &auth.username, &auth.password)
+            }
+            None => ttyd_protocol::connect_request(url),
+        }
+        .context("mirror request")?;
         match tokio_tungstenite::connect_async(request).await {
             Ok(connection) => {
                 tracing::info!(session_id = %sid, "ttyd session owner connected to ttyd");
@@ -982,12 +1004,15 @@ async fn run_ttyd_session_owner(
                 .map(|store| store.dimensions())
         })
         .unwrap_or((160, 48));
-    if let Err(err) = w
-        .send(WsMessage::Binary(
-            ttyd_protocol::encode_handshake(init_cols, init_rows).into(),
-        ))
-        .await
-    {
+    let handshake = match auth {
+        Some(auth) => ttyd_protocol::encode_auth_handshake(
+            init_cols,
+            init_rows,
+            &ttyd_protocol::basic_auth_token(&auth.username, &auth.password),
+        ),
+        None => ttyd_protocol::encode_handshake(init_cols, init_rows),
+    };
+    if let Err(err) = w.send(WsMessage::Binary(handshake.into())).await {
         let error = anyhow!(err).context("ttyd session owner handshake");
         if let Some(tx) = channels.ready_tx.take() {
             let _ = tx.send(Err(anyhow!(error.to_string())));
@@ -1168,10 +1193,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_launch_command, build_ttyd_shell_args, owner_reconnect_delay,
-        reserve_ttyd_port, resolve_interactive_shell,
+        build_agent_launch_command, build_ttyd_shell_args, generate_ttyd_auth_credentials,
+        owner_reconnect_delay, reserve_ttyd_port, resolve_interactive_shell,
+        session_ttyd_auth_credentials, TTYD_AUTH_USERNAME,
     };
     use crate::routes::ttyd_protocol;
+    use crate::state::{
+        SessionRecord, TTYD_AUTH_PASSWORD_METADATA_KEY, TTYD_AUTH_USERNAME_METADATA_KEY,
+    };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -1224,6 +1253,56 @@ mod tests {
     fn build_ttyd_shell_args_keeps_plain_interactive_shell_without_launch_command() {
         let args = build_ttyd_shell_args(Path::new("/bin/sh"), None, &[]);
         assert_eq!(args, vec!["/bin/sh".to_string(), "-i".to_string()]);
+    }
+
+    #[test]
+    fn generate_ttyd_auth_credentials_uses_basic_auth_safe_values() {
+        let credentials = generate_ttyd_auth_credentials();
+
+        assert_eq!(credentials.username, TTYD_AUTH_USERNAME);
+        assert_eq!(credentials.password.len(), 32);
+        assert!(credentials
+            .password
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn session_ttyd_auth_credentials_reads_hidden_metadata() {
+        let mut session = SessionRecord::builder(
+            "session-auth".to_string(),
+            "project".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+        session.metadata.insert(
+            TTYD_AUTH_USERNAME_METADATA_KEY.to_string(),
+            "operator".to_string(),
+        );
+        session.metadata.insert(
+            TTYD_AUTH_PASSWORD_METADATA_KEY.to_string(),
+            "session-password".to_string(),
+        );
+
+        let credentials =
+            session_ttyd_auth_credentials(&session).expect("credentials should be present");
+
+        assert_eq!(credentials.username, "operator");
+        assert_eq!(credentials.password, "session-password");
+    }
+
+    #[test]
+    fn session_ttyd_auth_credentials_rejects_missing_password() {
+        let session = SessionRecord::builder(
+            "session-auth-missing".to_string(),
+            "project".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+
+        assert!(session_ttyd_auth_credentials(&session).is_none());
     }
 
     #[test]

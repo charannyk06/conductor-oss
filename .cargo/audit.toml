@@ -1,0 +1,11 @@
+[advisories]
+ignore = [
+  # Transitive through jsonwebtoken/rsa. No patched upstream version is available.
+  # Conductor does not expose RSA decryption padding or signing-oracle behavior.
+  "RUSTSEC-2023-0071",
+
+  # Known transitive warnings tracked in SECURITY.md and mirrored in CI.
+  "RUSTSEC-2024-0384",
+  "RUSTSEC-2026-0008",
+  "RUSTSEC-2026-0097",
+]

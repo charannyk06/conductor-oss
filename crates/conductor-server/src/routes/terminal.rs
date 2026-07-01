@@ -21,8 +21,8 @@ use crate::routes::ttyd_protocol;
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
     DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_TUNNEL_URL_METADATA_KEY,
-    TTYD_WS_URL_METADATA_KEY,
+    TTYD_AUTH_PASSWORD_METADATA_KEY, TTYD_AUTH_USERNAME_METADATA_KEY, TTYD_PID_METADATA_KEY,
+    TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -1075,6 +1075,30 @@ fn ttyd_session_http_url(session: &SessionRecord) -> Option<String> {
     ttyd_session_ws_url(session).and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
 }
 
+struct TtydBasicAuth<'a> {
+    username: &'a str,
+    password: &'a str,
+}
+
+fn ttyd_auth_credentials(session: &SessionRecord) -> Option<TtydBasicAuth<'_>> {
+    let username = session
+        .metadata
+        .get(TTYD_AUTH_USERNAME_METADATA_KEY)
+        .map(String::as_str)
+        .unwrap_or("conductor")
+        .trim();
+    let password = session
+        .metadata
+        .get(TTYD_AUTH_PASSWORD_METADATA_KEY)?
+        .trim();
+
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+
+    Some(TtydBasicAuth { username, password })
+}
+
 fn content_type_is_html(content_type: &HeaderValue) -> bool {
     content_type
         .to_str()
@@ -1462,15 +1486,13 @@ async fn build_terminal_token_response(
     };
     let ttyd_http_url = ttyd_frontend_proxy_path(&id, url_token);
     let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, url_token);
-    let tunnel_url = session.metadata.get(TTYD_TUNNEL_URL_METADATA_KEY).cloned();
-
     let mut response = Json(json!({
         "token": token,
         "required": token_required,
         "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
         "ttydHttpUrl": ttyd_http_url,
         "ttydWsUrl": ttyd_ws_url,
-        "tunnelUrl": tunnel_url,
+        "tunnelUrl": null,
     }))
     .into_response();
 
@@ -1550,7 +1572,14 @@ async fn terminal_ttyd_frontend(
         .into_response();
     }
 
-    let upstream = match TTYD_UPSTREAM_CLIENT.get(parsed_upstream).send().await {
+    let mut upstream_request = TTYD_UPSTREAM_CLIENT.get(parsed_upstream);
+    if let Some(credentials) = ttyd_auth_credentials(&session) {
+        upstream_request = upstream_request.basic_auth(
+            credentials.username.to_string(),
+            Some(credentials.password.to_string()),
+        );
+    }
+    let upstream = match upstream_request.send().await {
         Ok(upstream) => upstream,
         Err(err) => {
             tracing::warn!(session_id = %id, error = %err, "Failed to load ttyd frontend HTML");
@@ -2451,6 +2480,30 @@ mod tests {
         assert!(ttyd_http_url_from_ws_url("ws://192.168.0.1/ws").is_none());
         assert!(ttyd_http_url_from_ws_url("ws://example.com/ws").is_none());
         assert!(ttyd_http_url_from_ws_url("ws://user:pass@127.0.0.1:9/ws").is_none());
+    }
+
+    #[test]
+    fn ttyd_auth_credentials_reads_session_metadata() {
+        let mut session = SessionRecord::builder(
+            "session-auth".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+        session.metadata.insert(
+            TTYD_AUTH_USERNAME_METADATA_KEY.to_string(),
+            "conductor".to_string(),
+        );
+        session.metadata.insert(
+            TTYD_AUTH_PASSWORD_METADATA_KEY.to_string(),
+            "session-password".to_string(),
+        );
+
+        let credentials = ttyd_auth_credentials(&session).expect("credentials should be present");
+
+        assert_eq!(credentials.username, "conductor");
+        assert_eq!(credentials.password, "session-password");
     }
 
     #[test]

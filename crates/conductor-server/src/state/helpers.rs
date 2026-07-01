@@ -2179,6 +2179,11 @@ mod tests {
                 "openclawGatewayToken".to_string(),
                 ["secret", "-token"].concat(),
             ),
+            ("ttydAuthUsername".to_string(), "conductor".to_string()),
+            (
+                "ttydAuthPassword".to_string(),
+                "session-password".to_string(),
+            ),
             (
                 "openclawGatewayTokenConfigured".to_string(),
                 "true".to_string(),
@@ -2216,6 +2221,8 @@ mod tests {
         assert_eq!(filtered.get("taskId").map(String::as_str), Some("task-123"));
         assert!(!filtered.contains_key("spawnRequest"));
         assert!(!filtered.contains_key("openclawGatewayToken"));
+        assert!(!filtered.contains_key("ttydAuthUsername"));
+        assert!(!filtered.contains_key("ttydAuthPassword"));
         let summary = filtered
             .get("summary")
             .expect("summary should be preserved");
