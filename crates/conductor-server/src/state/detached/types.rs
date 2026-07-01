@@ -6,6 +6,8 @@ pub(crate) const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 pub(crate) const TTYD_PORT_METADATA_KEY: &str = "ttydPort";
 pub(crate) const TTYD_WS_URL_METADATA_KEY: &str = "ttydWsUrl";
 pub(crate) const TTYD_PID_METADATA_KEY: &str = "ttydPid";
+pub(crate) const TTYD_AUTH_USERNAME_METADATA_KEY: &str = "ttydAuthUsername";
+pub(crate) const TTYD_AUTH_PASSWORD_METADATA_KEY: &str = "ttydAuthPassword";
 pub(crate) const DETACHED_LOG_PATH_METADATA_KEY: &str = "detachedLogPath";
 /// Public HTTPS tunnel URL for direct browser access to the session's ttyd.
 /// When set, the frontend can load ttyd directly (no backend proxy needed).

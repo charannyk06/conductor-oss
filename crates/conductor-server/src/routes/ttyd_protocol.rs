@@ -37,6 +37,10 @@ pub fn connect_request(ws_url: &str) -> Result<tokio_tungstenite::tungstenite::h
     Ok(request)
 }
 
+pub fn basic_auth_token(username: &str, password: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+}
+
 /// Build a WebSocket connect request with HTTP Basic auth for ttyd sessions
 /// that require authentication.
 pub fn connect_request_with_auth(
@@ -50,8 +54,7 @@ pub fn connect_request_with_auth(
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", WsHeaderValue::from_static("tty"));
-    let credentials =
-        base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    let credentials = basic_auth_token(username, password);
     request.headers_mut().insert(
         "Authorization",
         WsHeaderValue::from_str(&format!("Basic {credentials}"))
@@ -62,6 +65,16 @@ pub fn connect_request_with_auth(
 
 pub fn encode_handshake(cols: u16, rows: u16) -> Vec<u8> {
     json!({
+        "columns": cols,
+        "rows": rows,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+pub fn encode_auth_handshake(cols: u16, rows: u16, auth_token: &str) -> Vec<u8> {
+    json!({
+        "AuthToken": auth_token,
         "columns": cols,
         "rows": rows,
     })
@@ -209,8 +222,7 @@ mod tests {
         let password = String::from_utf8(vec![112, 97, 115, 115]).unwrap();
         let request =
             connect_request_with_auth("ws://127.0.0.1:7681/ws", &username, &password).unwrap();
-        let expected_credentials =
-            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        let expected_credentials = basic_auth_token(&username, &password);
         let expected_header = format!("Basic {expected_credentials}");
         assert_eq!(
             request
@@ -226,6 +238,19 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(expected_header.as_str())
         );
+    }
+
+    #[test]
+    fn test_encode_auth_handshake_includes_ttyd_auth_token() {
+        let frame = encode_auth_handshake(120, 40, "credential-token");
+        let value: Value = serde_json::from_slice(&frame).unwrap();
+
+        assert_eq!(
+            value.get("AuthToken").and_then(Value::as_str),
+            Some("credential-token")
+        );
+        assert_eq!(value.get("columns").and_then(Value::as_u64), Some(120));
+        assert_eq!(value.get("rows").and_then(Value::as_u64), Some(40));
     }
 
     #[test]

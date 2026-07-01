@@ -9,5 +9,5 @@ export const GET = guardedProxyParamRoute(
 
 export const POST = guardedProxyParamRoute(
   ({ id }) => `/api/projects/${encodeURIComponent(id ?? "")}/dispatcher/bindings`,
-  { role: "operator", bridgeAware: true },
+  { role: "operator", requireActionGuard: true, bridgeAware: true },
 );
