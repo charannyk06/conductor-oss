@@ -684,7 +684,19 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
         url.hash = '';
 
-        const normalizedPathname = url.pathname.replace(/\/+$/, '');
+        try {
+            const backendMeta = document.querySelector('meta[name="conductor-backend-url"]');
+            const backendContent = (backendMeta && backendMeta.content || '').trim();
+            if (backendContent) {
+                const backendUrl = new URL(backendContent);
+                url.hostname = backendUrl.hostname;
+                url.port = backendUrl.port;
+                url.protocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+            }
+        } catch {
+        }
+
+        const normalizedPathname = window.location.pathname.replace(/\/+$/, '');
         url.pathname = normalizedPathname.endsWith('/ws')
             ? normalizedPathname
             : `${normalizedPathname}/ws`;
@@ -1202,6 +1214,61 @@ fn inject_ttyd_auth_sync_shim(html: &str) -> String {
     inject_ttyd_html_fragment_early(html, TTYD_AUTH_SYNC_SHIM_MARKER, TTYD_AUTH_SYNC_SHIM)
 }
 
+const TTYD_BACKEND_URL_META_MARKER: &str = "conductor-ttyd-backend-url-meta";
+
+fn inject_conductor_backend_url_meta(html: &str, backend_origin: &str) -> String {
+    if html.contains(TTYD_BACKEND_URL_META_MARKER) {
+        return html.to_string();
+    }
+
+    let escaped_origin = backend_origin.replace('"', "&quot;");
+    let meta = format!(
+        "<!-- {TTYD_BACKEND_URL_META_MARKER} --><meta name=\"conductor-backend-url\" content=\"{escaped_origin}\">"
+    );
+
+    if let Some(index) = html.find("</head>") {
+        let mut output = String::with_capacity(html.len() + meta.len());
+        output.push_str(&html[..index]);
+        output.push_str(&meta);
+        output.push_str(&html[index..]);
+        return output;
+    }
+
+    if let Some(index) = html.find("<head>") {
+        let insert_at = index + "<head>".len();
+        let mut output = String::with_capacity(html.len() + meta.len());
+        output.push_str(&html[..insert_at]);
+        output.push_str(&meta);
+        output.push_str(&html[insert_at..]);
+        return output;
+    }
+
+    html.to_string()
+}
+
+fn backend_origin_from_headers(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1");
+    let is_loopback = host.starts_with("127.")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("localhost:")
+        || host.starts_with("[::1]");
+    let proto = if is_loopback {
+        "http"
+    } else {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https")
+    };
+    format!("{proto}://{host}")
+}
+
 fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
     let paste_shim = ttyd_paste_shim_script(project_id, session_id);
     inject_ttyd_html_fragment(html, TTYD_PASTE_SHIM_MARKER, &paste_shim)
@@ -1629,6 +1696,7 @@ async fn terminal_ttyd_frontend(
     }
     let body = if content_type_is_html(&content_type) {
         let mut html = String::from_utf8_lossy(&body).into_owned();
+        html = inject_conductor_backend_url_meta(&html, &backend_origin_from_headers(&headers));
         html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
         html = inject_ttyd_resize_shim(&html);
         html = inject_ttyd_auth_sync_shim(&html);
@@ -2706,6 +2774,9 @@ mod tests {
         );
         assert!(injected.contains("const readLocationBridgeId = () => {"));
         assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
+        assert!(injected.contains("meta[name=\"conductor-backend-url\"]"));
+        assert!(injected.contains("const backendUrl = new URL(backendContent);"));
+        assert!(injected.contains("url.hostname = backendUrl.hostname;"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
         assert!(injected.contains("const notifyReady = () => {"));
@@ -2718,6 +2789,7 @@ mod tests {
         assert!(injected.contains("requestFreshToken('websocket-error');"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
         assert!(injected.contains("const url = new URL(window.location.href);"));
+        assert!(injected.contains("const normalizedPathname = window.location.pathname.replace"));
         assert!(injected.contains("candidate.hostname"));
         assert!(injected.contains("candidate.pathname === '/'"));
         assert!(injected.contains("candidate.pathname === '/ws'"));
@@ -2731,6 +2803,82 @@ mod tests {
         );
         assert!(
             injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap() < injected.find("</head>").unwrap()
+        );
+    }
+
+    #[test]
+    fn inject_conductor_backend_url_meta_inserts_before_head_close() {
+        let html = "<html><head><script src=\"/refresh.js\"></script></head><body><main>terminal</main></body></html>";
+        let injected = inject_conductor_backend_url_meta(html, "http://127.0.0.1:4749");
+
+        assert!(injected.contains(TTYD_BACKEND_URL_META_MARKER));
+        assert!(injected
+            .contains("<meta name=\"conductor-backend-url\" content=\"http://127.0.0.1:4749\">"));
+        assert!(
+            injected.find(TTYD_BACKEND_URL_META_MARKER).unwrap()
+                < injected.find("</head>").unwrap()
+        );
+    }
+
+    #[test]
+    fn inject_conductor_backend_url_meta_is_idempotent() {
+        let html = "<html><head></head><body><main>terminal</main></body></html>";
+        let once = inject_conductor_backend_url_meta(html, "http://127.0.0.1:4749");
+        let twice = inject_conductor_backend_url_meta(&once, "http://127.0.0.1:9999");
+
+        assert_eq!(
+            twice.matches(TTYD_BACKEND_URL_META_MARKER).count(),
+            1,
+            "backend origin meta should only be injected once"
+        );
+        assert!(twice.contains("http://127.0.0.1:4749"));
+        assert!(!twice.contains("http://127.0.0.1:9999"));
+    }
+
+    #[test]
+    fn backend_origin_from_headers_prefers_loopback_http() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:4749"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "http://127.0.0.1:4749"
+        );
+    }
+
+    #[test]
+    fn backend_origin_from_headers_uses_forwarded_proto_for_remote_hosts() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("backend.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "https://backend.example.com"
+        );
+    }
+
+    #[test]
+    fn backend_origin_from_headers_uses_first_forwarded_proto_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("backend.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https, http"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "https://backend.example.com"
+        );
+    }
+
+    #[test]
+    fn backend_origin_from_headers_defaults_remote_hosts_to_https() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("backend.example.com"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "https://backend.example.com"
         );
     }
 

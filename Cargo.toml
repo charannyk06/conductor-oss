@@ -24,7 +24,7 @@ tokio = { version = "1.0", features = ["full"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -57,7 +57,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 clap = { version = "4.0", features = ["derive"] }
 glob = "0.3"
-which = "7"
+which = "8"
 regex = "1"
 toml = "0.8"
 

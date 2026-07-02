@@ -1,0 +1,12 @@
+Conductor OSS
+Copyright 2026 Conductor Contributors
+
+Conductor OSS is an independent local-first control surface for coding agents.
+The project is inspired by prior open-source agent Kanban and coding-agent
+orchestration tools, including Vibe Kanban by BloopAI
+(https://github.com/BloopAI/vibe-kanban), which is licensed under the Apache
+License 2.0.
+
+This notice is provided to make product lineage and inspiration explicit. If a
+future audit identifies file-level source copied from another project, preserve
+that project's copyright and license notice next to the affected files.

@@ -95,6 +95,21 @@ Installed aliases:
 | `co mcp-server` | Run Conductor as an MCP server over stdio |
 | `co acp-server` | Run Conductor as an ACP server over stdio |
 
+## ACP/headless setup
+
+`co acp-server` expects an initialized Conductor workspace. Run `co init` or
+`co setup` in the target repository first, then start the ACP server from that
+repository or pass the same workspace through the launcher environment.
+
+If an ACP client receives a `session/new` project or workspace error, run:
+
+```bash
+co doctor --workspace <repo>
+```
+
+Then verify the client is using the project id from `conductor.yaml` and that
+`CONDUCTOR.md` exists in the same repository.
+
 ## Ports
 
 Published launcher defaults:

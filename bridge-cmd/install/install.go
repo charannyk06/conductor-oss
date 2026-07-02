@@ -292,13 +292,9 @@ func buildRestartCommand(goos, home string) (restartCommand, error) {
 		if _, err := os.Stat(binaryPath); err != nil {
 			binaryPath = filepath.Join(home, ".conductor", "bin", "conductor-bridge")
 		}
-		script := fmt.Sprintf(
-			"@echo off\r\nstart \"Conductor Bridge\" /MIN \"%s\" daemon\r\n",
-			binaryPath,
-		)
 		return restartCommand{
-			name: "cmd",
-			args: []string{"/C", script},
+			name: binaryPath,
+			args: []string{"daemon"},
 		}, nil
 	default:
 		return restartCommand{}, fmt.Errorf("auto-restart not supported on %s", goos)

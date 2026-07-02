@@ -206,6 +206,25 @@ If you want to skip the board for a quick run, you can still launch sessions dir
 | `co mcp-server` | Run Conductor as an MCP server over stdio |
 | `co acp-server` | Run Conductor as an ACP server over stdio |
 
+### ACP/headless server preconditions
+
+`co acp-server` is for ACP clients that launch Conductor over stdio. Before an
+ACP client calls `session/new`, run Conductor in a real workspace and make sure
+the workspace is mapped to a project:
+
+1. Run `co init` or `co setup` in the repository you want agents to work in.
+2. Confirm `conductor.yaml` has a stable project id and that `CONDUCTOR.md`
+exists.
+3. Start the backend once with `co start --workspace <repo>` or keep the ACP
+process current directory inside that initialized repository.
+4. If `session/new` fails with an unknown project, missing workspace, or empty
+board error, run `co doctor --workspace <repo>` and verify the ACP client is
+passing the same project/workspace name that appears in `conductor.yaml`.
+
+ACP is intentionally headless: it does not create projects implicitly from an
+arbitrary client working directory. Initialize or map the workspace first, then
+let the ACP client create sessions.
+
 ## Supported agents
 
 Conductor ships adapters for the coding CLIs it can discover and launch today.
@@ -353,6 +372,7 @@ conductor-oss/
 
 [![Star History Chart](https://api.star-history.com/svg?repos=charannyk06/conductor-oss&type=Date)](https://star-history.com/#charannyk06/conductor-oss&Date)
 
-## License
+## License and attribution
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). Product lineage and third-party
+attribution are listed in [NOTICE](NOTICE).
