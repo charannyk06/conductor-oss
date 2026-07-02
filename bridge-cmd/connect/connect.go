@@ -426,7 +426,7 @@ func resolveSavedDevice(ctx context.Context, relayURL string, refreshToken strin
 		if message == "" {
 			message = fmt.Sprintf("device auth request failed with status %d", resp.StatusCode)
 		}
-		return deviceAuthResponse{}, fmt.Errorf(message)
+		return deviceAuthResponse{}, errors.New(message)
 	}
 	if strings.TrimSpace(payload.DeviceID) == "" {
 		return deviceAuthResponse{}, errInvalidSavedPairing
@@ -479,7 +479,7 @@ func createClaim(ctx context.Context, relayURL string, deviceID string) (claimCr
 		if message == "" {
 			message = fmt.Sprintf("claim request failed with status %d", resp.StatusCode)
 		}
-		return claimCreateResponse{}, fmt.Errorf(message)
+		return claimCreateResponse{}, errors.New(message)
 	}
 
 	if strings.TrimSpace(payload.ClaimToken) == "" || strings.TrimSpace(payload.PollToken) == "" {
@@ -543,7 +543,7 @@ func pollClaimOnce(ctx context.Context, endpoint string) (claimPollResponse, boo
 		if message == "" {
 			message = fmt.Sprintf("claim poll failed with status %d", resp.StatusCode)
 		}
-		return claimPollResponse{}, true, fmt.Errorf(message)
+		return claimPollResponse{}, true, errors.New(message)
 	}
 
 	if payload.Status == "paired" {

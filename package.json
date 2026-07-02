@@ -2,7 +2,7 @@
   "name": "conductor-oss-workspace",
   "version": "0.1.0",
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Conductor Contributors",
   "repository": {
     "type": "git",
@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
-    "@types/node": "^25.3.3",
+    "@types/node": "^26.0.1",
     "puppeteer": "^25.1.0",
     "typescript": "^6.0.3"
   },

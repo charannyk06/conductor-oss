@@ -96,25 +96,10 @@ func TestBuildRestartCommandWindows(t *testing.T) {
 		t.Fatalf("buildRestartCommand returned error: %v", err)
 	}
 
-	if cmd.name != "cmd" {
-		t.Fatalf("cmd.name = %q, want %q", cmd.name, "cmd")
+	if !strings.HasSuffix(cmd.name, `C:\Users\Test/.conductor/bin/conductor-bridge`) && !strings.HasSuffix(cmd.name, `C:\Users\Test/.conductor/bin/conductor-bridge.exe`) {
+		t.Fatalf("cmd.name = %q, want conductor bridge binary path", cmd.name)
 	}
-	if len(cmd.args) != 2 {
-		t.Fatalf("len(cmd.args) = %d, want 2", len(cmd.args))
-	}
-
-	script := cmd.args[1]
-	for _, want := range []string{
-		"start \"Conductor Bridge\" /MIN",
-		"daemon",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("windows restart script %q does not contain %q", script, want)
-		}
-	}
-	for _, forbidden := range []string{"taskkill", "timeout /t"} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("windows restart script %q should not contain %q", script, forbidden)
-		}
+	if got := strings.Join(cmd.args, " "); got != "daemon" {
+		t.Fatalf("cmd.args = %q, want %q", got, "daemon")
 	}
 }

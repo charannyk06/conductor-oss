@@ -5,7 +5,6 @@ use base64::Engine;
 use conductor_core::types::AgentKind;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1777,7 +1776,7 @@ fn save_device_identity(identity: &DeviceIdentityStore) -> Result<()> {
 
 fn generate_device_identity() -> DeviceIdentityStore {
     let mut secret = [0_u8; 32];
-    OsRng.fill_bytes(&mut secret);
+    rand::rng().fill_bytes(&mut secret);
     let signing_key = SigningKey::from_bytes(&secret);
     let public_key = signing_key.verifying_key().to_bytes();
     let device_id = hex::encode(Sha256::digest(public_key));
