@@ -2,6 +2,7 @@ package install
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -96,7 +97,8 @@ func TestBuildRestartCommandWindows(t *testing.T) {
 		t.Fatalf("buildRestartCommand returned error: %v", err)
 	}
 
-	if !strings.HasSuffix(cmd.name, `C:\Users\Test/.conductor/bin/conductor-bridge`) && !strings.HasSuffix(cmd.name, `C:\Users\Test/.conductor/bin/conductor-bridge.exe`) {
+	wantBase := filepath.Join(`C:\Users\Test`, ".conductor", "bin", "conductor-bridge")
+	if !strings.HasSuffix(cmd.name, wantBase) && !strings.HasSuffix(cmd.name, wantBase+".exe") {
 		t.Fatalf("cmd.name = %q, want conductor bridge binary path", cmd.name)
 	}
 	if got := strings.Join(cmd.args, " "); got != "daemon" {

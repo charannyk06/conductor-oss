@@ -1261,7 +1261,10 @@ fn backend_origin_from_headers(headers: &HeaderMap) -> String {
         headers
             .get("x-forwarded-proto")
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("http")
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https")
     };
     format!("{proto}://{host}")
 }
@@ -2849,6 +2852,29 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("backend.example.com"));
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "https://backend.example.com"
+        );
+    }
+
+    #[test]
+    fn backend_origin_from_headers_uses_first_forwarded_proto_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("backend.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https, http"));
+
+        assert_eq!(
+            backend_origin_from_headers(&headers),
+            "https://backend.example.com"
+        );
+    }
+
+    #[test]
+    fn backend_origin_from_headers_defaults_remote_hosts_to_https() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("backend.example.com"));
 
         assert_eq!(
             backend_origin_from_headers(&headers),
