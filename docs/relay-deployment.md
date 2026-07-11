@@ -62,7 +62,7 @@ The host command should:
 1. Reject every other command and image registry
 2. Serialize rollouts with a host lock
 3. Pull the requested digest-pinned image
-4. Require the exact `/var/lib/conductor-relay/state.json` path on the named state volume
+4. Require the exact `/var/lib/conductor-relay/state.json` path on the named state volume, or migrate the single known legacy `/data/relay-state.json` layout
 5. Take a mode-`0600`, memory-backed state snapshot while the old relay is stopped
 6. Pass the JWT secret through the Docker client environment, never as a command argument
 7. Replace the container with a read-only root filesystem, bounded resources and logs, dropped capabilities, and `no-new-privileges`
@@ -78,6 +78,8 @@ restrict,command="/usr/local/sbin/conductor-relay-deploy" ssh-ed25519 ...
 Install [`scripts/conductor-relay-deploy-host.sh`](../scripts/conductor-relay-deploy-host.sh) as the root-owned, non-writable `/usr/local/sbin/conductor-relay-deploy` forced command. Its deployment user needs access to Docker, `flock`, `jq`, GNU `timeout`, a writable memory-backed `/dev/shm`, and an owner-writable `/var/lock/conductor-relay-deploy.lock`; the account itself should have a locked password and no unrestricted authorized key. The temporary rollback snapshot is never printed, is removed after success or rollback, and is not a substitute for an encrypted off-host backup.
 
 The workflow checks the installed command against the reviewed repository script before every rollout. A script change therefore requires an administrator to reinstall the root-owned host command before merging; a stale command fails closed instead of deploying with host drift.
+
+The migration exception is deliberately narrow: only the same named volume mounted at `/data` with `RELAY_STATE_FILE=/data/relay-state.json` is accepted. The command stops the old relay, takes the memory-backed mode-`0600` snapshot, copies it to the canonical filename while retaining the legacy file for rollback, and deletes the legacy duplicate only after private, proxy, and public exact-build health all pass. Any other mount, filename, symlink, non-regular file, conflicting canonical file, or insecure state-file mode fails closed.
 
 ## Manual fallback
 
