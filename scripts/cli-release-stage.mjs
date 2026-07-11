@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
+import { execTarArchiveSync } from "./release-workflow-lib.mjs";
 
 const NPM_EXECUTABLE = "npm";
 
@@ -443,7 +444,7 @@ export function createCliReleaseStage({
         const tarPath = spec.replace("file:", "");
         const depDir = join(outputDir, "node_modules", ...depName.split("/"));
         mkdirSync(depDir, { recursive: true });
-        execFileSync("tar", ["xzf", tarPath, "--strip-components=1", "-C", depDir], {
+        execTarArchiveSync(tarPath, ["-xzf"], ["--strip-components=1", "-C", depDir], {
           stdio: "inherit",
         });
       }

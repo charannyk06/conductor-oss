@@ -14,7 +14,30 @@ import {
   parseNpmDistMetadata,
   registryDownloadHeaders,
   resolveExistingArtifact,
+  tarArchiveInvocation,
 } from "./release-workflow-lib.mjs";
+
+test("tar commands localize Windows drive-letter archives for GNU tar and bsdtar", () => {
+  assert.deepEqual(
+    tarArchiveInvocation(
+      "D:\\a\\conductor-oss\\package.tgz",
+      ["-xOf"],
+      ["package/package.json"],
+      "win32",
+    ),
+    {
+      args: ["-xOf", "package.tgz", "package/package.json"],
+      cwd: "D:\\a\\conductor-oss",
+    },
+  );
+  assert.deepEqual(
+    tarArchiveInvocation("/tmp/conductor/package.tgz", ["-xzf"], ["-C", "/tmp/out"], "darwin"),
+    {
+      args: ["-xzf", "package.tgz", "-C", "/tmp/out"],
+      cwd: "/tmp/conductor",
+    },
+  );
+});
 
 test("bundled package identities match the parent release version", () => {
   const packageManifest = {

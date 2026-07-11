@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   assertArtifactIntegrity,
   assertBundledDependencyVersionsInTarball,
+  execTarArchiveSync,
 } from "./release-workflow-lib.mjs";
 
 function parseArgs(argv) {
@@ -156,7 +156,7 @@ async function downloadPublishedTarball({ packageName, version, tarballUrl, dest
 }
 
 function unpackTarball(tarballPath, destinationDir) {
-  execFileSync("tar", ["-xzf", tarballPath, "-C", destinationDir], {
+  execTarArchiveSync(tarballPath, ["-xzf"], ["-C", destinationDir], {
     stdio: "pipe",
   });
 }
