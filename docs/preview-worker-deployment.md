@@ -14,7 +14,7 @@ Create the `preview-production` GitHub environment, restrict its deployment bran
 - `PREVIEW_DEPLOY_SSH_HOST_KEY`: pinned `known_hosts` entry collected out of band
 - `PREVIEW_WORKER_HEALTHCHECK_URL`: public TLS endpoint, such as `https://preview-worker.example.com/health`
 
-The worker host must already have a `WORKER_API_KEY` of at least 32 bytes. Keep `CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX=false`; the host's unprivileged user namespaces must support Chromium's sandbox. The forced deployment command launches a real browser session before accepting the rollout, so a sandbox or capability regression triggers rollback.
+The worker host must already have a `WORKER_API_KEY` of at least 32 bytes. Keep `CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX=false`. Chromium's sandbox setup requires `SYS_ADMIN` and `SYS_CHROOT` in this container; the forced command drops every capability and then restores only those two. The command launches a real browser session before accepting the rollout, so a sandbox or capability regression triggers rollback.
 
 ## Host command contract
 
@@ -33,7 +33,7 @@ restrict,command="/usr/local/sbin/conductor-preview-deploy" ssh-ed25519 ...
 
 The deployment user needs Docker access, GNU `timeout`, `jq`, and an owner-writable `/var/lock/conductor-preview-deploy.lock`, but no unrestricted SSH key. The workflow uses the non-mutating integrity probe to require that the installed command matches the reviewed repository script, so an administrator must reinstall the root-owned command whenever it changes.
 
-The forced command preserves the existing API key and session limits without putting the key in Docker command arguments, applies `no-new-privileges`, drops Linux capabilities, uses a read-only root filesystem plus a bounded temporary filesystem, enforces process/memory/CPU and Docker-log limits, joins the private Caddy network without publishing port 3099 on the host, verifies the exact build, creates and deletes a sandboxed session, checks both Caddy and the public TLS endpoint, and restores the previous container on failure. Destructive Docker operations have host-side deadlines so a stuck daemon call cannot leave the rollout lock held indefinitely.
+The forced command preserves the existing API key and session limits without putting the key in Docker command arguments, applies `no-new-privileges`, drops all Linux capabilities before restoring only `SYS_ADMIN` and `SYS_CHROOT` for Chromium's sandbox, uses a read-only root filesystem plus a bounded temporary filesystem, enforces process/memory/CPU and Docker-log limits, joins the private Caddy network without publishing port 3099 on the host, verifies the exact build, creates and deletes a sandboxed session, checks both Caddy and the public TLS endpoint, and restores the previous container on failure. Destructive Docker operations have host-side deadlines so a stuck daemon call cannot leave the rollout lock held indefinitely.
 
 ## Network boundary
 
