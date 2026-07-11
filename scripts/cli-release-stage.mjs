@@ -157,13 +157,14 @@ function hydrateStandaloneNodeModules(standaloneRoot) {
 
 function sanitizePublishedPackage(pkg, {
   packageName = pkg.name,
+  packageVersion = pkg.version,
   dependencies = {},
   optionalDependencies = undefined,
   publishConfig = undefined,
 } = {}) {
   const sanitized = {
     name: packageName,
-    version: pkg.version,
+    version: packageVersion,
     license: pkg.license,
     type: pkg.type,
     main: pkg.main,
@@ -263,7 +264,14 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
       }
     }
 
-    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, { dependencies });
+    // Private workspace packages keep their independent development versions in
+    // source. Once bundled into the public CLI, however, npm validates them
+    // against the release-scoped dependency declared by conductor-oss. Give the
+    // bundled artifact the same immutable release identity as its parent.
+    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, {
+      packageVersion: cliVersion,
+      dependencies,
+    });
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
     copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
