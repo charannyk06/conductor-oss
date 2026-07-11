@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Relay lifecycle safety** — relay ownership, reconnect generations, persistence ordering, and pending terminal lifecycles are bounded and consistent.
 - **Preview lifecycle safety** — browser allocation is capacity-safe and timed-out work is cancelled without leaving untracked sessions.
 - **Recoverable production updates** — relay state is snapshotted transactionally, failed relay/preview candidates roll back through public health, and release retries reuse the exact npm artifact bytes already published.
+- **Sandboxed preview rollout** — the production worker retains only Chromium's required `SYS_ADMIN` and `SYS_CHROOT` capabilities, allowing the browser sandbox smoke test to pass without disabling `no-new-privileges` or the read-only container boundary.
 
 ## [0.61.11] - 2026-07-02
 
