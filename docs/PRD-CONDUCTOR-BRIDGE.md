@@ -3,8 +3,8 @@
 ## Status
 Draft — 2026-03-19
 
-> Archive note
-> This is a historical planning document. The shipped product has since evolved into a local-first Rust + Next.js app with a multi-agent Skills tab and launcher-backed dashboard/backend env wiring. Keep the flow diagrams below as context, not as source-of-truth implementation.
+> **Superseded planning document — not a security or implementation specification.**
+> The shipped product has evolved substantially. In particular, the relay is authenticated routing infrastructure that processes plaintext application frames after TLS termination and persists pairing ownership; it is not end-to-end encrypted or stateless. Use `SECURITY.md`, `docs/relay-deployment.md`, and the source code as the current contract. Historical flows below remain only as product context.
 
 ---
 
@@ -12,7 +12,7 @@ Draft — 2026-03-19
 
 **What this document describes**
 
-Conductor Bridge: a feature that lets users run the full Conductor development environment on their local machine and access it from any browser, anywhere in the world. No cloud storage. No data leaves the user's machine unless explicitly shared. The cloud relay is a dumb pipe — it passes encrypted bytes and knows nothing about sessions, files, or agent state.
+Conductor Bridge was planned as a feature that lets users run Conductor locally and access it from another browser. The shipped relay routes authenticated API, preview, file-tree, status, and terminal traffic. TLS protects traffic in transit, but the relay can inspect application frames while forwarding them and stores device/pairing ownership state.
 
 **One-line pitch**
 
@@ -38,7 +38,7 @@ A developer downloads one binary, runs one command, logs in with GitHub OAuth, a
 11. Session still running. Terminal still live. Files still local.
 ```
 
-**Privacy as a feature:** The cloud relay never stores session data, file metadata, or agent output. It cannot decrypt WebSocket frames. All traffic is encrypted in transit. The relay is mathematically unable to see what files exist on the laptop. Users can audit the bridge binary (open source MIT). The relay can be self-hosted on any VPS.
+**Current privacy boundary:** repositories and agent processes remain on the paired machine. Relay traffic is encrypted in transit with TLS, but there is no additional end-to-end encryption layer between browser and bridge. Operators must therefore treat the relay as trusted infrastructure. The bridge is open source under Apache-2.0 and the relay can be self-hosted.
 
 ---
 
@@ -121,7 +121,7 @@ Link expires or user revokes it
 
 ```
 LAPTOP                                    CONDUCTOR.APP              BROWSER
-                                           (cloud, stateless)         (anywhere)
+                                      (cloud, durable pairing state)  (anywhere)
                                            
 conductor-bridge ──WSS────────────────► relay-server ──────────► dashboard
      │                                         │                    ▲
@@ -132,7 +132,7 @@ conductor-backend                           │                  WSS
 terminal runtime, filesystem)                          │                    │
                                             │                    │
 
-Relay: WebSocket server, JWT auth, frame forwarding, zero storage
+Relay: WebSocket server, JWT auth, ownership-aware routing, durable pairing state
 Dashboard: Next.js, GitHub OAuth, session list, terminal viewer, settings
 ```
 
@@ -147,7 +147,7 @@ The relay proxies raw WebSocket frames. No awareness of terminal protocol.
 Bridge proxies HTTP to localhost:4749. Responses flow back.
 
 **File browsing:** Browser → Dashboard → Relay → Bridge → File system
-Bridge reads local filesystem on demand, returns JSON tree. Relay passes bytes without awareness.
+Bridge reads permitted local filesystem roots on demand and returns a JSON tree. The relay parses and routes that application message in memory.
 
 **Bridge status:** Bridge heartbeats, dashboard shows online/offline.
 
@@ -174,7 +174,10 @@ A user can connect multiple bridges (laptop + desktop). Each bridge has a unique
 ### Self-hosted relay
 
 ```bash
-docker run -p 443:8080 -e RELAY_JWT_SECRET=... conductor-relay
+RELAY_JWT_SECRET=... \
+RELAY_ALLOWED_ORIGINS=https://dashboard.example.com \
+RELAY_STATE_VOLUME=conductor-relay-state \
+./scripts/start-relay.sh
 ```
 
 The bridge points to `wss://your-relay.example.com/bridge`. Everything else identical.
@@ -193,22 +196,15 @@ The bridge points to `wss://your-relay.example.com/bridge`. Everything else iden
 | Workspace file contents | Laptop filesystem |
 | File path names | Laptop filesystem |
 | Agent credentials | Laptop env vars |
-| Bridge tokens | Laptop disk (encrypted) |
-| GitHub OAuth token | Laptop disk (encrypted) |
-| GitHub user ID | Relay memory + dashboard DB |
+| Bridge pairing credential | Laptop disk with owner-only permissions |
+| Dashboard identity session | Dashboard identity provider/browser cookie |
+| Device and owner IDs | Relay state file and memory |
 | Audit log | Dashboard PostgreSQL |
-| Session data, file paths, agent output | **Never on relay or dashboard** |
+| Proxied API/file/preview/terminal payloads | Transit relay memory; not intended as durable relay records |
 
-### What the relay cannot see
+### What the relay can and cannot do
 
-Even with full access to the relay VPS:
-- Session contents (encrypted WebSocket frames)
-- File names or directory structure
-- What agents are running
-- Workspace paths
-- Agent output
-
-Architecturally enforced. The relay has no decryption keys.
+The relay terminates TLS and can inspect the application frames it authenticates and routes, including API responses, file-tree metadata, preview responses, and terminal bytes. It persists pairing/device ownership but is not designed to durably store proxied content. The paired machine remains the authority for repository files, agent credentials, processes, and session history. Anyone operating the relay VPS is inside the trusted computing base.
 
 ---
 
@@ -221,19 +217,19 @@ Architecturally enforced. The relay has no decryption keys.
 | Stolen access URL | GitHub OAuth required — no URL-only access |
 | Bridge token theft | Short-lived (7 days), revocable from dashboard |
 | Laptop theft | Disk encryption (FileVault/BitLocker), remote revocation |
-| Malicious relay operator | WSS encryption, relay has no session keys |
-| Compromised relay VPS | Stateless restart, no data at rest |
+| Malicious relay operator | Self-host the relay or place it under an operator you trust; TLS alone does not hide frames from that operator |
+| Compromised relay VPS | Rotate `RELAY_JWT_SECRET` and device credentials, rebuild the host, and restore only reviewed pairing state |
 
 ### Security checklist
 
-- [ ] Bridge binary open source (MIT) — users audit what runs with their credentials
-- [ ] GitHub OAuth tokens stored encrypted on laptop
+- [ ] Bridge binary open source (Apache-2.0) — users can audit what runs with their credentials
+- [ ] Long-lived bridge credentials stored with owner-only filesystem permissions
 - [ ] Bridge JWT expires in 7 days, refreshable
 - [ ] Session sharing links read-only, time-limited, revocable
-- [ ] Relay is stateless
+- [ ] Relay state stored durably with owner-only permissions and backed up securely
 - [ ] All WebSocket traffic over WSS (TLS 1.3)
 - [ ] Relay rate-limits per GitHub user ID
-- [ ] Bridge sandboxed to workspace directories
+- [ ] Bridge filesystem roots configured explicitly; agents are separately trusted local processes, not OS-sandboxed by Git worktrees
 - [ ] Professional security audit before launch
 
 ---

@@ -27,7 +27,7 @@ export async function GET(
     );
   }
 
-  const ensured = await ensureBridgeTtydSession(request, id, "operator");
+  const ensured = await ensureBridgeTtydSession(request, id);
   if (!ensured.ok) {
     return ensured.response;
   }

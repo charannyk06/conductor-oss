@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -31,6 +31,58 @@ function withTemporaryPath(commands: string[], run: () => void): void {
     rmSync(sandbox, { recursive: true, force: true });
   }
 }
+
+test("website manifest agent aliases and installers match CLI setup metadata", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../../../../docs/manifest.json", import.meta.url), "utf8"),
+  ) as {
+    agents: Array<{
+      id: string;
+      binary: string;
+      aliases: string[];
+      installCommand?: string;
+    }>;
+  };
+
+  for (const agent of manifest.agents) {
+    const config = resolveAgentSetupConfig(agent.id);
+    assert.deepEqual(
+      [...agent.aliases].sort(),
+      [...config.commands].sort(),
+      `${agent.id} aliases drifted from setup detection`,
+    );
+
+    if (config.installPackage) {
+      assert.equal(agent.installCommand, `npm install -g ${config.installPackage}`);
+    } else if (config.installCommand?.cmd === "sh") {
+      assert.equal(agent.installCommand, config.installCommand.args.at(-1));
+    } else {
+      assert.equal(agent.installCommand, undefined);
+    }
+
+    if (agent.id !== "openclaw") {
+      assert.equal(agent.aliases.includes(agent.binary), true);
+    }
+  }
+});
+
+test("Claude setup does not mistake the system C compiler for Claude Code", () => {
+  const config = resolveAgentSetupConfig("claude-code");
+  assert.deepEqual(config.commands, ["claude-code", "claude"]);
+
+  withTemporaryPath(["npm", "cc"], () => {
+    const check = buildAgentCheck("claude-code");
+    assert.equal(check.installed, false);
+    assert.equal(check.install?.cmd, "npm");
+  });
+});
+
+test("unknown agent names cannot inject shell syntax into setup detection", () => {
+  withTemporaryPath(["npm"], () => {
+    const check = buildAgentCheck("missing-agent; true");
+    assert.equal(check.installed, false);
+  });
+});
 
 test("Qwen setup metadata points at the official package and auth command", () => {
   const config = resolveAgentSetupConfig("qwen-code");

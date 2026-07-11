@@ -10,6 +10,7 @@ pub mod session;
 pub mod support;
 pub mod task;
 pub mod types;
+pub mod version;
 pub mod workspace;
 
 pub use board::Board;
@@ -30,4 +31,5 @@ pub use support::{
     GENERATED_MARKER_KEY,
 };
 pub use task::{Task, TaskState};
+pub use version::BUILD_VERSION;
 pub use workspace::Workspace;

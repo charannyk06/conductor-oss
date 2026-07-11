@@ -169,25 +169,30 @@ pub async fn require_auth_when_remote(
 }
 
 fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
-    if *method == Method::OPTIONS || *method == Method::HEAD {
+    if *method == Method::OPTIONS {
         return None;
     }
+
+    // Axum automatically serves HEAD through matching GET routes. Authorization
+    // must therefore evaluate HEAD with the GET route's role instead of treating
+    // it as a public method.
+    let is_get = *method == Method::GET || *method == Method::HEAD;
 
     if path == "/api/health" || path == "/api/github/webhook" {
         return None;
     }
 
     if path.starts_with("/api/sessions/")
-        && (path.ends_with("/terminal/token") || path.ends_with("/terminal/ttyd/token"))
+        && (path.ends_with("/terminal/token")
+            || path.ends_with("/terminal/ttyd")
+            || path.ends_with("/terminal/ttyd/token")
+            || path.ends_with("/terminal/ttyd/ws")
+            || path.ends_with("/terminal/ws"))
     {
         return Some(AccessRole::Operator);
     }
 
-    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ws") {
-        return Some(AccessRole::Operator);
-    }
-
-    if *method == Method::GET && path == "/api/workspaces/branches" {
+    if is_get && path == "/api/workspaces/branches" {
         return Some(AccessRole::Operator);
     }
 
@@ -196,7 +201,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     }
 
     if path.starts_with("/api/app-update") {
-        return Some(if *method == Method::GET {
+        return Some(if is_get {
             AccessRole::Viewer
         } else {
             AccessRole::Operator
@@ -205,16 +210,16 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
 
     if path.starts_with("/api/preferences")
         || path.starts_with("/api/repositories")
-        || (path.starts_with("/api/workspaces") && *method != Method::GET)
+        || (path.starts_with("/api/workspaces") && !is_get)
     {
-        return Some(if *method == Method::GET {
+        return Some(if is_get {
             AccessRole::Viewer
         } else {
             AccessRole::Admin
         });
     }
 
-    if *method == Method::GET {
+    if is_get {
         return Some(AccessRole::Viewer);
     }
 
@@ -322,12 +327,36 @@ mod tests {
             Some(AccessRole::Operator)
         );
         assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd"),
+            Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/ws"),
+            Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/snapshot"),
+            Some(AccessRole::Viewer)
+        );
+        assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ws"),
             Some(AccessRole::Operator)
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/workspaces/branches"),
             Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::HEAD, "/api/events"),
+            Some(AccessRole::Viewer)
+        );
+        assert_eq!(
+            required_access_role(&Method::HEAD, "/api/sessions/abc/terminal/token"),
+            Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::OPTIONS, "/api/sessions/abc/terminal/token"),
+            None
         );
     }
 
@@ -395,6 +424,62 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn middleware_applies_the_get_role_to_implicit_head_requests() {
+        let _proxy_env = ProxyAuthSecretScope::set("test-secret").await;
+        let state = build_state(DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
+
+        let app = Router::new()
+            .route(
+                "/api/sessions/{id}/terminal/token",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_when_remote,
+            ))
+            .with_state(state);
+
+        let viewer_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/api/sessions/session-1/terminal/token")
+                    .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-proxy-secret", "test-secret")
+                    .header("x-conductor-access-authenticated", "true")
+                    .header("x-conductor-access-role", "viewer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(viewer_response.status(), StatusCode::FORBIDDEN);
+
+        let operator_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/api/sessions/session-1/terminal/token")
+                    .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-proxy-secret", "test-secret")
+                    .header("x-conductor-access-authenticated", "true")
+                    .header("x-conductor-access-role", "operator")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(operator_response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

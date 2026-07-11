@@ -1,12 +1,9 @@
+import { NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
-import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 import {
-  BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
   buildPatchedTtydHtmlResponse,
-  createBridgeTtydRelayWebSocketUrl,
-  injectBridgeTtydRelayShim,
   injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
@@ -33,6 +30,19 @@ async function injectResizeShimIntoResponse(proxied: Response): Promise<Response
   return buildPatchedTtydHtmlResponse(proxied, injectTtydResizeShim(html));
 }
 
+function redirectToFirstPartyTerminal(
+  request: Request,
+  routeSessionId: string,
+  bridgeId: string,
+): Response {
+  const target = new URL(
+    `/embed/terminal/${encodeURIComponent(routeSessionId)}`,
+    request.url,
+  );
+  target.searchParams.set("bridgeId", bridgeId);
+  return NextResponse.redirect(target, { status: 307 });
+}
+
 export async function GET(
   request: Request,
   context: RouteContext,
@@ -41,7 +51,7 @@ export async function GET(
   const target = resolveBridgeSessionTarget(id, request);
   if (!target) {
     // Non-bridge session: proxy to Rust backend, then inject resize shim into HTML.
-    const denied = await guardApiAccess(request, "viewer");
+    const denied = await guardApiAccess(request, "operator");
     if (denied) {
       return denied;
     }
@@ -57,38 +67,11 @@ export async function GET(
     return injectResizeShimIntoResponse(proxied);
   }
 
-  // Bridge session: proxy to bridge device, inject relay shim + resize shim.
-  const denied = await guardApiAccess(request, "viewer");
+  // Never execute paired-device HTML in the dashboard origin. The first-party
+  // embed speaks the same relay terminal protocol without trusting upstream DOM.
+  const denied = await guardApiAccess(request, "operator");
   if (denied) {
     return denied;
   }
-
-  const proxied = await proxyToBridgeDevice(
-    request,
-    target.bridgeId,
-    `/api/sessions/${encodeURIComponent(target.sessionId)}/terminal/ttyd`,
-    {
-      pathOverride: `/api/sessions/${encodeURIComponent(target.sessionId)}/terminal/ttyd`,
-    },
-  );
-
-  let relayTtydWsUrl = new URL(request.url).searchParams.get(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM)?.trim() ?? "";
-  if (!relayTtydWsUrl) {
-    relayTtydWsUrl = await createBridgeTtydRelayWebSocketUrl(
-      request,
-      target.bridgeId,
-      target.sessionId,
-    );
-  }
-
-  const html = await readTtydHtmlResponse(proxied);
-  if (html === null) {
-    return proxied;
-  }
-
-  const patchedHtml = injectTtydResizeShim(
-    injectBridgeTtydRelayShim(html, relayTtydWsUrl),
-  );
-
-  return buildPatchedTtydHtmlResponse(proxied, patchedHtml);
+  return redirectToFirstPartyTerminal(request, id, target.bridgeId);
 }

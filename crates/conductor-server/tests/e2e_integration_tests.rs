@@ -96,6 +96,10 @@ async fn failed_spawn_is_persisted_and_reported_in_error_health() {
 #[tokio::test]
 async fn spawn_session_route_drives_a_live_test_executor() {
     if !ttyd_available() {
+        assert!(
+            std::env::var("CONDUCTOR_E2E_REQUIRE_TTYD").ok().as_deref() != Some("1"),
+            "CI requires ttyd so the live spawn/input/output/kill path cannot skip"
+        );
         eprintln!("skipping live executor e2e: ttyd binary not found");
         return;
     }

@@ -4,7 +4,26 @@ import {
   appendLegacyBridgeRelayAuthHeaders,
   buildBridgeRelayWebSocketUrl,
   resolveBridgeRelayUserId,
+  signBridgeRelayJwt,
 } from "./bridgeRelayAuth";
+import { BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR } from "./bridgeRelayErrors";
+
+test("signBridgeRelayJwt rejects weak HMAC secrets", async () => {
+  const previousSecret = process.env.RELAY_JWT_SECRET;
+  process.env.RELAY_JWT_SECRET = "too-short";
+  try {
+    await assert.rejects(
+      signBridgeRelayJwt("user@example.com", "dashboard-api"),
+      new RegExp(BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR),
+    );
+  } finally {
+    if (previousSecret === undefined) {
+      delete process.env.RELAY_JWT_SECRET;
+    } else {
+      process.env.RELAY_JWT_SECRET = previousSecret;
+    }
+  }
+});
 
 test("resolveBridgeRelayUserId prefers the normalized dashboard email", () => {
   assert.equal(

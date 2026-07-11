@@ -136,6 +136,11 @@ export async function createBridgeTtydRelayWebSocketUrl(
   bridgeId: string,
   sessionId: string,
 ): Promise<string> {
+  const denied = await guardApiAccess(request, "operator");
+  if (denied) {
+    throw new Error("Operator access is required to create a bridge terminal session.");
+  }
+
   const access = await getDashboardAccess(request);
   const userId = resolveBridgeRelayUserId(access);
   if (!userId) {
@@ -166,7 +171,7 @@ export async function createBridgeTtydRelayWebSocketUrl(
     );
   }
 
-  const jwt = await signBridgeRelayJwt(userId, "terminal-browser", "12h");
+  const jwt = await signBridgeRelayJwt(userId, "terminal-browser");
   return buildBridgeRelayWebSocketUrl(
     `/terminal/${encodeURIComponent(payload.terminal_id)}/browser`,
     jwt,
@@ -185,7 +190,6 @@ type TerminalTokenPayload = {
 export async function ensureBridgeTtydSession(
   request: Request,
   routeSessionId: string,
-  minimumRole: "viewer" | "operator",
 ): Promise<
   | {
       ok: true;
@@ -197,7 +201,7 @@ export async function ensureBridgeTtydSession(
     }
   | { ok: false; response: Response }
 > {
-  const denied = await guardApiAccess(request, minimumRole);
+  const denied = await guardApiAccess(request, "operator");
   if (denied) {
     return { ok: false, response: denied };
   }

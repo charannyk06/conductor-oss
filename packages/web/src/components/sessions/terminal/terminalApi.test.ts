@@ -175,14 +175,9 @@ test("resolveTerminalConnection normalizes ws-only ttyd urls without adding a tr
   );
 });
 
-test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", async () => {
+test("resolveTerminalConnection uses the first-party embed for bridge-scoped sessions", async () => {
   setWindowLocation("https://app.conductross.com/sessions/bridge-session");
   setBackendOriginMeta("https://api.conductross.com");
-  setFetchResponse({
-    required: true,
-    ttydHttpUrl: "/api/sessions/session-bridge/terminal/ttyd",
-    ttydWsUrl: "/api/sessions/session-bridge/terminal/ttyd/ws",
-  });
 
   const connection = await resolveTerminalConnection("bridge-session", { bridgeId: "bridge-prod" });
 
@@ -190,8 +185,10 @@ test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", 
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://app.conductross.com/api/sessions/session-bridge/terminal/ttyd?bridgeId=bridge-prod",
+    "https://app.conductross.com/embed/terminal/bridge-session?bridgeId=bridge-prod",
   );
+  assert.equal(connection.terminalLinkUrl, connection.terminalUrl);
+  assert.equal(connection.relayTtydWsUrl, null);
 });
 
 test("resolveTerminalConnection keeps the embedded iframe on the proxied ttyd path even when a tunnel url exists", async () => {
@@ -241,29 +238,23 @@ test("resolveTerminalConnection keeps direct terminal links on the proxy origin 
   );
 });
 
-test("resolveTerminalConnection keeps bridge iframe urls stable and exposes relay websocket refresh metadata", async () => {
+test("resolveTerminalConnection never probes paired-device ttyd HTML before loading the first-party embed", async () => {
   setWindowLocation("https://app.conductross.com/sessions/bridge-session");
   setBackendOriginMeta("https://api.conductross.com");
-  setFetchResponse({
-    required: true,
-    ttydHttpUrl: "/api/sessions/bridge%3Adevice-1%3Asession-9/terminal/ttyd?bridgeId=device-1",
-    ttydWsUrl: "wss://relay.example.com/terminal/old/browser?jwt=old",
-    relayTtydWsUrl: "wss://relay.example.com/terminal/new/browser?jwt=new",
-  });
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    throw new Error("paired terminal resolution should not fetch upstream HTML metadata");
+  }) as typeof fetch;
 
   const connection = await resolveTerminalConnection("bridge:device-1:session-9", { bridgeId: "device-1" });
 
   assert.equal(connection.interactive, true);
   assert.equal(
     connection.terminalUrl,
-    "https://app.conductross.com/api/sessions/bridge%3Adevice-1%3Asession-9/terminal/ttyd?bridgeId=device-1",
+    "https://app.conductross.com/embed/terminal/bridge%3Adevice-1%3Asession-9?bridgeId=device-1",
   );
-  assert.equal(
-    connection.terminalLinkUrl,
-    "https://app.conductross.com/api/sessions/bridge%3Adevice-1%3Asession-9/terminal/ttyd?bridgeId=device-1",
-  );
-  assert.equal(
-    connection.relayTtydWsUrl,
-    "wss://relay.example.com/terminal/new/browser?jwt=new",
-  );
+  assert.equal(connection.terminalLinkUrl, connection.terminalUrl);
+  assert.equal(connection.relayTtydWsUrl, null);
+  assert.equal(fetchCalled, false);
 });

@@ -1,10 +1,56 @@
 import { lookup } from "node:dns/promises";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
 import { isIP } from "node:net";
 import type { BridgePreviewSessionConfig } from "./types.js";
 
 const LOCAL_NAVIGATION_HOSTS = ["127.0.0.1", "localhost", "::1", "0.0.0.0"] as const;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
 const BARE_LOCAL_NAVIGATION_PATTERN = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?::\d+)?(?:\/.*)?$/i;
+const MAX_DIRECT_RESPONSE_BYTES = 25 * 1024 * 1024;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+export interface NavigationAddress {
+  address: string;
+  family: number;
+}
+
+export interface ResolvedDirectNavigationTarget {
+  url: URL;
+  address: string;
+  family: 4 | 6;
+}
+
+export interface DirectNavigationResolveOptions {
+  allowLoopback?: boolean;
+  resolver?: (hostname: string) => Promise<NavigationAddress[]>;
+}
+
+export interface DirectNavigationRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Uint8Array | null;
+  timeoutMs: number;
+  allowLoopback?: boolean;
+  reserveBufferedBytes?: (bytes: number) => void;
+}
+
+export interface DirectNavigationResponse {
+  status: number;
+  headers: Record<string, string | string[]>;
+  body: Buffer;
+}
 
 export function normalizeNavigationHostname(hostname: string): string {
   return hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
@@ -61,6 +107,7 @@ export function isPrivateNetworkHostname(hostname: string): boolean {
     || lower.startsWith("feb")
     || lower.startsWith("fc")
     || lower.startsWith("fd")
+    || lower.startsWith("ff")
     || (mappedIpv4 ? isPrivateIpv4Address(mappedIpv4) : false);
 }
 
@@ -76,28 +123,183 @@ function hostnameResolvesToPrivateAddress(hostname: string): boolean {
   return false;
 }
 
-export async function assertSafeDirectNavigationTarget(value: string): Promise<void> {
-  if (unsafePreviewHostsAllowed()) {
-    return;
+function isLoopbackAddress(hostname: string): boolean {
+  const normalized = normalizeNavigationHostname(hostname);
+  if (normalized === "::1" || normalized === "::") {
+    return true;
   }
+  const mappedIpv4 = normalized.toLowerCase().startsWith("::ffff:")
+    ? normalized.slice("::ffff:".length)
+    : normalized;
+  return mappedIpv4 === "0.0.0.0" || mappedIpv4.startsWith("127.");
+}
 
+async function defaultResolver(hostname: string): Promise<NavigationAddress[]> {
+  return await lookup(hostname, { all: true, verbatim: true });
+}
+
+export async function resolveSafeDirectNavigationTarget(
+  value: string,
+  options: DirectNavigationResolveOptions = {},
+): Promise<ResolvedDirectNavigationTarget> {
   const parsed = new URL(value);
-  if (isLocalHost(parsed.hostname)) {
-    return;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Preview navigation only supports HTTP and HTTPS targets.");
   }
 
-  if (hostnameResolvesToPrivateAddress(parsed.hostname)) {
-    throw new Error(
-      "Preview navigation to private network hosts is blocked. Use loopback URLs for local dev servers or set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true to override.",
-    );
+  const hostname = normalizeNavigationHostname(parsed.hostname);
+  const literalFamily = isIP(hostname);
+  const resolved = literalFamily
+    ? [{ address: hostname, family: literalFamily }]
+    : await (options.resolver ?? defaultResolver)(hostname);
+  if (resolved.length === 0) {
+    throw new Error(`Preview navigation could not resolve ${hostname}.`);
   }
 
-  const resolved = await lookup(parsed.hostname, { all: true, verbatim: true }).catch(() => []);
-  if (resolved.some((entry) => hostnameResolvesToPrivateAddress(entry.address))) {
+  const normalized = resolved.map((entry) => ({
+    address: normalizeNavigationHostname(entry.address),
+    family: entry.family === 6 ? 6 as const : 4 as const,
+  }));
+  const localHostAllowed = options.allowLoopback !== false && isLocalHost(hostname);
+  if (localHostAllowed && normalized.some((entry) => !isLoopbackAddress(entry.address))) {
+    throw new Error("Preview loopback navigation resolved outside the loopback interface and was blocked.");
+  }
+
+  if (
+    !unsafePreviewHostsAllowed()
+    && !localHostAllowed
+    && normalized.some((entry) => hostnameResolvesToPrivateAddress(entry.address))
+  ) {
     throw new Error(
       "Preview navigation resolved to a private network address and was blocked. Set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true only if you intentionally trust that target.",
     );
   }
+
+  const selected = normalized.find((entry) => entry.family === 4) ?? normalized[0];
+  if (!selected) {
+    throw new Error(`Preview navigation could not resolve ${hostname}.`);
+  }
+  return { url: parsed, address: selected.address, family: selected.family };
+}
+
+export async function assertSafeDirectNavigationTarget(
+  value: string,
+  options: DirectNavigationResolveOptions = {},
+): Promise<void> {
+  await resolveSafeDirectNavigationTarget(value, options);
+}
+
+function sanitizeRequestHeaders(headers: Record<string, string>): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized || normalized === "host" || normalized === "content-length") continue;
+    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
+function sanitizeResponseHeaders(headers: IncomingHttpHeaders): Record<string, string | string[]> {
+  const sanitized: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.toLowerCase();
+    if (value === undefined || HOP_BY_HOP_HEADERS.has(normalized)) continue;
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
+export function buildPinnedRequestOptions(
+  target: ResolvedDirectNavigationTarget,
+  method: string,
+  headers: Record<string, string>,
+  bodyLength = 0,
+): HttpsRequestOptions {
+  const forwardedHeaders = sanitizeRequestHeaders(headers);
+  forwardedHeaders.host = target.url.host;
+  if (bodyLength > 0) {
+    forwardedHeaders["content-length"] = String(bodyLength);
+  }
+
+  return {
+    protocol: target.url.protocol,
+    hostname: target.address,
+    family: target.family,
+    port: target.url.port || (target.url.protocol === "https:" ? 443 : 80),
+    method,
+    path: `${target.url.pathname}${target.url.search}`,
+    headers: forwardedHeaders,
+    ...(target.url.protocol === "https:" && isIP(target.url.hostname) === 0
+      ? { servername: target.url.hostname }
+      : {}),
+  };
+}
+
+export async function requestSafeDirectNavigation(
+  input: DirectNavigationRequest,
+): Promise<DirectNavigationResponse> {
+  const target = await resolveSafeDirectNavigationTarget(input.url, {
+    allowLoopback: input.allowLoopback ?? false,
+  });
+  const body = input.body ? Buffer.from(input.body) : Buffer.alloc(0);
+  const requestOptions = buildPinnedRequestOptions(target, input.method, input.headers, body.length);
+  const requestImpl = target.url.protocol === "https:" ? httpsRequest : httpRequest;
+
+  return await new Promise<DirectNavigationResponse>((resolve, reject) => {
+    let settled = false;
+    let deadline: NodeJS.Timeout | null = null;
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      callback();
+    };
+    const outgoing = requestImpl(requestOptions, (response) => {
+      const chunks: Buffer[] = [];
+      let received = 0;
+      response.on("data", (chunk: Buffer | string) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        received += buffer.length;
+        if (received > MAX_DIRECT_RESPONSE_BYTES) {
+          response.destroy(new Error("Preview response exceeded the 25 MiB safety limit."));
+          return;
+        }
+        try {
+          input.reserveBufferedBytes?.(buffer.length);
+        } catch (error) {
+          response.destroy(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        chunks.push(buffer);
+      });
+      response.once("error", (error) => settle(() => reject(error)));
+      response.once("end", () => {
+        try {
+          if (received > 0) {
+            input.reserveBufferedBytes?.(received);
+          }
+          const result = {
+            status: response.statusCode ?? 502,
+            headers: sanitizeResponseHeaders(response.headers),
+            body: Buffer.concat(chunks),
+          };
+          settle(() => resolve(result));
+        } catch (error) {
+          settle(() => reject(error));
+        }
+      });
+    });
+    deadline = setTimeout(() => {
+      outgoing.destroy(new Error("Preview network request timed out."));
+    }, input.timeoutMs);
+    deadline.unref();
+    outgoing.once("error", (error) => settle(() => reject(error)));
+    if (body.length > 0) {
+      outgoing.write(body);
+    }
+    outgoing.end();
+  });
 }
 
 export type PreviewNavigationMode = "bridge" | "direct" | "blocked";

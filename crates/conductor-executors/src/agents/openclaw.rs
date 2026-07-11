@@ -471,7 +471,7 @@ async fn run_openclaw_turn_inner(
             "maxProtocol": OPENCLAW_PROTOCOL_VERSION,
             "client": {
                 "id": OPENCLAW_CLIENT_ID,
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": conductor_core::BUILD_VERSION,
                 "platform": platform_name(),
                 "mode": OPENCLAW_CLIENT_MODE,
             },
@@ -482,7 +482,7 @@ async fn run_openclaw_turn_inner(
             "permissions": {},
             "auth": build_connect_auth(config.auth_token.as_deref(), cached_device_token.as_deref(), config.password.as_deref()),
             "locale": locale_name(),
-            "userAgent": format!("conductor-oss/{}", env!("CARGO_PKG_VERSION")),
+            "userAgent": format!("conductor-oss/{}", conductor_core::BUILD_VERSION),
             "device": {
                 "id": identity.device_id,
                 "publicKey": identity.public_key,
@@ -1570,7 +1570,7 @@ async fn auto_approve_device_pairing(
             "maxProtocol": OPENCLAW_PROTOCOL_VERSION,
             "client": {
                 "id": OPENCLAW_CLIENT_ID,
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": conductor_core::BUILD_VERSION,
                 "platform": platform_name(),
                 "mode": OPENCLAW_CLIENT_MODE,
             },

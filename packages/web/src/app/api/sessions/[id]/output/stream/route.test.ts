@@ -17,7 +17,7 @@ function resetEnv(): void {
   process.env.CO_CONFIG_PATH = "/tmp/conductor-output-stream-route-test-config-does-not-exist.yaml";
   process.env.CONDUCTOR_WORKSPACE = "";
   process.env.CONDUCTOR_REQUIRE_AUTH = "";
-  process.env.RELAY_JWT_SECRET = "output-stream-route-test-secret";
+  process.env.RELAY_JWT_SECRET = "output-stream-route-test-secret-at-least-32-bytes";
 }
 
 function buildEventStreamResponse(payload: string = SSE_PAYLOAD): Response {

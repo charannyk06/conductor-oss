@@ -66,7 +66,7 @@ function fetchPr(repo, number) {
       "--repo",
       repo,
       "--json",
-      "number,title,body,url",
+      "number,title,body,url,author",
     ]),
   );
 }
@@ -74,6 +74,7 @@ function fetchPr(repo, number) {
 const args = parseArgs(process.argv.slice(2));
 const repo = args.get("repo");
 const currentTag = args.get("current-tag");
+const currentRef = args.get("current-ref") ?? currentTag;
 
 if (!repo || !currentTag) {
   console.error("usage: node scripts/generate-release-notes.mjs --repo owner/name --current-tag v1.2.3");
@@ -81,7 +82,7 @@ if (!repo || !currentTag) {
 }
 
 const previousTag = getPreviousTag(currentTag);
-const pullNumbers = extractPullNumbers(getCommitSubjects(previousTag, currentTag));
+const pullNumbers = extractPullNumbers(getCommitSubjects(previousTag, currentRef));
 const entries = pullNumbers.map((number) => buildReleaseEntry(fetchPr(repo, number)));
 const markdown = buildReleaseMarkdown({
   currentTag,

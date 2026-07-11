@@ -148,7 +148,7 @@ function supplementClaudeRuntimeModels(discoveredModels: string[], configuredMod
 export async function buildClaudeRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog | null> {
   const settings = await readJsonFileIfPresent<ClaudeSettings>(join(homedir(), ".claude", "settings.json"));
   const stats = await readJsonFileIfPresent<ClaudeStatsCache>(join(homedir(), ".claude", "stats-cache.json"));
-  const detectedReasoningOptions = await detectReasoningOptionsFromHelp(["claude", "claude-code", "cc"]);
+  const detectedReasoningOptions = await detectReasoningOptionsFromHelp(["claude", "claude-code"]);
   const reasoningOptions = detectedReasoningOptions.length > 0
     ? detectedReasoningOptions
     : defaultClaudeReasoningOptions();

@@ -23,17 +23,20 @@ N/A - internal maintenance only
 - [ ] Bug fix
 - [ ] New feature
 - [ ] Breaking change
-- [ ] Plugin addition / modification
+- [ ] Agent or integration addition / modification
 - [ ] Documentation update
 - [ ] Refactor / chore
 
 ## Checklist
 
-- [ ] `pnpm build` passes with no errors
-- [ ] `pnpm typecheck` passes with no errors
+- [ ] `bun run build:frontend` passes for frontend changes
+- [ ] `bun run typecheck` passes for TypeScript changes
+- [ ] `bun run test:packages` passes for package changes
+- [ ] `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` pass for Rust changes
+- [ ] `cd bridge-cmd && go test ./...` passes for bridge changes
 - [ ] No `any` types introduced without justification
-- [ ] New plugins implement the appropriate `PluginModule` interface
 - [ ] No secrets or credentials committed
+- [ ] Security boundaries, authentication, persistence, and network behavior have regression tests when changed
 - [ ] User-facing release notes are filled in plain English or marked internal-only
 - [ ] PR title follows conventional commits (`feat:`, `fix:`, `chore:`, etc.)
 

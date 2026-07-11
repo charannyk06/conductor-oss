@@ -167,7 +167,7 @@ fn status_payload(connected: bool) -> BridgeToBrowserMessage {
         hostname: hostname(),
         os: std::env::consts::OS.to_string(),
         connected,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(conductor_core::BUILD_VERSION.to_string()),
     }
 }
 

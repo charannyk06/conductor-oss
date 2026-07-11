@@ -205,7 +205,7 @@ test("GET resolves bridge-backed preview session context via the paired device a
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
-  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret-at-least-32-bytes";
   const seenPaths: string[] = [];
 
   global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -322,7 +322,7 @@ test("GET uses an explicit previewUrlHint for bridge sessions that did not repor
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
-  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret-at-least-32-bytes";
   const seenPaths: string[] = [];
 
   global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -407,7 +407,7 @@ test("POST clones the bridge request before preview lookup so body reuse does no
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "https://api.example.com";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
-  process.env.RELAY_JWT_SECRET = "preview-test-secret";
+  process.env.RELAY_JWT_SECRET = "preview-test-secret-at-least-32-bytes";
 
   const seenPaths: string[] = [];
   const seenBodies: Array<unknown> = [];
@@ -500,7 +500,7 @@ test("bridge DOM and screenshot routes preserve explicit previewUrlHint", async 
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "https://api.example.com";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
-  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret-at-least-32-bytes";
 
   const seenPaths: string[] = [];
 

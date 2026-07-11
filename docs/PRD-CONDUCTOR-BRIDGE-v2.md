@@ -2,8 +2,8 @@
 
 **Revised after Mar 20 design review with Charann**
 
-> Archive note
-> This was a proposed hosted bridge model. The shipped product instead remains local-first by default, with optional bridge/relay access-control flows and a multi-agent dashboard experience. Use this doc as historical context only.
+> **Superseded planning document — not a security or implementation specification.**
+> The shipped product remains local-first by default, with optional bridge/relay access-control flows. The relay terminates TLS, processes plaintext application frames, and persists pairing ownership; it is not an end-to-end-encrypted stateless pipe. Use `SECURITY.md`, `docs/relay-deployment.md`, and the source code as the current contract.
 
 ## What It Is
 
@@ -43,8 +43,8 @@ conductor-bridge daemon
 - **Pair once, done forever** — after first pairing, bridge auto-connects on every boot
 - **All work on user's machine** — agents, terminal, files all run locally
 - **Universal web access** — log in from any device to use your laptop's agents
-- **No repeated auth** — refresh token stored locally, auto-renews
-- **User's relay, user's rules** — self-hosted relay passes only encrypted bytes
+- **No repeated interactive pairing** — a long-lived device credential is stored locally until rotation or revocation
+- **User's relay, user's rules** — self-hosting keeps the TLS-terminating relay inside the user's trust boundary
 
 ## Architecture
 
@@ -69,7 +69,7 @@ conductor-bridge daemon
    - WebSocket relay: wires browser sessions to bridge sessions
    - Device authorization server (device code OAuth flow)
    - Token storage (refresh tokens mapped to device IDs)
-   - Zero session data — stateless pipe
+   - Durable pairing ownership plus in-memory routing of proxied application traffic
 
 3. **Dashboard (web)**
    - GitHub OAuth login

@@ -17,7 +17,11 @@ use conductor_core::event::EventBus;
 use conductor_db::Database;
 
 #[derive(Parser)]
-#[command(name = "conductor", version, about = "AI agent orchestrator")]
+#[command(
+    name = "conductor",
+    version = conductor_core::BUILD_VERSION,
+    about = "AI agent orchestrator"
+)]
 struct Cli {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
@@ -168,7 +172,7 @@ async fn main() -> Result<()> {
             let event_bus = EventBus::new(1024);
             tracing::info!(
                 "Starting Conductor Rust backend v{}",
-                env!("CARGO_PKG_VERSION")
+                conductor_core::BUILD_VERSION
             );
             conductor_server::serve(&config, db, event_bus).await?;
         }

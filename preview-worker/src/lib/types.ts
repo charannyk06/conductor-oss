@@ -1,6 +1,6 @@
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import type { Browser, Frame, HTTPRequest, Page } from "puppeteer-core";
+import type { Browser, CDPSession, Frame, HTTPRequest, Page } from "puppeteer-core";
 
 export interface PreviewBounds {
   x: number;
@@ -143,6 +143,13 @@ export interface PreviewSession {
   frameSequence: number;
   requestStarts: WeakMap<HTTPRequest, number>;
   requestInterceptionEnabled: boolean;
+  navigationMode: "direct" | "bridge";
+  directLoopbackOrigin: string | null;
+  networkGuardSession: CDPSession | null;
+  interceptionBudget: {
+    activeRequests: number;
+    bufferedBytes: number;
+  };
   lastRequestedUrl: string | null;
 }
 

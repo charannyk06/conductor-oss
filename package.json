@@ -11,15 +11,14 @@
   "description": "Local-first control surface for AI coding agents, workspaces, worktrees, terminals, diffs, previews, and paired-device access",
   "packageManager": "bun@1.3.11",
   "workspaces": [
-    "packages/*",
-    "preview-worker"
+    "packages/*"
   ],
   "type": "module",
   "scripts": {
     "build": "bun run build:frontend && cargo build --workspace --release",
     "build:frontend": "bun run --cwd packages/core build && bun run --cwd packages/openclaw-dispatcher build && bun run --cwd packages/web build",
     "typecheck": "bun run --cwd packages/core build && bun run --cwd packages/openclaw-dispatcher typecheck && bun run --cwd packages/web typecheck && bun run --cwd preview-worker typecheck",
-    "test:packages": "bun run --cwd packages/core test && bun run --cwd packages/cli test && bun run --cwd packages/openclaw-dispatcher test && bun run --cwd packages/web test && bun run --cwd preview-worker test",
+    "test:packages": "bun run --cwd packages/core test && bun run --cwd packages/cli test && bun run --cwd packages/openclaw-dispatcher test && bun run --cwd packages/web test && bun run --cwd preview-worker test && node --test scripts/*.test.mjs",
     "bench:terminal": "bash ./scripts/terminal-benchmark.sh",
     "dev": "sh -c 'APP_ROOT=$PWD; WORKSPACE_ROOT=${CONDUCTOR_WORKSPACE:-${WORKSPACE:-$APP_ROOT}}; ENV_FILE=${CONDUCTOR_ENV_FILE:-}; if [ -z \"$ENV_FILE\" ]; then if [ -f \"$APP_ROOT/.env.local\" ]; then ENV_FILE=\"$APP_ROOT/.env.local\"; elif [ -f \"$WORKSPACE_ROOT/.env.local\" ]; then ENV_FILE=\"$WORKSPACE_ROOT/.env.local\"; fi; fi; if [ -n \"$ENV_FILE\" ] && [ -f \"$ENV_FILE\" ]; then set -a; . \"$ENV_FILE\"; set +a; fi; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE_ROOT/conductor.yaml}; DEV_DASHBOARD_PORT=${CONDUCTOR_DEV_DASHBOARD_PORT:-${PORT:-3000}}; DEV_BACKEND_PORT=${CONDUCTOR_DEV_BACKEND_PORT:-${CONDUCTOR_BACKEND_PORT:-4749}}; CONDUCTOR_WORKSPACE=$WORKSPACE_ROOT CO_CONFIG_PATH=$CONFIG CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:$DEV_BACKEND_PORT} PORT=$DEV_DASHBOARD_PORT bun run --cwd packages/web dev'",
     "dev:backend": "sh -c 'APP_ROOT=$PWD; WORKSPACE_ROOT=${CONDUCTOR_WORKSPACE:-${WORKSPACE:-$APP_ROOT}}; ENV_FILE=${CONDUCTOR_ENV_FILE:-}; if [ -z \"$ENV_FILE\" ]; then if [ -f \"$APP_ROOT/.env.local\" ]; then ENV_FILE=\"$APP_ROOT/.env.local\"; elif [ -f \"$WORKSPACE_ROOT/.env.local\" ]; then ENV_FILE=\"$WORKSPACE_ROOT/.env.local\"; fi; fi; if [ -n \"$ENV_FILE\" ] && [ -f \"$ENV_FILE\" ]; then set -a; . \"$ENV_FILE\"; set +a; fi; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE_ROOT/conductor.yaml}; DEV_BACKEND_PORT=${CONDUCTOR_DEV_BACKEND_PORT:-${CONDUCTOR_BACKEND_PORT:-4749}}; CONDUCTOR_WORKSPACE=$WORKSPACE_ROOT CO_CONFIG_PATH=$CONFIG bun run --cwd packages/cli dev -- start --workspace \"$WORKSPACE_ROOT\" --no-dashboard --backend-port $DEV_BACKEND_PORT'",
@@ -46,18 +45,6 @@
     "postcss": "8.5.15",
     "ws": "8.21.0",
     "js-yaml": "4.2.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "yauzl": "3.3.1",
-      "basic-ftp": "5.3.1",
-      "fast-uri": "3.1.2",
-      "ip-address": "10.2.0",
-      "picomatch": "2.3.2",
-      "postcss": "8.5.15",
-      "ws": "8.21.0",
-      "js-yaml": "4.2.0"
-    }
   },
   "homepage": "https://github.com/charannyk06/conductor-oss",
   "keywords": [

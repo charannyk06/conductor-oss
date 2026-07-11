@@ -227,7 +227,7 @@ fn repository_payload(
         "repo": repo_url_without_credentials(project.repo.as_deref()).unwrap_or_else(|| id.to_string()),
         "path": resolved_path.to_string_lossy().to_string(),
         "agent": project.agent.clone().unwrap_or_else(|| default_agent.to_string()),
-        "agentPermissions": project.agent_config.permissions.clone().unwrap_or_else(|| "skip".to_string()),
+        "agentPermissions": project.agent_config.permissions.clone().unwrap_or_else(|| "default".to_string()),
         "agentModel": project.agent_config.model.clone(),
         "agentReasoningEffort": project.agent_config.reasoning_effort.clone(),
         "workspaceMode": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),

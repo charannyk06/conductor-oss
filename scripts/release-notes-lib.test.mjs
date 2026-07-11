@@ -3,9 +3,49 @@ import assert from "node:assert/strict";
 
 import {
   extractCheckedCategories,
+  buildReleaseEntry,
+  isTrustedDependabotUpdate,
   titleHasCodingAgentAttribution,
   validatePrDescription,
 } from "./release-notes-lib.mjs";
+
+test("trusted Dependabot detection requires the bot and a same-repository head", () => {
+  const payload = {
+    repository: { full_name: "owner/repo" },
+    pull_request: {
+      user: { login: "dependabot[bot]" },
+      head: { repo: { full_name: "owner/repo" } },
+    },
+  };
+
+  assert.equal(isTrustedDependabotUpdate(payload), true);
+  assert.equal(isTrustedDependabotUpdate({
+    ...payload,
+    pull_request: {
+      ...payload.pull_request,
+      head: { repo: { full_name: "attacker/fork" } },
+    },
+  }), false);
+  assert.equal(isTrustedDependabotUpdate({
+    ...payload,
+    pull_request: {
+      ...payload.pull_request,
+      user: { login: "dependabot-lookalike" },
+    },
+  }), false);
+});
+
+test("Dependabot PRs remain internal in generated release entries", () => {
+  const entry = buildReleaseEntry({
+    number: 10,
+    title: "build(deps): bump example from 1.0.0 to 1.0.1",
+    body: "Bumps example.",
+    url: "https://github.com/owner/repo/pull/10",
+    author: { login: "app/dependabot", is_bot: true },
+  });
+
+  assert.equal(entry.internalOnly, true);
+});
 
 test("extractCheckedCategories accepts template labels with explanatory text", () => {
   const body = `## Type of Change
@@ -18,6 +58,15 @@ test("extractCheckedCategories accepts template labels with explanatory text", (
   assert.deepEqual(extractCheckedCategories(body), ["Fixes"]);
 });
 
+test("extractCheckedCategories accepts the current agent and integration label", () => {
+  const body = `## Type of Change
+
+- [x] Agent or integration addition / modification
+`;
+
+  assert.deepEqual(extractCheckedCategories(body), ["Plugin Updates"]);
+});
+
 test("validatePrDescription accepts simplified type labels from the PR template", () => {
   const body = `## User-Facing Release Notes
 
@@ -28,7 +77,7 @@ N/A - internal maintenance only
 - [x] Bug fix
 - [ ] New feature
 - [ ] Breaking change
-- [ ] Plugin addition / modification
+- [ ] Agent or integration addition / modification
 - [ ] Documentation update
 - [ ] Refactor / chore
 `;
@@ -63,7 +112,7 @@ test("validatePrDescription rejects agent attribution prefixes in PR titles", ()
 - [x] Bug fix
 - [ ] New feature
 - [ ] Breaking change
-- [ ] Plugin addition / modification
+- [ ] Agent or integration addition / modification
 - [ ] Documentation update
 - [ ] Refactor / chore
 `;

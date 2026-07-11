@@ -2196,7 +2196,7 @@ export function SettingsDialog({
 function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySettingsPayload {
   return {
     ...value,
-    agentPermissions: value.agentPermissions === "default" ? "default" : "skip",
+    agentPermissions: value.agentPermissions === "skip" ? "skip" : "default",
     devServerScript: value.devServerScript ?? "",
     devServerCwd: value.devServerCwd ?? "",
     devServerUrl: value.devServerUrl ?? "",
@@ -3250,15 +3250,15 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                             value={repositoryDraft.agentPermissions}
                             onChange={(event) => setRepositoryDraft((prev) => prev ? {
                               ...prev,
-                              agentPermissions: event.target.value === "default" ? "default" : "skip",
+                              agentPermissions: event.target.value === "skip" ? "skip" : "default",
                             } : prev)}
                             className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           >
-                            <option value="skip">Auto approve and allow local dev servers</option>
-                            <option value="default">Sandboxed default mode</option>
+                            <option value="default">Agent default (approval prompts when supported)</option>
+                            <option value="skip">Automatic mode (bypasses agent approval prompts)</option>
                           </select>
                           <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                            Applies to new sessions for this repository across all agents unless you override the launch mode.
+                            Applies to new sessions for this repository. Automatic mode grants the selected agent broad local execution authority and should only be used in trusted workspaces.
                           </p>
                         </label>
 

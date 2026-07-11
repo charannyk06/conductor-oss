@@ -8,6 +8,8 @@ type SessionLock = {
 export class SessionStore {
   private readonly sessions = new Map<string, PreviewSession>();
   private readonly locks = new Map<string, SessionLock>();
+  private readonly creationLocks = new Map<string, SessionLock>();
+  private readonly creationReservations = new Map<string, number>();
 
   constructor(private readonly sessionTimeoutMs: number) {}
 
@@ -17,6 +19,24 @@ export class SessionStore {
 
   countByApiKey(apiKey: string): number {
     return this.listByApiKey(apiKey).length;
+  }
+
+  tryReserveCreation(apiKey: string, maxSessions: number): boolean {
+    const reserved = this.creationReservations.get(apiKey) ?? 0;
+    if (this.countByApiKey(apiKey) + reserved >= maxSessions) {
+      return false;
+    }
+    this.creationReservations.set(apiKey, reserved + 1);
+    return true;
+  }
+
+  releaseCreation(apiKey: string): void {
+    const reserved = this.creationReservations.get(apiKey) ?? 0;
+    if (reserved <= 1) {
+      this.creationReservations.delete(apiKey);
+      return;
+    }
+    this.creationReservations.set(apiKey, reserved - 1);
   }
 
   list(): PreviewSession[] {
@@ -80,14 +100,29 @@ export class SessionStore {
     }
   }
 
+  async runCreationExclusive<T>(apiKey: string, task: () => Promise<T>): Promise<T> {
+    const lock = this.getNamedLock(this.creationLocks, apiKey);
+    await this.acquire(lock);
+
+    try {
+      return await task();
+    } finally {
+      this.releaseNamedLock(this.creationLocks, apiKey, lock);
+    }
+  }
+
   private getLock(sessionId: string): SessionLock {
-    const existing = this.locks.get(sessionId);
+    return this.getNamedLock(this.locks, sessionId);
+  }
+
+  private getNamedLock(locks: Map<string, SessionLock>, key: string): SessionLock {
+    const existing = locks.get(key);
     if (existing) {
       return existing;
     }
 
     const created: SessionLock = { active: false, waiters: [] };
-    this.locks.set(sessionId, created);
+    locks.set(key, created);
     return created;
   }
 
@@ -112,5 +147,19 @@ export class SessionStore {
     if (!this.sessions.has(sessionId)) {
       this.locks.delete(sessionId);
     }
+  }
+
+  private releaseNamedLock(
+    locks: Map<string, SessionLock>,
+    key: string,
+    lock: SessionLock,
+  ): void {
+    lock.active = false;
+    const next = lock.waiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    locks.delete(key);
   }
 }

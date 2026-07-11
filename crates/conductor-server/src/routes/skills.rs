@@ -6,8 +6,9 @@ use conductor_core::types::AgentKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -643,6 +644,10 @@ async fn install_skill(
 }
 
 async fn uninstall_skill(Json(request): Json<SkillInstallRequest>) -> ApiResponse {
+    let skill_id = match validate_skill_id(&request.skill_id) {
+        Ok(skill_id) => skill_id,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
     let install_scope = request.scope.trim();
     let target_paths = match resolve_install_targets(
         request.agent.trim(),
@@ -652,7 +657,7 @@ async fn uninstall_skill(Json(request): Json<SkillInstallRequest>) -> ApiRespons
         Ok(path) => path,
         Err(err) => return error(StatusCode::BAD_REQUEST, err),
     };
-    let removed_paths = match remove_skill_installations(&target_paths, request.skill_id.trim()) {
+    let removed_paths = match remove_skill_installations(&target_paths, skill_id) {
         Ok(paths) => paths,
         Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
@@ -931,6 +936,8 @@ fn remove_skill_installations(
     install_roots: &[PathBuf],
     skill_id: &str,
 ) -> Result<Vec<PathBuf>, std::io::Error> {
+    let skill_id = validate_skill_id(skill_id)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let mut removed_paths = Vec::new();
     let mut seen = HashSet::new();
     for install_root in install_roots {
@@ -938,16 +945,57 @@ fn remove_skill_installations(
             if name != skill_id || !seen.insert(skill_dir.clone()) {
                 continue;
             }
+            ensure_skill_removal_target_is_within_root(install_root, &skill_dir)?;
             fs::remove_dir_all(&skill_dir)?;
             removed_paths.push(skill_dir);
         }
         let skill_dir = install_root.join(skill_id);
         if skill_dir.exists() && seen.insert(skill_dir.clone()) {
+            ensure_skill_removal_target_is_within_root(install_root, &skill_dir)?;
             fs::remove_dir_all(&skill_dir)?;
             removed_paths.push(skill_dir);
         }
     }
     Ok(removed_paths)
+}
+
+fn validate_skill_id(skill_id: &str) -> Result<&str, String> {
+    let skill_id = skill_id.trim();
+    if skill_id.is_empty() {
+        return Err("skillId must be a non-empty skill name".to_string());
+    }
+
+    // Check both separator styles so input remains safe when requests or state
+    // move between Unix and Windows hosts.
+    if skill_id.contains('/') || skill_id.contains('\\') || skill_id.chars().any(char::is_control) {
+        return Err("skillId must be a single path component".to_string());
+    }
+
+    let mut components = Path::new(skill_id).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(component)), None) if component == OsStr::new(skill_id) => {
+            Ok(skill_id)
+        }
+        _ => Err("skillId must be a single path component".to_string()),
+    }
+}
+
+fn ensure_skill_removal_target_is_within_root(
+    install_root: &Path,
+    skill_dir: &Path,
+) -> Result<(), std::io::Error> {
+    let canonical_root = fs::canonicalize(install_root)?;
+    let canonical_skill_dir = fs::canonicalize(skill_dir)?;
+    if canonical_skill_dir == canonical_root || !canonical_skill_dir.starts_with(&canonical_root) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "Refusing to remove skill path outside install root: {}",
+                skill_dir.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), std::io::Error> {
@@ -1101,6 +1149,109 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn empty_skill_id_cannot_remove_the_install_root() {
+        let install_root = make_temp_dir("conductor-skills-empty-id");
+        let sentinel = install_root.join("keep-me");
+        fs::create_dir_all(&sentinel).expect("create sentinel directory");
+        fs::write(sentinel.join("SKILL.md"), "# Keep me\n").expect("write sentinel manifest");
+
+        let result = remove_skill_installations(std::slice::from_ref(&install_root), "");
+
+        assert!(result.is_err());
+        assert!(install_root.exists());
+        assert!(sentinel.exists());
+        let _ = fs::remove_dir_all(install_root);
+    }
+
+    #[tokio::test]
+    async fn uninstall_endpoint_rejects_unsafe_skill_ids_as_bad_requests() {
+        for skill_id in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "/tmp/outside",
+            r"..\outside",
+            "bad\0name",
+        ] {
+            let (status, Json(payload)) = uninstall_skill(Json(SkillInstallRequest {
+                skill_id: skill_id.to_string(),
+                agent: CLAUDE_AGENT.to_string(),
+                scope: "user".to_string(),
+                workspace_path: None,
+                session_id: None,
+            }))
+            .await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST, "skill id: {skill_id:?}");
+            assert!(payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("skillId")));
+        }
+    }
+
+    #[test]
+    fn skill_id_validation_preserves_legitimate_single_component_names() {
+        assert_eq!(validate_skill_id(" chrome-cdp ").unwrap(), "chrome-cdp");
+        assert_eq!(
+            validate_skill_id("custom.skill_v2").unwrap(),
+            "custom.skill_v2"
+        );
+    }
+
+    #[test]
+    fn traversal_skill_id_cannot_remove_a_sibling_directory() {
+        let base = make_temp_dir("conductor-skills-traversal");
+        let install_root = base.join("skills");
+        let outside = base.join("outside");
+        fs::create_dir_all(&install_root).expect("create install root");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        fs::write(outside.join("SKILL.md"), "# Outside\n").expect("write outside manifest");
+
+        let result = remove_skill_installations(std::slice::from_ref(&install_root), "../outside");
+
+        assert!(result.is_err());
+        assert!(outside.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn absolute_skill_id_cannot_remove_an_unrelated_directory() {
+        let install_root = make_temp_dir("conductor-skills-absolute-root");
+        let outside = make_temp_dir("conductor-skills-absolute-outside");
+        fs::write(outside.join("SKILL.md"), "# Outside\n").expect("write outside manifest");
+
+        let result = remove_skill_installations(
+            std::slice::from_ref(&install_root),
+            outside.to_string_lossy().as_ref(),
+        );
+
+        assert!(result.is_err());
+        assert!(outside.exists());
+        let _ = fs::remove_dir_all(install_root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_skill_directory_cannot_escape_the_install_root() {
+        use std::os::unix::fs::symlink;
+
+        let install_root = make_temp_dir("conductor-skills-symlink-root");
+        let outside = make_temp_dir("conductor-skills-symlink-outside");
+        fs::write(outside.join("SKILL.md"), "# Outside\n").expect("write outside manifest");
+        symlink(&outside, install_root.join("outside-link")).expect("create skill symlink");
+
+        let result =
+            remove_skill_installations(std::slice::from_ref(&install_root), "outside-link");
+
+        assert!(result.is_err());
+        assert!(outside.exists());
+        let _ = fs::remove_dir_all(install_root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[test]

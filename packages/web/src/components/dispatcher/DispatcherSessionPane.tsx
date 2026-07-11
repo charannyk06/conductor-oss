@@ -305,7 +305,7 @@ function normalizeRepositorySettings(value: unknown): RepositorySettingsPayload 
     repo,
     path,
     agent: readString(record.agent) ?? "codex",
-    agentPermissions: readString(record.agentPermissions) ?? "skip",
+    agentPermissions: readString(record.agentPermissions) ?? "default",
     agentModel: readString(record.agentModel) ?? "",
     agentReasoningEffort: readString(record.agentReasoningEffort) ?? "",
     workspaceMode: readString(record.workspaceMode) ?? "local",

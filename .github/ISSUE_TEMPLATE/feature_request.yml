@@ -47,16 +47,18 @@ body:
       label: Affected Component
       options:
         - CLI (`co` commands)
-        - Core (board watcher / session manager)
+        - Rust backend / session manager
         - Web Dashboard
-        - Plugin — Agent (claude-code / codex / gemini)
-        - Plugin — Runtime (tmux)
-        - Plugin — Workspace (worktree)
-        - Plugin — SCM (github)
-        - Plugin — Notifier (discord / desktop)
-        - Plugin — MCP Server
-        - Plugin — Webhook
-        - Plugin — New (I want to build one)
+        - Agent executor
+        - Dispatcher / board workflow
+        - Terminal / PTY runtime
+        - Workspace / worktree management
+        - GitHub integration
+        - Bridge / relay
+        - Preview worker
+        - MCP / ACP server
+        - Notifications
+        - Release / deployment
         - Documentation
         - Other
 

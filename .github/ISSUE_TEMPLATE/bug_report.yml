@@ -61,7 +61,7 @@ body:
     attributes:
       label: Conductor Version
       description: Output of `co --version`
-      placeholder: "0.1.0"
+      placeholder: "x.y.z"
     validations:
       required: true
 
@@ -94,4 +94,15 @@ body:
         - claude-code
         - codex
         - gemini
+        - amp
+        - hermes
+        - cursor-cli
+        - opencode
+        - openclaw
+        - pi
+        - droid
+        - qwen-code
+        - ccr
+        - github-copilot
+        - letta
         - N/A

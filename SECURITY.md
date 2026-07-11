@@ -59,14 +59,16 @@ Conductor is designed to be **local-first and low-attack-surface**:
 - No hosted control plane is required for normal local use
 - Networked features such as GitHub integration, webhooks, external identity providers, or bridge/relay flows are opt-in
 
-### Agent Isolation via Git Worktrees
-- Each agent session runs in a separate `git worktree`, isolated from your main branch
-- A compromised or runaway agent cannot directly corrupt your working tree
-- Sessions are namespaced by `session-id` — no cross-session bleed
+### Worktree separation and agent trust
+- Git-backed sessions normally use a separate `git worktree` so concurrent branches do not overwrite each other's checked-out files
+- A worktree is a source-control concurrency boundary, not an operating-system security sandbox: local agents still run as your user and may access anything that account can access
+- Session IDs namespace Conductor's runtime records, but they do not replace filesystem permissions, containers, VMs, or an agent vendor's own sandbox
+- New repositories use normal agent approval behavior by default; automatic permission mode is opt-in and intended only for trusted workspaces
 
 ### Secrets and local tokens
 - Agent credentials are expected to stay with the upstream CLIs or environment variables; Conductor does not proxy agent billing or auth
 - Workspace state in `.conductor/` may include runtime metadata, detached terminal state, and optional bridge token/state files when bridge flows are enabled
+- A self-hosted relay's persistent state file contains raw, long-lived device and refresh credentials. Keep the volume and its backups private and encrypted, preserve `0600` file permissions, and rotate paired-device credentials after any exposure
 - The example config uses placeholder values only
 
 ### Optional Authentication (Dashboard)
@@ -92,8 +94,6 @@ The following CVEs are currently ignored in the dependency audit (`.cargo/audit.
 |-----|-----------|--------|--------|
 | RUSTSEC-2023-0071 | rsa (RSA crypto) | No fixed version available; low risk for Conductor's use case | Monitoring for upstream fix |
 | RUSTSEC-2024-0384 | instant | Low severity, active upstream development, acceptable transitive risk | Monitoring for upstream fix |
-| RUSTSEC-2026-0008 | git2 | Low severity, non-blocking for CLI operations | Monitoring for upstream fix |
-| RUSTSEC-2026-0097 | rand | Patched versions are locked locally; CI ignore retained for cross-target lockfile compatibility | Monitoring for upstream fix |
 
 **Dependency Audit CI** runs on every PR and weekly. As fixes become available, dependencies are automatically upgraded. See `.github/workflows/security.yml` for current audit configuration.
 
@@ -103,7 +103,7 @@ The following CVEs are currently ignored in the dependency audit (`.cargo/audit.
 
 1. **Pin agents to specific models** — avoid `latest` model aliases in production configurations, as new model versions may behave differently
 
-2. **Use `--dangerously-skip-permissions` only in trusted environments** — this flag disables Claude Code's safety prompts. Never run it on a machine with access to production credentials
+2. **Keep the normal agent permission default** — enable Conductor's automatic permission mode only for trusted workspaces on machines without sensitive credentials. The default preserves upstream approval behavior where the agent provides it; it is not an operating-system sandbox.
 
 3. **Review PRs before merging** — AI agents make mistakes. Always review diffs before approving or merging agent-created PRs
 

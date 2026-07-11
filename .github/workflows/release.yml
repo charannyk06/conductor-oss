@@ -34,6 +34,7 @@ jobs:
       pull-requests: read
     outputs:
       skip: ${{ steps.check.outputs.skip }}
+      recovering: ${{ steps.version.outputs.recovering }}
       new_version: ${{ steps.version.outputs.new_version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
     steps:
@@ -43,60 +44,78 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
       - name: Determine version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$EVENT_REF" != refs/heads/main ]; then
+            echo "::error::Manual releases must be dispatched from the main branch, not $EVENT_REF."
+            exit 1
+          fi
+
+          exact_tag=$(git tag --points-at HEAD --list 'v[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true)
+
+          recover_exact=true
+          if [ -n "$exact_tag" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            exact_version="${exact_tag#v}"
+            exact_complete=true
+            for package_name in \
+              conductor-oss \
+              conductor-oss-native-darwin-universal \
+              conductor-oss-native-linux-x64 \
+              conductor-oss-native-win32-x64; do
+              if ! npm view "${package_name}@${exact_version}" version >/dev/null 2>&1; then
+                exact_complete=false
+                break
+              fi
+            done
+            if ! gh release view "$exact_tag" --json isDraft --jq '.isDraft' 2>/dev/null \
+              | grep -qx false; then
+              exact_complete=false
+            fi
+            if [ "$exact_complete" = true ]; then
+              recover_exact=false
+            fi
+          fi
+
+          if [ -n "$exact_tag" ] && [ "$recover_exact" = true ]; then
+            echo "Recovering release $exact_tag at the current commit."
+            echo "recovering=true" >> "$GITHUB_OUTPUT"
+            echo "new_version=${exact_tag#v}" >> "$GITHUB_OUTPUT"
+            echo "tag_name=$exact_tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "recovering=false" >> "$GITHUB_OUTPUT"
+          last_tag=$(git tag --merged HEAD --list 'v[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true)
           tag_ver="${last_tag#v}"
           [ -z "$tag_ver" ] && tag_ver="0.0.0"
 
           pkg_ver=$(node -p "require('./packages/cli/package.json').version")
 
-          npm_highest=$(node -e "
-            const { execSync } = require('child_process');
-            let raw = '[]';
-            try {
-              raw = execSync('npm view conductor-oss versions --json', { stdio: ['ignore', 'pipe', 'ignore'] })
-                .toString()
-                .trim() || '[]';
-            } catch {}
-
-            let versions;
-            try {
-              versions = JSON.parse(raw);
-            } catch {
-              versions = [];
-            }
-
-            if (typeof versions === 'string') versions = [versions];
-            if (!Array.isArray(versions)) versions = [];
-
-            const stable = versions
-              .map((v) => String(v).trim())
-              .filter((v) => /^\d+\.\d+\.\d+$/.test(v));
-
-            if (stable.length === 0) {
-              console.log('0.0.0');
-              process.exit(0);
-            }
-
-            const p = (v) => v.split('.').map(Number);
-            stable.sort((a, b) => {
-              const pa = p(a), pb = p(b);
-              for (let i = 0; i < 3; i++) {
-                if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
-              }
-              return 0;
-            });
-
-            console.log(stable[stable.length - 1]);
-          ")
+          registry_versions=$(mktemp)
+          if ! npm view conductor-oss versions --json > "$registry_versions"; then
+            echo "::error::Unable to read conductor-oss versions from npm; refusing to guess a release version."
+            exit 1
+          fi
+          npm_highest=$(node scripts/release-version.mjs highest < "$registry_versions")
 
           echo "Tag: $tag_ver | Package: $pkg_ver | npm-highest: $npm_highest"
 
@@ -111,18 +130,11 @@ jobs:
             bump="${{ inputs.version_type }}"
           else
             if [ -n "$last_tag" ]; then
-              commits=$(git log --pretty=format:"%s" "$last_tag"..HEAD)
+              git log --format='%B%x00' "$last_tag"..HEAD > /tmp/release-commits
             else
-              commits=$(git log --pretty=format:"%s" -20)
+              git log --format='%B%x00' -20 > /tmp/release-commits
             fi
-
-            if echo "$commits" | grep -qE '^[a-z]+(\(.*\))?!:|BREAKING CHANGE'; then
-              bump="major"
-            elif echo "$commits" | grep -qE '^feat(\(.*\))?:'; then
-              bump="minor"
-            else
-              bump="patch"
-            fi
+            bump=$(node scripts/release-version.mjs bump < /tmp/release-commits)
           fi
 
           next=$(node -e "
@@ -138,22 +150,87 @@ jobs:
 
       - name: Check if already released
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          set -euo pipefail
+
+          last_tag=$(git tag --merged HEAD --list 'v[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true)
           tag="${{ steps.version.outputs.tag_name }}"
           commits_since_last_tag=""
 
+          if [ "${{ steps.version.outputs.recovering }}" = "true" ]; then
+            version="${{ steps.version.outputs.new_version }}"
+            packages=(
+              conductor-oss
+              conductor-oss-native-darwin-universal
+              conductor-oss-native-linux-x64
+              conductor-oss-native-win32-x64
+            )
+
+            npm_complete=true
+            for package_name in "${packages[@]}"; do
+              if ! npm view "${package_name}@${version}" version >/dev/null 2>&1; then
+                npm_complete=false
+                break
+              fi
+            done
+
+            release_complete=false
+            if gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null \
+              | grep -qx false; then
+              release_complete=true
+            fi
+
+            if [ "$npm_complete" = true ] && [ "$release_complete" = true ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Release $tag is already complete."
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "Recovering incomplete release $tag."
+            fi
+            exit 0
+          fi
+
           if [ -n "$last_tag" ]; then
             commits_since_last_tag=$(git rev-list --max-count=1 "$last_tag"..HEAD)
+          fi
+
+          if [ -n "$last_tag" ] && [ -n "$commits_since_last_tag" ]; then
+            prior_version="${last_tag#v}"
+            prior_complete=true
+            for package_name in \
+              conductor-oss \
+              conductor-oss-native-darwin-universal \
+              conductor-oss-native-linux-x64 \
+              conductor-oss-native-win32-x64; do
+              if ! npm view "${package_name}@${prior_version}" version >/dev/null 2>&1; then
+                prior_complete=false
+                break
+              fi
+            done
+
+            if ! gh release view "$last_tag" --json isDraft --jq '.isDraft' 2>/dev/null \
+              | grep -qx false; then
+              prior_complete=false
+            fi
+
+            if [ "$prior_complete" != true ]; then
+              echo "::error::Previous release $last_tag is incomplete. Rerun its failed Release workflow at $(git rev-list -n 1 "$last_tag") before advancing main to another version."
+              exit 1
+            fi
           fi
 
           if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -n "$last_tag" ] && [ -z "$commits_since_last_tag" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "⚠️ No commits since $last_tag — skipping"
           elif git rev-parse "$tag" >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Tag $tag already exists — skipping"
+            echo "::error::Tag $tag already exists at a different commit. Refusing to publish a mismatched release."
+            exit 1
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -162,11 +239,13 @@ jobs:
     needs: version
     if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    environment:
+      name: release-production
     permissions:
       contents: read
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
@@ -226,6 +305,8 @@ jobs:
     if: needs.version.outputs.skip != 'true'
     permissions:
       contents: read
+    env:
+      CONDUCTOR_BUILD_VERSION: ${{ needs.version.outputs.new_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -262,7 +343,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
@@ -306,6 +387,17 @@ jobs:
             cargo build -p conductor-cli --release
           fi
 
+      - name: Verify native binary version
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$("${{ matrix.binary_path }}" --version)
+          expected="conductor ${{ needs.version.outputs.new_version }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Native binary reports '$actual'; expected product version $expected."
+            exit 1
+          fi
+
       - name: Pack native tarball
         id: pack
         shell: bash
@@ -319,28 +411,61 @@ jobs:
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload native tarball
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.id }}
           path: ${{ steps.pack.outputs.tarball_path }}
+          include-hidden-files: true
           if-no-files-found: error
+          overwrite: true
 
-  release:
+  release-artifacts:
     needs:
       - version
       - native
     if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      packages: write
-      id-token: write
+      contents: read
       pull-requests: read
+    env:
+      CONDUCTOR_BUILD_VERSION: ${{ needs.version.outputs.new_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Prepare release artifact directory
+        run: mkdir -p .release-artifacts
+
+      - name: Generate checked-out source SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: .release-artifacts/source-sbom.spdx.json
+          dependency-snapshot: false
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Bind SBOM to the release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq \
+            --arg repository "${{ github.repository }}" \
+            --arg sha "${{ github.sha }}" \
+            --arg version "${{ needs.version.outputs.new_version }}" \
+            '.name = "conductor-oss-" + $version
+              | .documentNamespace = "https://github.com/" + $repository + "/sbom/" + $sha
+              | .creationInfo.comment = "Generated from checked-out commit " + $sha' \
+            .release-artifacts/source-sbom.spdx.json \
+            > .release-artifacts/source-sbom.spdx.json.tmp
+          mv .release-artifacts/source-sbom.spdx.json.tmp \
+            .release-artifacts/source-sbom.spdx.json
+          jq -e '.spdxVersion | startswith("SPDX-")' \
+            .release-artifacts/source-sbom.spdx.json >/dev/null
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -363,13 +488,16 @@ jobs:
           bun-version-file: package.json
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Install preview-worker dependencies
+        run: bun install --cwd preview-worker --frozen-lockfile
 
       - name: Build core
         run: bun run --cwd packages/core build
@@ -387,10 +515,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Run frontend tests
-        shell: bash
-        run: |
-          bun run --cwd packages/core test || true
-          bun run --cwd packages/cli test || true
+        run: bun run test:packages
 
       - name: Stamp version into packages
         shell: bash
@@ -417,17 +542,16 @@ jobs:
         id: pack
         shell: bash
         run: |
-          set -eo pipefail
-          mkdir -p .release-artifacts
-          tarball_path=$(node scripts/pack-cli-release.mjs --pack-destination .release-artifacts | tail -n 1)
+          set -euo pipefail
+          tarball_path=$(node scripts/pack-cli-release.mjs \
+            --pack-destination .release-artifacts | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
       - name: Pack CLI for GitHub Packages
         id: pack_github
         shell: bash
         run: |
-          set -eo pipefail
-          mkdir -p .release-artifacts
+          set -euo pipefail
           tarball_path=$(node scripts/pack-cli-release.mjs \
             --pack-destination .release-artifacts \
             --published-name @charannyk06/conductor-oss \
@@ -441,13 +565,290 @@ jobs:
         run: node scripts/verify-cli-package.mjs
 
       - name: Download native tarballs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: native-*
           path: .release-native
           merge-multiple: true
 
-      - name: Publish native packages
+      - name: Reuse or reject existing npm artifact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.version.outputs.recovering }}" = true ]; then
+            existing_mode=canonicalize
+          else
+            existing_mode=reject
+          fi
+
+          node scripts/release-artifact-identity.mjs \
+            --tarball "${{ steps.pack.outputs.tarball_path }}" \
+            --allow-missing \
+            --on-existing "$existing_mode" \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
+
+          for tarball in .release-native/*.tgz; do
+            package_name=$(tar -xOf "$tarball" package/package.json | jq -r '.name')
+            required_file=bin/conductor
+            if [ "$package_name" = conductor-oss-native-win32-x64 ]; then
+              required_file=bin/conductor.exe
+            fi
+            node scripts/release-artifact-identity.mjs \
+              --tarball "$tarball" \
+              --allow-missing \
+              --on-existing "$existing_mode" \
+              --require-file "$required_file"
+          done
+
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/generate-release-notes.mjs \
+            --repo "${{ github.repository }}" \
+            --current-tag "${{ needs.version.outputs.tag_name }}" \
+            --current-ref "${{ github.sha }}" \
+            > .release-artifacts/release-notes.md
+
+          cat >> .release-artifacts/release-notes.md << 'FOOTER'
+
+          ---
+
+          ### Install
+
+          ```bash
+          npm install -g conductor-oss@latest
+          ```
+          FOOTER
+
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > .release-artifacts/SHA256SUMS
+          for artifact in \
+            "${{ steps.pack.outputs.tarball_path }}" \
+            .release-native/*.tgz \
+            .release-artifacts/source-sbom.spdx.json; do
+              digest=$(sha256sum "$artifact" | cut -d' ' -f1)
+              printf '%s  %s\n' "$digest" "$(basename "$artifact")" \
+                >> .release-artifacts/SHA256SUMS
+          done
+
+      - name: Upload immutable release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: |
+            ${{ steps.pack.outputs.tarball_path }}
+            ${{ steps.pack_github.outputs.tarball_path }}
+            .release-native/*.tgz
+            .release-artifacts/SHA256SUMS
+            .release-artifacts/source-sbom.spdx.json
+            .release-artifacts/release-notes.md
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  release:
+    needs:
+      - version
+      - release-artifacts
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release-production
+    permissions:
+      attestations: write
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout trusted release helpers
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download immutable release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: .
+
+      - name: Resolve and verify release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_tarball=""
+          github_tarball=""
+          for tarball in .release-artifacts/*.tgz; do
+            package_name=$(tar -xOf "$tarball" package/package.json | jq -r '.name')
+            case "$package_name" in
+              conductor-oss) cli_tarball="$tarball" ;;
+              @charannyk06/conductor-oss) github_tarball="$tarball" ;;
+              *) echo "::error::Unexpected CLI artifact package $package_name"; exit 1 ;;
+            esac
+          done
+          if [ -z "$cli_tarball" ] || [ -z "$github_tarball" ]; then
+            echo "::error::Release bundle is missing a CLI tarball."
+            exit 1
+          fi
+          echo "CLI_TARBALL=$cli_tarball" >> "$GITHUB_ENV"
+          echo "GITHUB_TARBALL=$github_tarball" >> "$GITHUB_ENV"
+
+          verify_dir=$(mktemp -d)
+          cp "$cli_tarball" .release-native/*.tgz \
+            .release-artifacts/source-sbom.spdx.json "$verify_dir/"
+          (
+            cd "$verify_dir"
+            sha256sum -c "$GITHUB_WORKSPACE/.release-artifacts/SHA256SUMS"
+          )
+
+      - name: Setup Node.js for npm identity preflight
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify public npm identity before mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.version.outputs.recovering }}" = true ]; then
+            existing_mode=verify
+          else
+            existing_mode=reject
+          fi
+          node scripts/release-artifact-identity.mjs \
+            --tarball "$CLI_TARBALL" \
+            --allow-missing \
+            --on-existing "$existing_mode" \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
+          for tarball in .release-native/*.tgz; do
+            package_name=$(tar -xOf "$tarball" package/package.json | jq -r '.name')
+            required_file=bin/conductor
+            if [ "$package_name" = conductor-oss-native-win32-x64 ]; then
+              required_file=bin/conductor.exe
+            fi
+            node scripts/release-artifact-identity.mjs \
+              --tarball "$tarball" \
+              --allow-missing \
+              --on-existing "$existing_mode" \
+              --require-file "$required_file"
+          done
+
+      - name: Setup Node.js for GitHub Packages identity preflight
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com
+          scope: "@charannyk06"
+
+      - name: Verify GitHub Packages identity before mutation
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.version.outputs.recovering }}" = true ]; then
+            existing_mode=canonicalize
+          else
+            existing_mode=reject
+          fi
+          node scripts/release-artifact-identity.mjs \
+            --tarball "$GITHUB_TARBALL" \
+            --registry https://npm.pkg.github.com \
+            --allow-missing \
+            --on-existing "$existing_mode" \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
+
+      - name: Attest release provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: .release-artifacts/SHA256SUMS
+
+      - name: Tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_endpoint="repos/${{ github.repository }}/git/ref/tags/$RELEASE_TAG"
+          if gh api "$ref_endpoint" >/tmp/release-tag-ref.json 2>/tmp/release-tag-ref.err; then
+            tag_commit=$(gh api "repos/${{ github.repository }}/commits/$RELEASE_TAG" --jq '.sha')
+            if [ "$tag_commit" != "$RELEASE_SHA" ]; then
+              echo "::error::Tag $RELEASE_TAG points to $tag_commit, not release commit $RELEASE_SHA."
+              exit 1
+            fi
+            echo "Tag $RELEASE_TAG already points to the release commit."
+            exit 0
+          fi
+          if ! grep -q 'HTTP 404' /tmp/release-tag-ref.err; then
+            cat /tmp/release-tag-ref.err
+            exit 1
+          fi
+
+          tag_object=$(gh api \
+            --method POST \
+            "repos/${{ github.repository }}/git/tags" \
+            -f tag="$RELEASE_TAG" \
+            -f message="Release $RELEASE_TAG" \
+            -f object="$RELEASE_SHA" \
+            -f type=commit \
+            --jq '.sha')
+          gh api \
+            --method POST \
+            "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$tag_object" >/dev/null
+
+      - name: Create or refresh draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.version.outputs.tag_name }}"
+          assets=(
+            "$CLI_TARBALL"
+            .release-native/*.tgz
+            .release-artifacts/SHA256SUMS
+            .release-artifacts/source-sbom.spdx.json
+          )
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$tag" --json isDraft --jq '.isDraft')
+            if [ "$is_draft" != true ]; then
+              echo "::error::Release $tag is already published but its publication is incomplete. Manual recovery is required."
+              exit 1
+            fi
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" \
+              --title "Release v${{ needs.version.outputs.new_version }}" \
+              --notes-file .release-artifacts/release-notes.md
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --draft \
+              --title "Release v${{ needs.version.outputs.new_version }}" \
+              --notes-file .release-artifacts/release-notes.md
+          fi
+
+      - name: Setup Node.js for npm publication
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish and verify native npm packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
@@ -455,57 +856,154 @@ jobs:
           set -euo pipefail
           for tarball in .release-native/*.tgz; do
             package_json=$(tar -xOf "$tarball" package/package.json)
-            package_name=$(printf '%s' "$package_json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).name")
-            package_version=$(printf '%s' "$package_json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
-
-            if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
-              echo "Skipping ${package_name}@${package_version}; already published."
-              continue
+            package_name=$(jq -r '.name' <<< "$package_json")
+            package_version=$(jq -r '.version' <<< "$package_json")
+            required_file=bin/conductor
+            if [ "$package_name" = conductor-oss-native-win32-x64 ]; then
+              required_file=bin/conductor.exe
             fi
-
-            npm publish "$tarball" --access public --provenance
+            status=$(node scripts/release-artifact-identity.mjs \
+              --tarball "$tarball" \
+              --allow-missing \
+              --require-file "$required_file")
+            if [ "$status" = missing ]; then
+              npm publish "$tarball" --access public --provenance --ignore-scripts
+            fi
+            node scripts/release-artifact-identity.mjs \
+              --tarball "$tarball" \
+              --wait-ms 600000 \
+              --require-file "$required_file"
+            node scripts/verify-npm-publication.mjs \
+              --package "$package_name" \
+              --version "$package_version" \
+              --local-tarball "$tarball" \
+              --require-file "$required_file"
           done
 
-      - name: Publish CLI to npm release-candidate
+      - name: Publish and verify CLI npm release-candidate
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ needs.version.outputs.new_version }}"
-          if npm view "conductor-oss@$version" version >/dev/null 2>&1; then
-            echo "Skipping conductor-oss@$version; already published."
-            exit 0
+          status=$(node scripts/release-artifact-identity.mjs \
+            --tarball "$CLI_TARBALL" \
+            --allow-missing \
+            --require-file dist/launcher.js \
+            --require-file web/package.json)
+          if [ "$status" = missing ]; then
+            npm publish "$CLI_TARBALL" \
+              --access public \
+              --provenance \
+              --ignore-scripts \
+              --tag release-candidate
           fi
+          node scripts/release-artifact-identity.mjs \
+            --tarball "$CLI_TARBALL" \
+            --wait-ms 600000 \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
+          node scripts/verify-npm-publication.mjs \
+            --package conductor-oss \
+            --version "${{ needs.version.outputs.new_version }}" \
+            --local-tarball "$CLI_TARBALL" \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
 
-          npm publish "${{ steps.pack.outputs.tarball_path }}" --access public --provenance --tag release-candidate
+      - name: Setup Node.js for GitHub Packages publication
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com
+          scope: "@charannyk06"
 
-      - name: Verify published npm packages
+      - name: Publish and verify CLI to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ needs.version.outputs.new_version }}"
-
-          node scripts/verify-npm-publication.mjs \
-            --package conductor-oss-native-darwin-universal \
-            --version "$version" \
-            --require-file bin/conductor
-
-          node scripts/verify-npm-publication.mjs \
-            --package conductor-oss-native-linux-x64 \
-            --version "$version" \
-            --require-file bin/conductor
-
-          node scripts/verify-npm-publication.mjs \
-            --package conductor-oss-native-win32-x64 \
-            --version "$version" \
-            --require-file bin/conductor.exe
-
-          node scripts/verify-npm-publication.mjs \
-            --package conductor-oss \
-            --version "$version" \
+          status=$(node scripts/release-artifact-identity.mjs \
+            --tarball "$GITHUB_TARBALL" \
+            --registry https://npm.pkg.github.com \
+            --allow-missing \
+            --require-file dist/launcher.js \
+            --require-file web/package.json)
+          if [ "$status" = missing ]; then
+            npm publish "$GITHUB_TARBALL" --access public --ignore-scripts
+          fi
+          node scripts/release-artifact-identity.mjs \
+            --tarball "$GITHUB_TARBALL" \
+            --registry https://npm.pkg.github.com \
+            --wait-ms 600000 \
             --require-file dist/launcher.js \
             --require-file web/package.json
+
+      - name: Prepare website sync payload
+        id: website_sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_sha256=$(sha256sum docs/manifest.json | awk '{print $1}')
+          correlation_id="${{ github.run_id }}-${{ github.run_attempt }}"
+          payload=$(jq -cn \
+            --arg repository "${{ github.repository }}" \
+            --arg ref "${{ github.sha }}" \
+            --arg tag "${{ needs.version.outputs.tag_name }}" \
+            --arg version "${{ needs.version.outputs.new_version }}" \
+            --arg manifest_sha256 "$manifest_sha256" \
+            --arg correlation_id "$correlation_id" \
+            '{repository: $repository, ref: $ref, tag: $tag, version: $version, manifest_sha256: $manifest_sha256, correlation_id: $correlation_id}')
+          echo "client_payload=$payload" >> "$GITHUB_OUTPUT"
+          echo "correlation_id=$correlation_id" >> "$GITHUB_OUTPUT"
+
+      - name: Notify conductor website
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          repository: charannyk06/conductor-website
+          event-type: conductor-oss-updated
+          client-payload: ${{ steps.website_sync.outputs.client_payload }}
+
+      - name: Verify conductor website synchronization
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          EXPECTED_RUN_TITLE: Sync Conductor OSS ${{ needs.version.outputs.tag_name }} [${{ steps.website_sync.outputs.correlation_id }}]
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow_endpoint="repos/charannyk06/conductor-website/actions/workflows/sync-conductor-oss.yml/runs?event=repository_dispatch&per_page=100"
+
+          for _ in $(seq 1 150); do
+            run=$(gh api "$workflow_endpoint" \
+              | jq -c --arg title "$EXPECTED_RUN_TITLE" \
+                '[.workflow_runs[] | select(.display_title == $title)] | sort_by(.run_number) | last // empty')
+            if [ -n "$run" ]; then
+              status=$(jq -r '.status' <<< "$run")
+              if [ "$status" = completed ]; then
+                conclusion=$(jq -r '.conclusion' <<< "$run")
+                run_url=$(jq -r '.html_url' <<< "$run")
+                if [ "$conclusion" != success ]; then
+                  run_id=$(jq -r '.id' <<< "$run")
+                  gh run view "$run_id" --repo charannyk06/conductor-website --log-failed || true
+                  echo "::error::Website synchronization concluded $conclusion: $run_url"
+                  exit 1
+                fi
+                echo "Verified website synchronization: $run_url" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+
+          echo "::error::Timed out waiting for website synchronization run '$EXPECTED_RUN_TITLE'."
+          exit 1
+
+      - name: Setup Node.js for npm promotion
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
 
       - name: Promote CLI npm dist-tag
         env:
@@ -518,82 +1016,20 @@ jobs:
           npm dist-tag rm conductor-oss release-candidate || true
           echo "✅ Published conductor-oss@$version"
 
-      - name: Setup Node.js for GitHub Packages
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://npm.pkg.github.com
-          scope: "@charannyk06"
-
-      - name: Publish CLI to GitHub Packages
+      - name: Finalize GitHub release
         env:
-          NODE_AUTH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ needs.version.outputs.new_version }}"
-          if npm view "@charannyk06/conductor-oss@$version" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "Skipping @charannyk06/conductor-oss@$version; already published."
-            exit 0
+          tag="${{ needs.version.outputs.tag_name }}"
+          body=$(gh release view "$tag" --json body --jq '.body')
+          if grep -Fq 'Published to npm' <<< "$body"; then
+            printf '%s\n' "$body" > /tmp/final.md
+          else
+            printf '%s\n\n✅ **Published to npm**\n' "$body" > /tmp/final.md
           fi
-
-          npm publish "${{ steps.pack_github.outputs.tarball_path }}" --access public
-
-      - name: Tag release
-        shell: bash
-        run: |
-          if git rev-parse "${{ needs.version.outputs.tag_name }}" >/dev/null 2>&1; then
-            echo "Tag ${{ needs.version.outputs.tag_name }} already exists."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ needs.version.outputs.tag_name }}" \
-            -m "Release ${{ needs.version.outputs.tag_name }}"
-          git push origin "${{ needs.version.outputs.tag_name }}"
-
-      - name: Generate release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          node scripts/generate-release-notes.mjs \
-            --repo "${{ github.repository }}" \
-            --current-tag "${{ needs.version.outputs.tag_name }}" > /tmp/notes.md
-
-          cat >> /tmp/notes.md << 'FOOTER'
-
-          ---
-
-          ### Install
-
-          ```bash
-          npm install -g conductor-oss@latest
-          ```
-          FOOTER
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          if gh release view "${{ needs.version.outputs.tag_name }}" >/dev/null 2>&1; then
-            echo "GitHub release ${{ needs.version.outputs.tag_name }} already exists."
-            exit 0
-          fi
-
-          gh release create "${{ needs.version.outputs.tag_name }}" \
-            "${{ steps.pack.outputs.tarball_path }}" \
-            .release-native/*.tgz \
-            --title "Release v${{ needs.version.outputs.new_version }}" \
-            --notes-file /tmp/notes.md --latest
-
-      - name: Annotate release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          body=$(gh release view "${{ needs.version.outputs.tag_name }}" --json body --jq '.body')
-          printf '%s\n\n✅ **Published to npm**\n' "$body" > /tmp/final.md
-          gh release edit "${{ needs.version.outputs.tag_name }}" --notes-file /tmp/final.md
+          gh release edit "$tag" \
+            --notes-file /tmp/final.md \
+            --draft=false \
+            --latest

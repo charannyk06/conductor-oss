@@ -39,7 +39,7 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::Codex,
         AgentInstallInfo {
             binaries: &["codex"],
-            package: "openai-codex",
+            package: "@openai/codex",
             global_flag: "-g",
         },
     ),
@@ -55,7 +55,7 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::Amp,
         AgentInstallInfo {
             binaries: &["amp"],
-            package: "amph-client",
+            package: "@sourcegraph/amp",
             global_flag: "-g",
         },
     ),
@@ -63,8 +63,8 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::CursorCli,
         AgentInstallInfo {
             binaries: &["cursor-agent", "cursor-cli", "cursor"],
-            package: "@cursor.sh/cli",
-            global_flag: "--global",
+            package: "cursor-agent",
+            global_flag: "-g",
         },
     ),
     (
@@ -87,15 +87,15 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::Droid,
         AgentInstallInfo {
             binaries: &["droid"],
-            package: "@anthropic-ai/droid-cli",
+            package: "@factory/cli",
             global_flag: "-g",
         },
     ),
     (
         AgentKind::QwenCode,
         AgentInstallInfo {
-            binaries: &["qwen-code"],
-            package: "@qwen/qwen-code",
+            binaries: &["qwen", "qwen-code"],
+            package: "@qwen-code/qwen-code@latest",
             global_flag: "-g",
         },
     ),
@@ -103,7 +103,7 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::Ccr,
         AgentInstallInfo {
             binaries: &["ccr"],
-            package: "code-compose-runtime",
+            package: "@musistudio/claude-code-router",
             global_flag: "-g",
         },
     ),
@@ -111,7 +111,7 @@ const AGENT_INSTALL_TABLE: &[(AgentKind, AgentInstallInfo)] = &[
         AgentKind::GithubCopilot,
         AgentInstallInfo {
             binaries: &["github-copilot", "copilot", "gh-copilot"],
-            package: "@githubnext/github-copilot",
+            package: "@github/copilot",
             global_flag: "-g",
         },
     ),

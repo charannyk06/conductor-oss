@@ -1,20 +1,23 @@
 {
-  "version": "0.3.0",
+  "schemaVersion": 1,
   "agents": [
-    {"id": "claude-code", "binary": "claude-code", "aliases": ["claude", "claude-code"], "installCommand": "npm install -g @anthropic-ai/claude-code", "website": "https://claude.ai", "brandColor": "#E39A73"},
-    {"id": "codex", "binary": "codex", "aliases": ["codex"], "installCommand": "npm install -g @openai/codex-cli", "website": "https://openai.com/codex/", "brandColor": "#7EE0C3"},
-    {"id": "gemini", "binary": "gemini", "aliases": ["gemini"], "installCommand": "npm install -g @google/gemini-cli", "website": "https://gemini.google.com/", "brandColor": "#8FA7FF"},
-    {"id": "amp", "binary": "amp", "aliases": ["amp"], "installCommand": "npm install -g @anthropic-ai/amp", "website": "https://ampcode.com/", "brandColor": "#FF8A62"},
+    {"id": "amp", "binary": "amp", "aliases": ["amp"], "installCommand": "npm install -g @sourcegraph/amp", "website": "https://ampcode.com/", "brandColor": "#FF8A62"},
+    {"id": "ccr", "binary": "ccr", "aliases": ["ccr"], "installCommand": "npm install -g @musistudio/claude-code-router", "website": "https://github.com/musistudio/claude-code-router", "brandColor": "#FFB86C"},
+    {"id": "claude-code", "binary": "claude", "aliases": ["claude", "claude-code"], "installCommand": "npm install -g @anthropic-ai/claude-code", "website": "https://claude.ai/", "brandColor": "#E39A73"},
+    {"id": "codex", "binary": "codex", "aliases": ["codex"], "installCommand": "npm install -g @openai/codex", "website": "https://openai.com/codex/", "brandColor": "#7EE0C3"},
+    {"id": "cursor-cli", "binary": "cursor-agent", "aliases": ["cursor-agent", "cursor-cli", "cursor"], "installCommand": "npm install -g cursor-agent", "website": "https://www.cursor.com/", "brandColor": "#83C8FF"},
+    {"id": "droid", "binary": "droid", "aliases": ["droid"], "installCommand": "npm install -g @factory/cli", "website": "https://factory.ai/", "brandColor": "#F6E58D"},
+    {"id": "gemini", "binary": "gemini", "aliases": ["gemini"], "installCommand": "npm install -g @google/gemini-cli", "website": "https://geminicli.com/", "brandColor": "#8FA7FF"},
+    {"id": "github-copilot", "binary": "github-copilot", "aliases": ["github-copilot", "copilot", "gh-copilot"], "installCommand": "npm install -g @github/copilot", "website": "https://github.com/features/copilot", "brandColor": "#87AEFF"},
     {"id": "hermes", "binary": "hermes", "aliases": ["hermes", "hermes-agent"], "installCommand": "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash", "website": "https://hermes-agent.nousresearch.com/", "brandColor": "#D4B26A"},
-    {"id": "cursor-cli", "binary": "cursor", "aliases": ["cursor", "cursor-cli", "cursor-agent"], "installCommand": "npm install -g cursor-cli", "website": "https://www.cursor.com/", "brandColor": "#83C8FF"},
-    {"id": "opencode", "binary": "opencode", "aliases": ["opencode", "open-code", "open_code"], "installCommand": "npm install -g opencode", "website": "https://opencode.ai/", "brandColor": "#C7D2D8"},
-    {"id": "droid", "binary": "droid", "aliases": ["droid"], "installCommand": "npm install -g @anthropic-ai/droid", "website": "https://github.com/Factory-AI/factory", "brandColor": "#F6E58D"},
-    {"id": "qwen-code", "binary": "qwen", "aliases": ["qwen", "qwen-code"], "installCommand": "npm install -g qwen-code", "website": "https://github.com/QwenLM/qwen-code", "brandColor": "#9D8CFF"},
-    {"id": "github-copilot", "binary": "github-copilot", "aliases": ["github-copilot", "copilot", "gh-copilot"], "installCommand": "npm install -g github-copilot", "website": "https://github.com/features/copilot", "brandColor": "#87AEFF"},
-    {"id": "ccr", "binary": "ccr", "aliases": ["ccr"], "installCommand": "npm install -g ccr", "website": "https://github.com/anthropics/ccr", "brandColor": "#FFB86C"}
+    {"id": "letta", "binary": "letta", "aliases": ["letta", "letta-code"], "installCommand": "npm install -g @letta-ai/letta-code", "website": "https://www.letta.com/", "brandColor": "#7CC4FF"},
+    {"id": "openclaw", "binary": "openclaw-gateway", "aliases": ["openclaw"], "website": "https://github.com/openclaw/openclaw", "brandColor": "#F47B5B"},
+    {"id": "opencode", "binary": "opencode", "aliases": ["opencode", "open-code", "open_code"], "installCommand": "npm install -g opencode-ai", "website": "https://opencode.ai/", "brandColor": "#C7D2D8"},
+    {"id": "pi", "binary": "pi", "aliases": ["pi"], "installCommand": "npm install -g @mariozechner/pi-coding-agent", "website": "https://github.com/badlogic/pi-mono", "brandColor": "#F3A6FF"},
+    {"id": "qwen-code", "binary": "qwen", "aliases": ["qwen", "qwen-code"], "installCommand": "npm install -g @qwen-code/qwen-code@latest", "website": "https://github.com/QwenLM/qwen-code", "brandColor": "#9D8CFF"}
   ],
-  "cliCommands": ["cleanup", "dashboard", "doctor", "feedback", "init", "kill", "list", "mcp-server", "restore", "retry", "send", "setup", "spawn", "start", "status", "task"],
-  "mcpTools": ["conductor_dispatch", "conductor_list_sessions", "conductor_session_status", "conductor_list_projects", "conductor_kill_session"],
+  "cliCommands": ["acp-server", "bridge", "cleanup", "dashboard", "doctor", "feedback", "init", "kill", "list", "mcp-server", "restore", "retry", "send", "setup", "spawn", "start", "status", "task"],
+  "mcpTools": ["conductor_dispatch", "conductor_dispatcher_create_task", "conductor_dispatcher_handoff_task", "conductor_dispatcher_update_task", "conductor_get_board", "conductor_list_projects", "conductor_list_sessions", "conductor_session_status", "conductor_task_graph"],
   "features": ["board-watcher", "mcp-server", "worktrees", "direct-pty-runtime", "github-integration", "webhook", "desktop-notifications", "discord-notifications", "session-preview", "session-diff", "access-control"],
-  "apiRoutes": ["agents", "app-update", "attachments", "auth", "boards", "config", "context-files", "events", "filesystem", "github", "health", "notifications", "projects", "repositories", "session-workspace", "sessions", "tasks", "terminal", "workspaces"]
+  "apiRoutes": ["agents", "app-update", "attachments", "boards", "config", "context-files", "dispatcher", "errors", "events", "filesystem", "github", "health", "notifications", "project-notes", "projects", "repositories", "session-workspace", "sessions", "skills", "tasks", "terminal", "workspaces"]
 }

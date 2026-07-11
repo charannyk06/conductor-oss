@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BRIDGE_RELAY_SECRET_REQUIRED_ERROR,
+  BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR,
   BRIDGE_RELAY_URL_NOT_CONFIGURED_ERROR,
   isBridgeRelayConfigurationError,
 } from "./bridgeRelayErrors";
@@ -9,6 +10,7 @@ import {
 test("isBridgeRelayConfigurationError matches bridge relay setup failures", () => {
   assert.equal(isBridgeRelayConfigurationError(BRIDGE_RELAY_URL_NOT_CONFIGURED_ERROR), true);
   assert.equal(isBridgeRelayConfigurationError(BRIDGE_RELAY_SECRET_REQUIRED_ERROR), true);
+  assert.equal(isBridgeRelayConfigurationError(BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR), true);
 });
 
 test("isBridgeRelayConfigurationError ignores runtime transport failures", () => {

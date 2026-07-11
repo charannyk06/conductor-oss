@@ -346,6 +346,10 @@ pub async fn spawn_ttyd_runtime(
     let ttyd_auth = generate_ttyd_auth_credentials();
 
     let mut cmd = tokio::process::Command::new(ttyd_binary);
+    // Test runtimes are torn down immediately after each test. Their detached
+    // monitor tasks cannot run normal shutdown logic once Tokio starts aborting
+    // tasks, so opted-in test states make the child RAII-owned.
+    cmd.kill_on_drop(state.kill_detached_children_on_drop());
     cmd.arg("-p")
         .arg(port.to_string())
         .arg("-i")

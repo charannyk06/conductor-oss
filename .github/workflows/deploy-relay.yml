@@ -8,6 +8,7 @@ on:
       - "Cargo.lock"
       - "crates/conductor-relay/**"
       - ".github/workflows/deploy-relay.yml"
+      - "scripts/conductor-relay-deploy-host.sh"
       - "scripts/start-relay.sh"
       - "docs/relay-deployment.md"
   workflow_dispatch:
@@ -16,21 +17,39 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-relay-${{ github.ref }}
+  group: deploy-relay-production
   cancel-in-progress: false
 
 env:
-  RELAY_IMAGE: ghcr.io/${{ github.repository_owner }}/conductor-relay
+  RELAY_IMAGE: ghcr.io/charannyk06/conductor-relay
 
 jobs:
+  deployment-ref:
+    name: Require main branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-production refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Production relay deployments are allowed only from refs/heads/main."
+            exit 1
+          fi
+
   publish-relay-image:
     name: Publish relay image
+    needs: deployment-ref
+    environment: relay-production
     permissions:
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
-      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_ref: ${{ steps.reference.outputs.image_ref }}
       image_sha_tag: ${{ steps.meta.outputs.image_sha_tag }}
     steps:
       - name: Checkout
@@ -59,19 +78,42 @@ jobs:
 
           {
             echo "image_sha_tag=${RELAY_IMAGE}:${sha_tag}"
-            echo "image_ref=${RELAY_IMAGE}:${sha_tag}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push relay image
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: crates/conductor-relay/Dockerfile
           push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            CONDUCTOR_BUILD_SHA=${{ github.sha }}
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ steps.meta.outputs.image_sha_tag }}
-            ${{ env.RELAY_IMAGE }}:latest
+
+      - name: Pin rollout reference to image digest
+        id: reference
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return a valid image digest: $IMAGE_DIGEST"
+            exit 1
+          fi
+          echo "image_ref=${RELAY_IMAGE}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest relay image provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.RELAY_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Summarize published image
         shell: bash
@@ -80,88 +122,96 @@ jobs:
             echo "## Relay image published"
             echo
             echo "- SHA image: ${{ steps.meta.outputs.image_sha_tag }}"
-            echo "- Latest image: ${{ env.RELAY_IMAGE }}:latest"
+            echo "- Immutable image: ${{ steps.reference.outputs.image_ref }}"
+            echo "- Latest is promoted only after rollout and public health succeed"
           } >> "$GITHUB_STEP_SUMMARY"
 
   trigger-relay-deploy:
     name: Trigger relay rollout
+    environment: relay-production
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: publish-relay-image
-    outputs:
-      deploy_enabled: ${{ steps.gate.outputs.deploy_enabled }}
     steps:
-      - name: Detect relay deploy webhook configuration
-        id: gate
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate relay deploy configuration
         shell: bash
         env:
-          RELAY_DEPLOY_WEBHOOK_URL: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL }}
+          RELAY_DEPLOY_SSH_HOST: ${{ secrets.RELAY_DEPLOY_SSH_HOST }}
+          RELAY_DEPLOY_SSH_USER: ${{ secrets.RELAY_DEPLOY_SSH_USER }}
+          RELAY_DEPLOY_SSH_KEY: ${{ secrets.RELAY_DEPLOY_SSH_KEY }}
+          RELAY_DEPLOY_SSH_HOST_KEY: ${{ secrets.RELAY_DEPLOY_SSH_HOST_KEY }}
         run: |
           set -euo pipefail
-          if [ -n "${RELAY_DEPLOY_WEBHOOK_URL:-}" ]; then
-            echo "deploy_enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "deploy_enabled=false" >> "$GITHUB_OUTPUT"
-          fi
+          for name in \
+            RELAY_DEPLOY_SSH_HOST \
+            RELAY_DEPLOY_SSH_USER \
+            RELAY_DEPLOY_SSH_KEY \
+            RELAY_DEPLOY_SSH_HOST_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is required; the image was published but no deployment occurred."
+              exit 1
+            fi
+          done
 
-      - name: Trigger relay deploy webhook
-        if: ${{ steps.gate.outputs.deploy_enabled == 'true' }}
+      - name: Install restricted deployment identity
         shell: bash
         env:
-          RELAY_DEPLOY_WEBHOOK_URL: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL }}
-          RELAY_DEPLOY_WEBHOOK_TOKEN: ${{ secrets.RELAY_DEPLOY_WEBHOOK_TOKEN }}
+          RELAY_DEPLOY_SSH_KEY: ${{ secrets.RELAY_DEPLOY_SSH_KEY }}
+          RELAY_DEPLOY_SSH_HOST_KEY: ${{ secrets.RELAY_DEPLOY_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$RELAY_DEPLOY_SSH_KEY" > "$HOME/.ssh/conductor-relay-deploy"
+          printf '%s\n' "$RELAY_DEPLOY_SSH_HOST_KEY" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/conductor-relay-deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Deploy digest-pinned relay image
+        shell: bash
+        env:
+          RELAY_DEPLOY_SSH_HOST: ${{ secrets.RELAY_DEPLOY_SSH_HOST }}
+          RELAY_DEPLOY_SSH_USER: ${{ secrets.RELAY_DEPLOY_SSH_USER }}
           RELAY_IMAGE_REF: ${{ needs.publish-relay-image.outputs.image_ref }}
-          RELAY_IMAGE_SHA_TAG: ${{ needs.publish-relay-image.outputs.image_sha_tag }}
         run: |
           set -euo pipefail
-          payload="{\"image\":\"${RELAY_IMAGE_REF}\",\"sha_tag\":\"${RELAY_IMAGE_SHA_TAG}\",\"ref\":\"${GITHUB_SHA}\"}"
-
-          if [ -n "${RELAY_DEPLOY_WEBHOOK_TOKEN:-}" ]; then
-            curl --fail --show-error --silent \
-              -X POST \
-              -H "Authorization: Bearer ${RELAY_DEPLOY_WEBHOOK_TOKEN}" \
-              -H 'Content-Type: application/json' \
-              -d "$payload" \
-              "${RELAY_DEPLOY_WEBHOOK_URL}"
-          else
-            curl --fail --show-error --silent \
-              -X POST \
-              -H 'Content-Type: application/json' \
-              -d "$payload" \
-              "${RELAY_DEPLOY_WEBHOOK_URL}"
-          fi
+          script_sha=$(sha256sum scripts/conductor-relay-deploy-host.sh | awk '{print $1}')
+          ssh \
+            -i "$HOME/.ssh/conductor-relay-deploy" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RELAY_DEPLOY_SSH_USER@$RELAY_DEPLOY_SSH_HOST" \
+            "verify-script $script_sha"
+          ssh \
+            -i "$HOME/.ssh/conductor-relay-deploy" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveCountMax=3 \
+            -o ServerAliveInterval=15 \
+            -o StrictHostKeyChecking=yes \
+            "$RELAY_DEPLOY_SSH_USER@$RELAY_DEPLOY_SSH_HOST" \
+            "deploy $RELAY_IMAGE_REF $GITHUB_SHA"
 
       - name: Summarize relay rollout trigger
-        if: ${{ steps.gate.outputs.deploy_enabled == 'true' }}
         shell: bash
         run: |
           {
             echo "## Relay rollout triggered"
             echo
-            echo "- Webhook: configured"
+            echo "- Restricted SSH target: configured"
             echo "- Image: ${{ needs.publish-relay-image.outputs.image_ref }}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Explain next setup step
-        if: ${{ steps.gate.outputs.deploy_enabled != 'true' }}
-        shell: bash
-        run: |
-          {
-            echo "## Relay image published, rollout not triggered"
-            echo
-            echo "The relay image was published, but RELAY_DEPLOY_WEBHOOK_URL is not configured yet."
-            echo
-            echo "Set these repository secrets to enable automatic relay rollout:"
-            echo
-            echo "- RELAY_DEPLOY_WEBHOOK_URL"
-            echo "- RELAY_DEPLOY_WEBHOOK_TOKEN (optional, recommended)"
-            echo "- RELAY_HEALTHCHECK_URL (optional, recommended)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   relay-healthcheck:
     name: Probe relay health
+    environment: relay-production
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     needs: [publish-relay-image, trigger-relay-deploy]
-    if: ${{ needs.publish-relay-image.result == 'success' && needs.trigger-relay-deploy.outputs.deploy_enabled == 'true' }}
     steps:
       - name: Detect relay healthcheck configuration
         id: gate
@@ -171,9 +221,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${RELAY_HEALTHCHECK_URL:-}" ]; then
+            if [[ "$RELAY_HEALTHCHECK_URL" != https://* ]]; then
+              echo "::error::RELAY_HEALTHCHECK_URL must use HTTPS."
+              exit 1
+            fi
             echo "healthcheck_enabled=true" >> "$GITHUB_OUTPUT"
           else
-            echo "healthcheck_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::error::RELAY_HEALTHCHECK_URL is required after a relay rollout."
+            exit 1
           fi
 
       - name: Probe relay health endpoint
@@ -181,24 +236,49 @@ jobs:
         shell: bash
         env:
           RELAY_HEALTHCHECK_URL: ${{ secrets.RELAY_HEALTHCHECK_URL }}
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           for attempt in {1..20}; do
-            if curl --fail --silent --show-error --location "${RELAY_HEALTHCHECK_URL}" >/tmp/relay-health.json; then
-              cat /tmp/relay-health.json
-              exit 0
+            if curl --connect-timeout 5 --max-time 10 \
+              --fail --silent --show-error --max-redirs 0 \
+              --proto '=https' --proto-redir '=https' \
+              "${RELAY_HEALTHCHECK_URL}" >/tmp/relay-health.json \
+              && jq -e --arg expected "$EXPECTED_BUILD_SHA" \
+                '.ok == true and .ready == true and .buildSha == $expected' \
+                /tmp/relay-health.json >/dev/null; then
+                cat /tmp/relay-health.json
+                exit 0
             fi
             sleep 6
           done
           echo "Relay health check never became ready"
           exit 1
 
-      - name: Summarize missing relay healthcheck URL
-        if: ${{ steps.gate.outputs.healthcheck_enabled != 'true' }}
+  promote-relay-image:
+    name: Promote healthy relay image
+    environment: relay-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [publish-relay-image, relay-healthcheck]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote immutable image to latest
         shell: bash
         run: |
-          {
-            echo "## Relay health check skipped"
-            echo
-            echo "RELAY_HEALTHCHECK_URL is not configured, so the rollout health probe was skipped."
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${RELAY_IMAGE}:latest" \
+            "${{ needs.publish-relay-image.outputs.image_ref }}"

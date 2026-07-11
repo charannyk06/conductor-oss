@@ -14,7 +14,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Terminal benchmark hooks** — terminal connection, snapshot, and resize endpoints now emit `Server-Timing` plus terminal-specific diagnostic headers for repeatable benchmark capture.
 - **Terminal rollout docs** — added Phase 2 rollout notes, a manual QA checklist, and a sign-off matrix for desktop, phone, and private-remote terminal validation.
 
+### Changed
+
+- **Safer agent permissions by default** — newly scaffolded repositories retain each agent's normal permission and approval behavior; automatic approval remains available as an explicit opt-in.
+- **Release and deployment verification** — native artifacts now report the product release version and ship with checksums, a source dependency SBOM, and GitHub provenance attestations; relay rollout uses a restricted SSH forced command and an exact-build ready health response.
+- **Independent preview rollouts** — preview-worker images now deploy by immutable digest through a main-only protected environment, prove Chromium sandbox startup, and expose exact build identity before promotion.
+- **Security gates** — dependency review and configured Strix scans are blocking, with expanded Dependabot coverage for Rust, JavaScript, Go, Python, and Actions.
+- **Bounded remote services** — relay connections and queued bytes now have global, user, channel, and connection quotas; preview HTTP and bridge reads use absolute deadlines and aggregate buffering limits.
+
+### Fixed
+
+- **Authorization invariants** — authenticated `HEAD` requests follow the same role checks as their corresponding `GET` routes, and skill deletion rejects empty or escaping paths.
+- **Relay lifecycle safety** — relay ownership, reconnect generations, persistence ordering, and pending terminal lifecycles are bounded and consistent.
+- **Preview lifecycle safety** — browser allocation is capacity-safe and timed-out work is cancelled without leaving untracked sessions.
+- **Recoverable production updates** — relay state is snapshotted transactionally, failed relay/preview candidates roll back through public health, and release retries reuse the exact npm artifact bytes already published.
+
+## [0.61.11] - 2026-07-02
+
+### Changed
+
+- Internal maintenance and tooling updates; no user-facing product change.
+
+## [0.61.10] - 2026-07-01
+
+### Security
+
+- Removed direct unauthenticated ttyd tunnel URLs from terminal session responses.
+- Required administrator access for preference updates and the action guard token for dispatcher binding updates.
+
 ## [0.1.0] - 2026-03-01
+
+> Historical initial-release snapshot. Current runtime, storage, packaging, and plugin architecture is documented in the README and source tree above.
 
 ### Added
 
@@ -44,3 +74,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP server on stdio (no network exposure)
 
 [0.1.0]: https://github.com/charannyk06/conductor-oss/releases/tag/v0.1.0
+[0.61.10]: https://github.com/charannyk06/conductor-oss/releases/tag/v0.61.10
+[0.61.11]: https://github.com/charannyk06/conductor-oss/releases/tag/v0.61.11

@@ -271,6 +271,7 @@ pub async fn build_state(
 
     let db = Database::in_memory().await.unwrap();
     let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+    state.enable_test_process_cleanup();
     state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

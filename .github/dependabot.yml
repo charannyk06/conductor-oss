@@ -1,39 +1,37 @@
 version: 2
 
 updates:
-  # Root monorepo (pnpm workspace)
-  - package-ecosystem: npm
+  # Root Bun workspace
+  - package-ecosystem: bun
     directory: /
     schedule:
       interval: weekly
       day: monday
       time: "08:00"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     groups:
-      typescript:
+      compatible-minor-and-patch:
+        update-types:
+          - minor
+          - patch
         patterns:
-          - "typescript"
-          - "@types/*"
-    ignore:
-      # Zod v4 has breaking changes — pin to v3
-      - dependency-name: "zod"
-        versions: [">=4.0.0"]
-      # Skip patch bumps to reduce noise
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
+          - "*"
 
-  # Preview worker Docker package lock
-  - package-ecosystem: npm
+  # Preview worker has an independent Bun lock for its Docker build.
+  - package-ecosystem: bun
     directory: /preview-worker
     schedule:
       interval: weekly
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
-    ignore:
-      # Skip patch bumps to reduce noise
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
+    groups:
+      compatible-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
 
   # Rust / Cargo
   - package-ecosystem: cargo
@@ -42,11 +40,32 @@ updates:
       interval: weekly
       day: monday
       time: "08:00"
-    open-pull-requests-limit: 10
-    ignore:
-      # Skip patch bumps to reduce noise
-      - dependency-name: "*"
-        update-types: ["version-update:semver-patch"]
+    open-pull-requests-limit: 5
+    groups:
+      compatible-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
+
+  # Go bridge
+  - package-ecosystem: gomod
+    directory: /bridge-cmd
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    open-pull-requests-limit: 5
+
+  # Strix scanner requirements used by CI
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    open-pull-requests-limit: 5
 
   # GitHub Actions
   - package-ecosystem: github-actions
