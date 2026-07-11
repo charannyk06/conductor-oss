@@ -68,6 +68,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: .github/requirements/strix-security-scan.txt
 
       - name: Install Strix
         run: |
