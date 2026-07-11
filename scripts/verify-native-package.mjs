@@ -59,15 +59,15 @@ try {
   if (!existsSync(binaryPath)) {
     throw new Error(`native package is missing bin/${target.binaryName}`);
   }
+  if (target.id === "darwin-universal" && process.platform !== "darwin") {
+    throw new Error("darwin-universal artifacts must be verified on macOS");
+  }
   const actualVersion = execFileSync(binaryPath, ["--version"], { encoding: "utf8" }).trim();
   const expectedVersion = `conductor ${options.version}`;
   if (actualVersion !== expectedVersion) {
     throw new Error(`native package binary reports ${actualVersion || "no version"}; expected ${expectedVersion}`);
   }
   if (target.id === "darwin-universal") {
-    if (process.platform !== "darwin") {
-      throw new Error("darwin-universal artifacts must be verified on macOS");
-    }
     execFileSync("lipo", [binaryPath, "-verify_arch", "x86_64", "arm64"], { stdio: "pipe" });
   }
 } finally {
