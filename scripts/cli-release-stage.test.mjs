@@ -27,6 +27,8 @@ test("release staging gives bundled private packages the parent release identity
     mkdirSync(join(cliDir, "dist"), { recursive: true });
     mkdirSync(join(coreDir, "dist"), { recursive: true });
     mkdirSync(join(webDir, ".next", "standalone"), { recursive: true });
+    mkdirSync(join(webDir, ".next", "standalone", "node_modules", "next"), { recursive: true });
+    mkdirSync(join(webDir, ".next", "standalone", "node_modules", "sharp"), { recursive: true });
     mkdirSync(join(webDir, ".next", "static"), { recursive: true });
 
     writeJson(join(cliDir, "package.json"), {
@@ -35,6 +37,7 @@ test("release staging gives bundled private packages the parent release identity
       type: "module",
       main: "dist/launcher.js",
       bin: { conductor: "dist/launcher.js" },
+      engines: { node: ">=20.9.0" },
       dependencies: { "@conductor-oss/core": "workspace:*" },
     });
     writeFileSync(join(cliDir, "dist", "launcher.js"), "#!/usr/bin/env node\n", "utf8");
@@ -50,7 +53,15 @@ test("release staging gives bundled private packages the parent release identity
       name: "@conductor-oss/web",
       version: "0.2.7",
       private: true,
-      dependencies: {},
+      dependencies: { next: "16.2.10", react: "19.2.0" },
+    });
+    writeJson(join(webDir, ".next", "standalone", "node_modules", "next", "package.json"), {
+      name: "next",
+      version: "16.2.10",
+    });
+    writeJson(join(webDir, ".next", "standalone", "node_modules", "sharp", "package.json"), {
+      name: "sharp",
+      version: "0.34.5",
     });
 
     const { tarballPath } = packCliReleasePackage({
@@ -65,9 +76,22 @@ test("release staging gives bundled private packages the parent release identity
       "utf8",
     ));
     assert.equal(parentManifest.dependencies["@conductor-oss/core"], "9.8.7");
+    assert.equal(parentManifest.engines.node, ">=20.9.0");
+    assert.equal(parentManifest.dependencies.next, undefined);
+    assert.equal(parentManifest.dependencies.react, undefined);
+    assert.equal(parentManifest.optionalDependencies["@next/swc-darwin-arm64"], undefined);
+    assert.equal(parentManifest.optionalDependencies["@next/swc-linux-x64-gnu"], undefined);
+    assert.equal(parentManifest.optionalDependencies.sharp, "0.34.5");
     assert.deepEqual(parentManifest.bundleDependencies, ["@conductor-oss/core"]);
     assert.equal(bundledManifest.name, "@conductor-oss/core");
     assert.equal(bundledManifest.version, "9.8.7");
+    assert.equal(
+      JSON.parse(readFileSync(
+        join(stageDir, "web", ".next", "standalone", "node_modules", "next", "package.json"),
+        "utf8",
+      )).version,
+      "16.2.10",
+    );
     assert.equal(
       assertBundledDependencyVersionsInTarball(tarballPath, {
         requiredDependencies: ["@conductor-oss/core"],

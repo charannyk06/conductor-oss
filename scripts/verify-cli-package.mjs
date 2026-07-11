@@ -90,7 +90,9 @@ const TMUX_STREAM_AGENT_FIXTURES = [
   },
   {
     agent: "cursor-cli",
-    binary: "cursor",
+    // Match the executor's preferred discovery order so an installed
+    // cursor-agent cannot bypass the fixture through a later alias.
+    binary: "cursor-agent",
     expectedPrefix: [],
     requiredArgs: [],
     forbiddenArgs: ["--output-format", "stream-json"],
@@ -245,6 +247,14 @@ async function allocatePort() {
       });
     });
   });
+}
+
+async function allocateDistinctPorts(count) {
+  const ports = new Set();
+  while (ports.size < count) {
+    ports.add(await allocatePort());
+  }
+  return [...ports];
 }
 
 function getInstalledCliEntry(installDir) {
@@ -463,8 +473,18 @@ async function waitForCondition(description, check, timeoutMs = 20_000) {
 
 async function fetchJson(url, init) {
   const response = await fetch(url, init);
-  const payload = await response.json().catch(() => null);
-  return { response, payload };
+  const bodyText = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    // Preserve a bounded diagnostic for unexpected HTML/text proxy responses.
+  }
+  return {
+    response,
+    payload,
+    diagnosticBody: payload === null ? bodyText.slice(0, 500) : null,
+  };
 }
 
 const SPAWN_AGENT_PRIORITY = [
@@ -520,6 +540,32 @@ async function verifyDashboardAssets(baseUrl) {
       const assetResponse = await fetch(new URL(assetPath, baseUrl));
       return assetResponse.ok;
     }, 10_000);
+  }
+}
+
+async function verifyDashboardImageOptimization(baseUrl) {
+  const imageUrl = new URL("/_next/image", baseUrl);
+  imageUrl.searchParams.set("url", "/brand/conductor-wordmark-dark.png");
+  imageUrl.searchParams.set("w", "64");
+  imageUrl.searchParams.set("q", "75");
+
+  const response = await fetch(imageUrl, {
+    headers: { Accept: "image/webp" },
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!response.ok) {
+    throw new Error(`dashboard image optimizer returned ${response.status}`);
+  }
+  if (!contentType.startsWith("image/webp")) {
+    throw new Error(`dashboard image optimizer returned ${contentType || "no content type"}; expected image/webp`);
+  }
+  if (
+    body.length < 12
+    || body.subarray(0, 4).toString("ascii") !== "RIFF"
+    || body.subarray(8, 12).toString("ascii") !== "WEBP"
+  ) {
+    throw new Error("dashboard image optimizer did not return a valid WebP payload");
   }
 }
 
@@ -597,8 +643,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   const homeDir = createTempDir("conductor-cli-home-", tempDirs);
   const projectDir = createTempDir("conductor-cli-project-", tempDirs);
   const canonicalProjectDir = realpathSync.native(projectDir);
-  const dashboardPort = await allocatePort();
-  const backendPort = await allocatePort();
+  const [dashboardPort, backendPort] = await allocateDistinctPorts(2);
   const baseUrl = `http://127.0.0.1:${dashboardPort}`;
 
   const launcher = spawnInstalledCli(installDir, [
@@ -617,6 +662,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   try {
     await waitForDashboard(`${baseUrl}/api/config`, 25_000);
     await verifyDashboardAssets(baseUrl);
+    await verifyDashboardImageOptimization(baseUrl);
     await verifyFirstRunOnboarding(baseUrl);
 
     const bootstrapWorkspace = join(homeDir, ".openclaw", "workspace");
@@ -991,7 +1037,9 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
   const { binDir, fixtures } = createFakeAgentBinDir(tempDirs);
   const homeDir = createTempDir("conductor-cli-streaming-home-", tempDirs);
   const repoDir = createTempDir("conductor-cli-streaming-", tempDirs);
-  const baseUrl = "http://127.0.0.1:4113";
+  const [dashboardPort, backendPort] = await allocateDistinctPorts(2);
+  const baseUrl = `http://127.0.0.1:${dashboardPort}`;
+  const backendBaseUrl = `http://127.0.0.1:${backendPort}`;
   const configPath = join(repoDir, "conductor.yaml");
   const boardPath = join(repoDir, "CONDUCTOR.md");
 
@@ -1018,7 +1066,9 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
     "start",
     "--no-watcher",
     "--port",
-    "4113",
+    String(dashboardPort),
+    "--backend-port",
+    String(backendPort),
     "--workspace",
     repoDir,
   ], {
@@ -1077,7 +1127,7 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
       try {
         await waitForCondition(`packaged tmux structured streaming feed for ${fixture.agent}`, async () => {
           const [feedResult, outputResult] = await Promise.all([
-            fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`),
+            fetchJson(`${backendBaseUrl}/api/sessions/${createdSessionId}/feed`),
             fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null, response: { ok: false } })),
           ]);
           if (!feedResult.response.ok) {
@@ -1095,14 +1145,17 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
         }, 20_000);
       } catch (error) {
         const [feedResult, outputResult] = await Promise.all([
-          fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`).catch(() => ({ payload: null })),
+          fetchJson(`${backendBaseUrl}/api/sessions/${createdSessionId}/feed`).catch(() => ({ payload: null })),
           fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null })),
         ]);
         throw new Error(
           [
             error instanceof Error ? error.message : String(error),
             `agent: ${fixture.agent}`,
+            `feed status: ${feedResult.response?.status ?? "unavailable"}`,
+            `feed content-type: ${feedResult.response?.headers?.get?.("content-type") ?? "unavailable"}`,
             `feed: ${JSON.stringify(feedResult.payload)}`,
+            `feed body: ${feedResult.diagnosticBody ?? ""}`,
             `output: ${outputResult.payload?.output ?? ""}`,
             `logs: ${dashboard.getLogs()}`,
           ].join("\n"),
@@ -1254,7 +1307,7 @@ try {
     stdio: "ignore",
     shell: true,
   });
-  execFileSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, "--omit=optional", tarballPath, nativeStageDir], {
+  execFileSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, tarballPath, nativeStageDir], {
     cwd: installDir,
     stdio: "inherit",
     shell: true,
@@ -1270,6 +1323,17 @@ try {
   const installedDashboardRoot = join(installDir, "node_modules", "conductor-oss", "web", ".next", "standalone");
   if (!existsSync(installedDashboardRoot)) {
     fail("installed CLI package is missing the dashboard standalone directory");
+  }
+
+  const installedSharpManifestPath = join(installDir, "node_modules", "sharp", "package.json");
+  if (!existsSync(installedSharpManifestPath)) {
+    fail("installed CLI package is missing the host image optimization runtime");
+  }
+  const installedSharpManifest = JSON.parse(readTextFile(installedSharpManifestPath));
+  if (installedSharpManifest.version !== installedCliManifest.optionalDependencies?.sharp) {
+    fail(
+      `installed sharp version is ${installedSharpManifest.version ?? "missing"}; expected ${installedCliManifest.optionalDependencies?.sharp ?? "an exact optional dependency"}`,
+    );
   }
 
   const installedNativeBackend = join(
@@ -1340,6 +1404,19 @@ try {
   } catch (error) {
     const diagnostic = error?.stderr?.toString().trim() || error?.message || String(error);
     fail(`installed npm dependency graph is invalid: ${diagnostic}`);
+  }
+  try {
+    execFileSync(
+      NPM_EXECUTABLE,
+      ["audit", "--omit=dev", "--audit-level=low"],
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], shell: true },
+    );
+  } catch (error) {
+    const diagnostic = error?.stdout?.toString().trim()
+      || error?.stderr?.toString().trim()
+      || error?.message
+      || String(error);
+    fail(`installed npm dependency audit is not clean: ${diagnostic}`);
   }
 
   await verifyBrowserFirstLauncherFlow(installDir, tempDirs);

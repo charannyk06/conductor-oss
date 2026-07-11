@@ -68,7 +68,7 @@ Each adapter in `crates/conductor-executors/src/agents/` defines launch commands
 
 - Rust toolchain (stable)
 - Bun >= 1.2
-- Node.js >= 18
+- Node.js >= 20.9.0
 - git
 
 ### Commands
