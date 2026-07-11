@@ -1,0 +1,245 @@
+name: Deploy Preview Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "preview-worker/**"
+      - ".github/workflows/deploy-preview-worker.yml"
+      - "scripts/conductor-preview-deploy-host.sh"
+      - "docs/preview-worker-deployment.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-preview-worker-production
+  cancel-in-progress: false
+
+env:
+  PREVIEW_IMAGE: ghcr.io/charannyk06/conductor-preview-worker
+
+jobs:
+  deployment-ref:
+    name: Require main branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-production refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Production preview deployments are allowed only from refs/heads/main."
+            exit 1
+          fi
+
+  publish-preview-image:
+    name: Publish preview image
+    needs: deployment-ref
+    environment: preview-production
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      image_ref: ${{ steps.reference.outputs.image_ref }}
+      image_sha_tag: ${{ steps.meta.outputs.image_sha_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          echo "image_sha_tag=${PREVIEW_IMAGE}:sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push preview image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./preview-worker
+          file: ./preview-worker/Dockerfile
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            CONDUCTOR_BUILD_SHA=${{ github.sha }}
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ steps.meta.outputs.image_sha_tag }}
+
+      - name: Pin rollout reference to image digest
+        id: reference
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return a valid image digest: $IMAGE_DIGEST"
+            exit 1
+          fi
+          echo "image_ref=${PREVIEW_IMAGE}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest preview image provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.PREVIEW_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  trigger-preview-deploy:
+    name: Trigger preview rollout
+    environment: preview-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    needs: publish-preview-image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate preview deploy configuration
+        shell: bash
+        env:
+          PREVIEW_DEPLOY_SSH_HOST: ${{ secrets.PREVIEW_DEPLOY_SSH_HOST }}
+          PREVIEW_DEPLOY_SSH_USER: ${{ secrets.PREVIEW_DEPLOY_SSH_USER }}
+          PREVIEW_DEPLOY_SSH_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_KEY }}
+          PREVIEW_DEPLOY_SSH_HOST_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          for name in \
+            PREVIEW_DEPLOY_SSH_HOST \
+            PREVIEW_DEPLOY_SSH_USER \
+            PREVIEW_DEPLOY_SSH_KEY \
+            PREVIEW_DEPLOY_SSH_HOST_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is required; the image was published but no deployment occurred."
+              exit 1
+            fi
+          done
+
+      - name: Install restricted deployment identity
+        shell: bash
+        env:
+          PREVIEW_DEPLOY_SSH_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_KEY }}
+          PREVIEW_DEPLOY_SSH_HOST_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$PREVIEW_DEPLOY_SSH_KEY" > "$HOME/.ssh/conductor-preview-deploy"
+          printf '%s\n' "$PREVIEW_DEPLOY_SSH_HOST_KEY" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/conductor-preview-deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Deploy digest-pinned preview image
+        shell: bash
+        env:
+          PREVIEW_DEPLOY_SSH_HOST: ${{ secrets.PREVIEW_DEPLOY_SSH_HOST }}
+          PREVIEW_DEPLOY_SSH_USER: ${{ secrets.PREVIEW_DEPLOY_SSH_USER }}
+          PREVIEW_IMAGE_REF: ${{ needs.publish-preview-image.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          script_sha=$(sha256sum scripts/conductor-preview-deploy-host.sh | awk '{print $1}')
+          ssh \
+            -i "$HOME/.ssh/conductor-preview-deploy" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$PREVIEW_DEPLOY_SSH_USER@$PREVIEW_DEPLOY_SSH_HOST" \
+            "verify-script $script_sha"
+          ssh \
+            -i "$HOME/.ssh/conductor-preview-deploy" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveCountMax=3 \
+            -o ServerAliveInterval=15 \
+            -o StrictHostKeyChecking=yes \
+            "$PREVIEW_DEPLOY_SSH_USER@$PREVIEW_DEPLOY_SSH_HOST" \
+            "deploy $PREVIEW_IMAGE_REF $GITHUB_SHA"
+
+  preview-healthcheck:
+    name: Probe preview health
+    environment: preview-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    needs: [publish-preview-image, trigger-preview-deploy]
+    steps:
+      - name: Probe preview health endpoint
+        shell: bash
+        env:
+          PREVIEW_WORKER_HEALTHCHECK_URL: ${{ secrets.PREVIEW_WORKER_HEALTHCHECK_URL }}
+          EXPECTED_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PREVIEW_WORKER_HEALTHCHECK_URL:-}" ]; then
+            echo "::error::PREVIEW_WORKER_HEALTHCHECK_URL is required after a preview rollout."
+            exit 1
+          fi
+          if [[ "$PREVIEW_WORKER_HEALTHCHECK_URL" != https://* ]]; then
+            echo "::error::PREVIEW_WORKER_HEALTHCHECK_URL must use HTTPS."
+            exit 1
+          fi
+          for attempt in {1..20}; do
+            if curl --connect-timeout 5 --max-time 10 \
+              --fail --silent --show-error --max-redirs 0 \
+              --proto '=https' --proto-redir '=https' \
+              "$PREVIEW_WORKER_HEALTHCHECK_URL" >/tmp/preview-health.json \
+              && jq -e --arg expected "$EXPECTED_BUILD_SHA" \
+                '.ok == true and .buildSha == $expected' \
+                /tmp/preview-health.json >/dev/null; then
+                cat /tmp/preview-health.json
+                exit 0
+            fi
+            sleep 6
+          done
+          echo "Preview worker health check never reported the requested build."
+          exit 1
+
+  promote-preview-image:
+    name: Promote healthy preview image
+    environment: preview-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [publish-preview-image, preview-healthcheck]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote immutable image to latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${PREVIEW_IMAGE}:latest" \
+            "${{ needs.publish-preview-image.outputs.image_ref }}"

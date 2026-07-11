@@ -1,6 +1,9 @@
 import { SignJWT } from "jose";
 import { getDashboardAccess, type DashboardAccess } from "@/lib/auth";
-import { BRIDGE_RELAY_SECRET_REQUIRED_ERROR } from "@/lib/bridgeRelayErrors";
+import {
+  BRIDGE_RELAY_SECRET_REQUIRED_ERROR,
+  BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR,
+} from "@/lib/bridgeRelayErrors";
 import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 const DEFAULT_LOCAL_BRIDGE_USER_ID = "local-admin";
@@ -9,6 +12,7 @@ const RELAY_JWT_AUDIENCE = "conductor-relay";
 const LEGACY_PROXY_AUTHORIZED_HEADER = "x-conductor-proxy-authorized";
 const LEGACY_PROXY_EMAIL_HEADER = "x-conductor-access-email";
 const LEGACY_PROXY_LOCAL_USER_HEADER = "x-bridge-user-id";
+const MIN_RELAY_JWT_SECRET_BYTES = 32;
 
 export type BridgeRelayJwtScope = "dashboard-api" | "terminal-browser";
 
@@ -47,6 +51,9 @@ function requireBridgeRelaySecret(): string {
   const secret = process.env.RELAY_JWT_SECRET?.trim();
   if (!secret) {
     throw new Error(BRIDGE_RELAY_SECRET_REQUIRED_ERROR);
+  }
+  if (new TextEncoder().encode(secret).byteLength < MIN_RELAY_JWT_SECRET_BYTES) {
+    throw new Error(BRIDGE_RELAY_SECRET_TOO_SHORT_ERROR);
   }
   return secret;
 }

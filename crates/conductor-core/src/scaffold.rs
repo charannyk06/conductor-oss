@@ -252,7 +252,7 @@ pub fn build_project_config(project: &ScaffoldProjectConfig) -> ProjectConfig {
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .unwrap_or("skip")
+                    .unwrap_or("default")
                     .to_string(),
             ),
             model: trim_option(project.agent_model.clone()),
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(project.session_prefix.as_deref(), Some("mr"));
         assert_eq!(project.workspace.as_deref(), Some("worktree"));
         assert_eq!(project.runtime.as_deref(), Some("direct"));
-        assert_eq!(project.agent_config.permissions.as_deref(), Some("skip"));
+        assert_eq!(project.agent_config.permissions.as_deref(), Some("default"));
         assert_eq!(project.scm, Some(Value::String("github".to_string())));
     }
 

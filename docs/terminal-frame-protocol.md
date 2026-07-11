@@ -1,68 +1,50 @@
-# Terminal Frame Protocol
+# Terminal WebSocket Protocol
 
-Conductor Phase 2 uses explicit websocket frame classes for live terminal sessions:
+The supported browser terminal path uses the ttyd-compatible WebSocket framing implemented in `crates/conductor-server/src/routes/ttyd_protocol.rs`. This file documents the live contract; the previously described `CTP2` envelope is not implemented and must not be used by clients.
 
-- Text `control` frames for lifecycle events such as `ready`, `ack`, `pong`, and `exit`
-- Text `recovery` frames when the backend detects lag and is about to resend restore state
-- Text `error` frames for protocol or runtime failures
-- Binary `restore` frames for a full terminal restore snapshot
-- Binary `stream` frames for incremental terminal output
+## Negotiation and authentication
 
-This removes the old implicit contract where a JSON `"snapshot"` message meant "the next binary payload should be treated as a restore snapshot".
+- The local backend exposes the authenticated terminal-token endpoint and terminal WebSocket facade.
+- ttyd-compatible clients request the `tty` WebSocket subprotocol.
+- Hosted paired-device sessions receive a short-lived, terminal-scoped relay JWT. The browser and bridge connect to the relay's terminal-specific paths; the relay forwards WebSocket frames without changing the terminal protocol.
+- The bridge's long-lived pairing credential is used only on the bridge side. It must never be sent to a browser or placed in a dashboard URL.
 
-## Binary Frames
+## Client-to-server frames
 
-All binary frames use this prefix:
+The first byte selects the command:
 
-```text
-0..4   magic   "CTP2"
-4      u8      protocol version (currently 1)
-5      u8      frame kind
-6..14  u64be   terminal sequence
-```
+| Byte | Command | Payload |
+|------|---------|---------|
+| `{` | Handshake | UTF-8 JSON object containing `columns` and `rows`; an upstream ttyd connection may also include `AuthToken` |
+| `0` | Input | Raw terminal input bytes |
+| `1` | Resize | UTF-8 JSON object containing `columns` and `rows` |
+| `2` | Pause | No payload |
+| `3` | Resume | No payload |
 
-Frame kinds:
+Dimensions are positive and bounded by the backend. Oversized or malformed frames are rejected.
 
-- `1`: `restore`
-- `2`: `stream`
+## Server-to-client frames
 
-### Restore Frame
+| Byte | Command | Payload |
+|------|---------|---------|
+| `0` | Output | Raw terminal output or an ANSI restore snapshot |
+| `1` | Window title | UTF-8 title |
+| `2` | Preferences | UTF-8 JSON preferences |
 
-After the shared prefix, restore frames append:
+On initial handshake the backend sends preferences and the current restore snapshot before streaming later output. When a subscriber lags or resumes after a pause, the backend sends the current ANSI restore snapshot as an output frame. There is no separate binary restore-envelope header.
 
-```text
-14     u8      restore snapshot version
-15     u8      restore reason (1 = attach, 2 = lagged)
-16..18 u16be   cols
-18..20 u16be   rows
-20..   bytes   ANSI restore payload
-```
+## Relay control versus terminal data
 
-The restore payload is the same rendered ANSI state that the backend persists for restart-safe terminal recovery.
+The paired-device control channel uses tagged JSON messages from `conductor-types`, including `terminal_proxy_start`. After a terminal-specific relay connection is established, its WebSocket carries the ttyd-compatible frames above directly. Control-channel JSON and terminal-data frames are deliberately separate contracts.
 
-### Stream Frame
+## Change discipline
 
-After the shared prefix, stream frames append:
+The Rust implementation is authoritative. Any command-byte change must update, in the same PR:
 
-```text
-14..   bytes   incremental terminal output
-```
+- `crates/conductor-server/src/routes/ttyd_protocol.rs`
+- relay pause/resume/resize handling in `crates/conductor-relay/src/relay.rs`
+- bridge translation in `bridge-cmd/relay/client.go`
+- the browser clients in `packages/web/src/components/sessions/`
+- cross-language contract tests and this document
 
-## Recovery Flow
-
-When a websocket subscriber lags behind the backend broadcast buffer:
-
-1. The server sends a text `recovery` frame with `reason: "lagged"` and the skipped count.
-2. The server immediately follows with a binary `restore` frame.
-3. The client resets xterm with that restore payload and then continues applying later `stream` frames.
-
-## Backend State Contract
-
-The backend now routes terminal output through one state update path:
-
-1. Append terminal bytes to the capture log.
-2. Update the in-memory terminal state store.
-3. Persist the restore snapshot.
-4. Emit a structured `stream` event with the same sequence number used by the restore snapshot.
-
-That keeps restore persistence and live streaming aligned to the same terminal truth.
+Do not add a second frame format without explicit negotiation and end-to-end tests covering local and paired-device paths.

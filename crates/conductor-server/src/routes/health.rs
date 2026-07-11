@@ -48,7 +48,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
         StatusCode::OK,
         Json(json!({
             "status": "ok",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": conductor_core::BUILD_VERSION,
             "uptime_secs": (chrono::Utc::now() - state.started_at).num_seconds().max(0),
             "executors": executors.len(),
             "event_subscribers": state.event_snapshots.receiver_count(),

@@ -26,7 +26,7 @@ use crate::state::{
 };
 
 const ACP_SERVER_NAME: &str = "conductor-acp";
-const ACP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const ACP_SERVER_VERSION: &str = conductor_core::BUILD_VERSION;
 const ACP_PROTOCOL_VERSION: u64 = 1;
 const ACP_SESSION_KIND: &str = "project_dispatcher";
 const ACP_MODE_DISPATCHER: &str = "dispatcher";

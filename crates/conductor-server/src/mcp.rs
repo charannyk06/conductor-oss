@@ -14,7 +14,7 @@ use crate::routes::boards::{load_board_response, resolve_board_task_record, spli
 use crate::state::{repo_url_without_credentials, AppState, SessionRecord, SpawnRequest};
 
 const MCP_SERVER_NAME: &str = "conductor";
-const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+const MCP_SERVER_VERSION: &str = conductor_core::BUILD_VERSION;
 
 const TOOL_DISPATCH: &str = "conductor_dispatch";
 const TOOL_LIST_SESSIONS: &str = "conductor_list_sessions";

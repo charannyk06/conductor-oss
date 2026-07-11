@@ -23,15 +23,13 @@ import {
   extractFilesFromTransfer,
   uploadClipboardImage,
 } from "@/lib/clipboardImage";
+import {
+  encodeTtydInputFrame,
+  encodeTtydResizeFrame,
+  TTYD_SERVER_COMMAND,
+} from "@/components/sessions/terminal/ttydProtocol";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
-// Server→client command bytes (ttyd binary protocol).
-// See crates/conductor-server/src/routes/ttyd_protocol.rs for the authoritative list.
-const CMD_OUTPUT = "0".charCodeAt(0);            // 0x30 – terminal output
-const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);  // 0x31 – server-set window title
-const CMD_SET_PREFERENCES = "2".charCodeAt(0);   // 0x32 – server-set preferences
-// Client→server command bytes (used for encoding outgoing frames).
-const CMD_RESIZE = "1".charCodeAt(0);            // 0x31 – resize terminal
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const MAX_RECONNECT_ATTEMPTS = 20;
 type TerminalSyncMode = "resize" | "handshake";
@@ -68,22 +66,6 @@ function resetTerminalOutput(terminal: Terminal, value: string, scrollToBottom =
   if (scrollToBottom) {
     terminal.scrollToBottom();
   }
-}
-
-function encodeResizeFrame(cols: number, rows: number): Uint8Array<ArrayBuffer> {
-  const payload = new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
-  const frame = new Uint8Array(payload.length + 1);
-  frame[0] = CMD_RESIZE;
-  frame.set(payload, 1);
-  return frame;
-}
-
-function encodeInputFrame(data: string): Uint8Array<ArrayBuffer> {
-  const payload = new TextEncoder().encode(data);
-  const frame = new Uint8Array(payload.length + 1);
-  frame[0] = CMD_OUTPUT;
-  frame.set(payload, 1);
-  return frame;
 }
 
 async function fetchClosedTerminalOutput(
@@ -354,7 +336,7 @@ export function RemoteSessionTerminal({
       if (mode === "handshake") {
         sendHandshake();
       } else if (force || next.changed) {
-        socket.send(encodeResizeFrame(next.cols, next.rows));
+        socket.send(encodeTtydResizeFrame(next.cols, next.rows));
       }
     } catch {
       // Ignore transient geometry sync failures while reconnecting.
@@ -479,7 +461,7 @@ export function RemoteSessionTerminal({
         return;
       }
       try {
-        sendTerminalFrame(encodeInputFrame(data));
+        sendTerminalFrame(encodeTtydInputFrame(data));
         setError(null);
       } catch (nextError) {
         setError(nextError instanceof Error ? nextError.message : "Failed to send terminal input.");
@@ -512,7 +494,7 @@ export function RemoteSessionTerminal({
           bridgeId,
         });
         const imagePath = result.absolutePath || result.path;
-        sendTerminalFrame(encodeInputFrame(`\r\n[pasted image: ${imagePath}]\r\n`));
+        sendTerminalFrame(encodeTtydInputFrame(`\r\n[pasted image: ${imagePath}]\r\n`));
         setQueuedInsertError(null);
       } catch (error) {
         setQueuedInsertError(
@@ -559,7 +541,7 @@ export function RemoteSessionTerminal({
         });
 
         for (const path of uploadedPaths) {
-          sendTerminalFrame(encodeInputFrame(`\r\n[attached file: ${path}]\r\n`));
+          sendTerminalFrame(encodeTtydInputFrame(`\r\n[attached file: ${path}]\r\n`));
         }
         setQueuedInsertError(null);
       } catch (error) {
@@ -813,7 +795,7 @@ export function RemoteSessionTerminal({
             }
 
             switch (frame[0]) {
-              case CMD_OUTPUT: {
+              case TTYD_SERVER_COMMAND.output: {
                 const text = decoderRef.current.decode(frame.slice(1), { stream: true });
                 if (text.length > 0) {
                   terminal.write(text);
@@ -824,7 +806,7 @@ export function RemoteSessionTerminal({
                 }
                 break;
               }
-              case CMD_SET_WINDOW_TITLE: {
+              case TTYD_SERVER_COMMAND.setWindowTitle: {
                 // ttyd sends the terminal title as UTF-8 after the command byte.
                 // Update document.title so the browser tab reflects the session.
                 const titleBytes = frame.slice(1);
@@ -840,7 +822,7 @@ export function RemoteSessionTerminal({
                 }
                 break;
               }
-              case CMD_SET_PREFERENCES: {
+              case TTYD_SERVER_COMMAND.setPreferences: {
                 // The server sends JSON preferences (e.g. { bellSound: "" }).
                 // Decode and acknowledge; the frontend owns the terminal theme
                 // and font sizing so we intentionally skip applying those fields.
@@ -921,7 +903,7 @@ export function RemoteSessionTerminal({
     }
 
     try {
-      sendTerminalFrame(encodeInputFrame(`${inlineText} `));
+      sendTerminalFrame(encodeTtydInputFrame(`${inlineText} `));
       lastAppliedInsertNonceRef.current = pendingInsert.nonce;
       setError(null);
       setQueuedInsertError(null);

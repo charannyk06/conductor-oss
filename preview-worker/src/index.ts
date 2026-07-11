@@ -6,6 +6,7 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { SessionStore } from "./sessions/SessionStore.js";
 import type { PreviewWorkerConfig } from "./lib/types.js";
+import { requireWorkerApiKey } from "./lib/config.js";
 
 function readIntegerEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]?.trim();
@@ -21,10 +22,7 @@ function readIntegerEnv(name: string, defaultValue: number): number {
 }
 
 function readConfig(): PreviewWorkerConfig {
-  const apiKey = process.env.WORKER_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error("WORKER_API_KEY must be configured.");
-  }
+  const apiKey = requireWorkerApiKey(process.env.WORKER_API_KEY);
 
   return {
     port: readIntegerEnv("WORKER_PORT", 3099),

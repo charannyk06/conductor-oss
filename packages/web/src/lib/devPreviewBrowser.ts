@@ -2,11 +2,14 @@ import { lookup } from "node:dns/promises";
 import { execFileSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import puppeteer, {
   type Browser,
   type BrowserContext,
+  type CDPSession,
   type ConsoleMessage,
   type Frame,
   type HTTPRequest,
@@ -38,6 +41,135 @@ const DOM_NODE_LIMIT = 250;
 const LOCAL_NAVIGATION_HOSTS = ["127.0.0.1", "localhost", "::1", "0.0.0.0"] as const;
 const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
 const BARE_LOCAL_NAVIGATION_PATTERN = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?::\d+)?(?:\/.*)?$/i;
+const MAX_DIRECT_RESPONSE_BYTES = 25 * 1024 * 1024;
+const MAX_INTERCEPTED_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_BRIDGE_RESPONSE_PAYLOAD_BYTES = 36 * 1024 * 1024;
+export const MAX_CONCURRENT_PREVIEW_REQUESTS = 32;
+export const MAX_BUFFERED_PREVIEW_BYTES = 64 * 1024 * 1024;
+export const BLOCKED_BROWSER_NETWORK_URL_PATTERNS = [
+  "ws://*",
+  "wss://*",
+  "file://*",
+  "ftp://*",
+  "gopher://*",
+] as const;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+export interface NavigationAddress {
+  address: string;
+  family: number;
+}
+
+export interface ResolvedDirectNavigationTarget {
+  url: URL;
+  address: string;
+  family: 4 | 6;
+}
+
+export interface DirectNavigationResolveOptions {
+  allowLoopback?: boolean;
+  resolver?: (hostname: string) => Promise<NavigationAddress[]>;
+}
+
+export interface PreviewInterceptionBudget {
+  activeRequests: number;
+  bufferedBytes: number;
+}
+
+export interface PreviewInterceptionReservation {
+  reserve(bytes: number): void;
+  finish(): void;
+}
+
+export function beginPreviewInterception(
+  budget: PreviewInterceptionBudget,
+): PreviewInterceptionReservation {
+  if (budget.activeRequests >= MAX_CONCURRENT_PREVIEW_REQUESTS) {
+    throw new Error(
+      `Preview request blocked: the session exceeded ${MAX_CONCURRENT_PREVIEW_REQUESTS} concurrent network requests.`,
+    );
+  }
+
+  budget.activeRequests += 1;
+  let heldBytes = 0;
+  let finished = false;
+
+  return {
+    reserve(bytes: number): void {
+      if (finished) {
+        throw new Error("Preview request accounting reservation is already closed.");
+      }
+      if (!Number.isSafeInteger(bytes) || bytes < 0) {
+        throw new Error("Preview request accounting received an invalid byte count.");
+      }
+      if (bytes === 0) return;
+      if (budget.bufferedBytes + bytes > MAX_BUFFERED_PREVIEW_BYTES) {
+        throw new Error(
+          "Preview request blocked: the session exceeded the 64 MiB buffered network-data limit.",
+        );
+      }
+      budget.bufferedBytes += bytes;
+      heldBytes += bytes;
+    },
+    finish(): void {
+      if (finished) return;
+      finished = true;
+      budget.activeRequests = Math.max(0, budget.activeRequests - 1);
+      budget.bufferedBytes = Math.max(0, budget.bufferedBytes - heldBytes);
+    },
+  };
+}
+
+export function retainDirectLoopbackOrigin(
+  authorizedOrigin: string | null,
+  nextUrl: string,
+  navigationMode: "direct" | "bridge",
+): string | null {
+  if (!authorizedOrigin || navigationMode !== "direct") return null;
+  try {
+    const parsed = new URL(nextUrl);
+    return isLocalHost(parsed.hostname) && parsed.origin === authorizedOrigin
+      ? authorizedOrigin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function installPreviewBrowserNetworkGuard(
+  page: Page,
+  onBlockedWebSocket?: (url: string) => void,
+): Promise<CDPSession> {
+  const cdpSession = await page.createCDPSession();
+  try {
+    // Puppeteer's HTTP interception does not cover WebSocket handshakes, and the
+    // Node-side DNS pinning below cannot be applied to Chromium's socket stack.
+    // Fail closed for every WebSocket/non-HTTP network scheme at the CDP layer.
+    await cdpSession.send("Network.enable");
+    await cdpSession.send("Network.setBlockedURLs", {
+      urls: [...BLOCKED_BROWSER_NETWORK_URL_PATTERNS],
+    });
+    cdpSession.on("Network.webSocketCreated", ({ url }) => {
+      onBlockedWebSocket?.(url);
+    });
+    return cdpSession;
+  } catch (error) {
+    await cdpSession.detach().catch(() => {});
+    throw new Error(
+      `Failed to install the preview browser network guard: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 function commandExists(command: string): string | null {
   const checker = process.platform === "win32" ? "where" : "which";
@@ -196,6 +328,7 @@ export function isPrivateNetworkHostname(hostname: string): boolean {
     || lower.startsWith("feb")
     || lower.startsWith("fc")
     || lower.startsWith("fd")
+    || lower.startsWith("ff")
     || (mappedIpv4 ? isPrivateIpv4Address(mappedIpv4) : false);
 }
 
@@ -211,28 +344,188 @@ function hostnameResolvesToPrivateAddress(hostname: string): boolean {
   return false;
 }
 
-export async function assertSafeDirectNavigationTarget(value: string): Promise<void> {
-  if (unsafePreviewHostsAllowed()) {
-    return;
+function isLoopbackAddress(hostname: string): boolean {
+  const normalized = normalizeNavigationHostname(hostname);
+  if (normalized === "::1" || normalized === "::") {
+    return true;
   }
+  const mappedIpv4 = normalized.toLowerCase().startsWith("::ffff:")
+    ? normalized.slice("::ffff:".length)
+    : normalized;
+  return mappedIpv4 === "0.0.0.0" || mappedIpv4.startsWith("127.");
+}
 
+async function defaultResolver(hostname: string): Promise<NavigationAddress[]> {
+  return await lookup(hostname, { all: true, verbatim: true });
+}
+
+export async function resolveSafeDirectNavigationTarget(
+  value: string,
+  options: DirectNavigationResolveOptions = {},
+): Promise<ResolvedDirectNavigationTarget> {
   const parsed = new URL(value);
-  if (isLocalHost(parsed.hostname)) {
-    return;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Preview navigation only supports HTTP and HTTPS targets.");
   }
 
-  if (hostnameResolvesToPrivateAddress(parsed.hostname)) {
-    throw new Error(
-      "Preview navigation to private network hosts is blocked. Use loopback URLs for local dev servers or set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true to override.",
-    );
+  const hostname = normalizeNavigationHostname(parsed.hostname);
+  const literalFamily = isIP(hostname);
+  const resolved = literalFamily
+    ? [{ address: hostname, family: literalFamily }]
+    : await (options.resolver ?? defaultResolver)(hostname);
+  if (resolved.length === 0) {
+    throw new Error(`Preview navigation could not resolve ${hostname}.`);
   }
 
-  const resolved = await lookup(parsed.hostname, { all: true, verbatim: true }).catch(() => []);
-  if (resolved.some((entry) => hostnameResolvesToPrivateAddress(entry.address))) {
+  const normalized = resolved.map((entry) => ({
+    address: normalizeNavigationHostname(entry.address),
+    family: entry.family === 6 ? 6 as const : 4 as const,
+  }));
+  const localHostAllowed = options.allowLoopback !== false && isLocalHost(hostname);
+  if (localHostAllowed && normalized.some((entry) => !isLoopbackAddress(entry.address))) {
+    throw new Error("Preview loopback navigation resolved outside the loopback interface and was blocked.");
+  }
+  if (
+    !unsafePreviewHostsAllowed()
+    && !localHostAllowed
+    && normalized.some((entry) => hostnameResolvesToPrivateAddress(entry.address))
+  ) {
     throw new Error(
       "Preview navigation resolved to a private network address and was blocked. Set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true only if you intentionally trust that target.",
     );
   }
+
+  const selected = normalized.find((entry) => entry.family === 4) ?? normalized[0];
+  if (!selected) {
+    throw new Error(`Preview navigation could not resolve ${hostname}.`);
+  }
+  return { url: parsed, address: selected.address, family: selected.family };
+}
+
+export async function assertSafeDirectNavigationTarget(
+  value: string,
+  options: DirectNavigationResolveOptions = {},
+): Promise<void> {
+  await resolveSafeDirectNavigationTarget(value, options);
+}
+
+function sanitizeDirectRequestHeaders(headers: Record<string, string>): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized || normalized === "host" || normalized === "content-length") continue;
+    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
+function sanitizeDirectResponseHeaders(headers: IncomingHttpHeaders): Record<string, string | string[]> {
+  const sanitized: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.toLowerCase();
+    if (value === undefined || HOP_BY_HOP_HEADERS.has(normalized)) continue;
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
+export function buildPinnedRequestOptions(
+  target: ResolvedDirectNavigationTarget,
+  method: string,
+  headers: Record<string, string>,
+  bodyLength = 0,
+): HttpsRequestOptions {
+  const forwardedHeaders = sanitizeDirectRequestHeaders(headers);
+  forwardedHeaders.host = target.url.host;
+  if (bodyLength > 0) {
+    forwardedHeaders["content-length"] = String(bodyLength);
+  }
+
+  return {
+    protocol: target.url.protocol,
+    hostname: target.address,
+    family: target.family,
+    port: target.url.port || (target.url.protocol === "https:" ? 443 : 80),
+    method,
+    path: `${target.url.pathname}${target.url.search}`,
+    headers: forwardedHeaders,
+    ...(target.url.protocol === "https:" && isIP(target.url.hostname) === 0
+      ? { servername: target.url.hostname }
+      : {}),
+  };
+}
+
+export async function requestSafeDirectNavigation(input: {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Uint8Array | null;
+  timeoutMs: number;
+  allowLoopback: boolean;
+  reserveBufferedBytes?: (bytes: number) => void;
+}): Promise<{ status: number; headers: Record<string, string | string[]>; body: Buffer }> {
+  const target = await resolveSafeDirectNavigationTarget(input.url, {
+    allowLoopback: input.allowLoopback,
+  });
+  const body = input.body ? Buffer.from(input.body) : Buffer.alloc(0);
+  const requestOptions = buildPinnedRequestOptions(target, input.method, input.headers, body.length);
+  const requestImpl = target.url.protocol === "https:" ? httpsRequest : httpRequest;
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let deadline: NodeJS.Timeout | null = null;
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      callback();
+    };
+    const outgoing = requestImpl(requestOptions, (response) => {
+      const chunks: Buffer[] = [];
+      let received = 0;
+      response.on("data", (chunk: Buffer | string) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        received += buffer.length;
+        if (received > MAX_DIRECT_RESPONSE_BYTES) {
+          response.destroy(new Error("Preview response exceeded the 25 MiB safety limit."));
+          return;
+        }
+        try {
+          input.reserveBufferedBytes?.(buffer.length);
+        } catch (error) {
+          response.destroy(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        chunks.push(buffer);
+      });
+      response.once("error", (error) => settle(() => reject(error)));
+      response.once("end", () => {
+        try {
+          if (received > 0) {
+            input.reserveBufferedBytes?.(received);
+          }
+          const result = {
+            status: response.statusCode ?? 502,
+            headers: sanitizeDirectResponseHeaders(response.headers),
+            body: Buffer.concat(chunks),
+          };
+          settle(() => resolve(result));
+        } catch (error) {
+          settle(() => reject(error));
+        }
+      });
+    });
+    deadline = setTimeout(() => {
+      outgoing.destroy(new Error("Preview network request timed out."));
+    }, input.timeoutMs);
+    deadline.unref();
+    outgoing.once("error", (error) => settle(() => reject(error)));
+    if (body.length > 0) {
+      outgoing.write(body);
+    }
+    outgoing.end();
+  });
 }
 
 export type PreviewNavigationMode = "bridge" | "direct" | "blocked";
@@ -349,6 +642,10 @@ type PreviewState = {
   frameSequence: number;
   bridgePreview: BridgePreviewRuntimeConfig | null;
   requestInterceptionEnabled: boolean;
+  navigationMode: "direct" | "bridge";
+  directLoopbackOrigin: string | null;
+  networkGuardSession: CDPSession | null;
+  interceptionBudget: PreviewInterceptionBudget;
 };
 
 type ElementSnapshot = Omit<PreviewElementSelection, "frameId" | "frameName" | "frameUrl">;
@@ -411,6 +708,10 @@ class PreviewBrowserManager {
         frameSequence: 0,
         bridgePreview: null,
         requestInterceptionEnabled: false,
+        navigationMode: "direct",
+        directLoopbackOrigin: null,
+        networkGuardSession: null,
+        interceptionBudget: { activeRequests: 0, bufferedBytes: 0 },
       };
       this.states.set(sessionId, state);
     }
@@ -440,6 +741,10 @@ class PreviewBrowserManager {
     const context = state.context;
 
     try {
+      if (state.networkGuardSession) {
+        await state.networkGuardSession.detach().catch(() => {});
+        state.networkGuardSession = null;
+      }
       if (options.closePage !== false && page && !page.isClosed()) {
         await page.close().catch(() => {});
       }
@@ -495,11 +800,54 @@ class PreviewBrowserManager {
   private async handlePreviewRequest(
     state: PreviewState,
     request: HTTPRequest,
+    reservation: PreviewInterceptionReservation,
   ): Promise<void> {
     const bridgePreview = state.bridgePreview;
+    if (state.navigationMode === "direct") {
+      let parsed: URL;
+      try {
+        parsed = new URL(request.url());
+      } catch {
+        await request.abort("blockedbyclient");
+        return;
+      }
+
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("Preview request blocked: only controlled HTTP(S) requests are allowed.");
+      }
+
+      const postData = request.hasPostData() ? request.postData() : null;
+      if (request.hasPostData() && postData === undefined) {
+        throw new Error("Preview request blocked: its request body was unavailable for bounded inspection.");
+      }
+      const postDataBytes = postData === null || postData === undefined
+        ? 0
+        : Buffer.byteLength(postData);
+      if (postDataBytes > MAX_INTERCEPTED_REQUEST_BODY_BYTES) {
+        throw new Error("Preview request blocked: its body exceeded the 8 MiB safety limit.");
+      }
+      reservation.reserve(postDataBytes);
+      const requestBody = postData === null || postData === undefined ? null : Buffer.from(postData);
+      reservation.reserve(requestBody?.length ?? 0);
+      const previewResponse = await requestSafeDirectNavigation({
+        method: request.method(),
+        url: parsed.toString(),
+        headers: request.headers(),
+        body: requestBody,
+        timeoutMs: 30_000,
+        allowLoopback: state.directLoopbackOrigin === parsed.origin,
+        reserveBufferedBytes: (bytes) => reservation.reserve(bytes),
+      });
+      await request.respond({
+        status: previewResponse.status,
+        headers: previewResponse.headers,
+        body: previewResponse.body,
+      });
+      return;
+    }
+
     if (!bridgePreview) {
-      await assertSafeDirectNavigationTarget(request.url());
-      await request.continue();
+      await request.abort("blockedbyclient");
       return;
     }
 
@@ -524,6 +872,13 @@ class PreviewBrowserManager {
     const postData = request.method() === "GET" || request.method() === "HEAD"
       ? null
       : request.postData() ?? null;
+    const postDataBytes = postData ? Buffer.byteLength(postData) : 0;
+    if (postDataBytes > MAX_INTERCEPTED_REQUEST_BODY_BYTES) {
+      throw new Error("Preview request blocked: its body exceeded the 8 MiB safety limit.");
+    }
+    reservation.reserve(postDataBytes);
+    const bodyBase64 = postData ? Buffer.from(postData).toString("base64") : null;
+    reservation.reserve(bodyBase64 ? Buffer.byteLength(bodyBase64) : 0);
 
     const previewResponse = await requestBridgePreview(
       bridgePreview.bridgeId,
@@ -533,16 +888,30 @@ class PreviewBrowserManager {
         method: request.method(),
         url: parsed.toString(),
         headers: sanitizeBridgePreviewRequestHeaders(request.headers()),
-        bodyBase64: postData ? Buffer.from(postData).toString("base64") : null,
+        bodyBase64,
+      },
+      {
+        maxResponseBytes: MAX_BRIDGE_RESPONSE_PAYLOAD_BYTES,
+        onResponseChunk: (bytes) => reservation.reserve(bytes),
+        signal: AbortSignal.timeout(30_000),
       },
     );
+
+    const responseBodyBytes = previewResponse.bodyBase64
+      ? Math.floor((previewResponse.bodyBase64.length * 3) / 4)
+      : 0;
+    if (responseBodyBytes > MAX_DIRECT_RESPONSE_BYTES) {
+      throw new Error("Preview response exceeded the 25 MiB safety limit.");
+    }
+    reservation.reserve(responseBodyBytes);
+    const responseBody = previewResponse.bodyBase64
+      ? Buffer.from(previewResponse.bodyBase64, "base64")
+      : Buffer.alloc(0);
 
     await request.respond({
       status: previewResponse.status,
       headers: previewResponse.headers,
-      body: previewResponse.bodyBase64
-        ? Buffer.from(previewResponse.bodyBase64, "base64")
-        : Buffer.alloc(0),
+      body: responseBody,
     });
   }
 
@@ -567,7 +936,35 @@ class PreviewBrowserManager {
         return;
       }
 
-      void this.handlePreviewRequest(state, request).catch(async (error) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        state.directLoopbackOrigin = retainDirectLoopbackOrigin(
+          state.directLoopbackOrigin,
+          request.url(),
+          state.navigationMode,
+        );
+      }
+
+      let reservation: PreviewInterceptionReservation;
+      try {
+        reservation = beginPreviewInterception(state.interceptionBudget);
+      } catch (error) {
+        state.lastError = error instanceof Error ? error.message : "Preview request capacity exceeded";
+        pushLog(state.networkLogs, {
+          id: buildLogId("preview-capacity"),
+          kind: "network",
+          level: "error",
+          message: state.lastError,
+          timestamp: new Date().toISOString(),
+          url: request.url(),
+          method: request.method(),
+          status: null,
+          resourceType: request.resourceType(),
+        });
+        void request.abort("blockedbyclient").catch(() => {});
+        return;
+      }
+
+      void this.handlePreviewRequest(state, request, reservation).catch(async (error) => {
         state.lastError = error instanceof Error ? error.message : "Bridge preview request failed";
         pushLog(state.networkLogs, {
           id: buildLogId("preview-request"),
@@ -585,6 +982,8 @@ class PreviewBrowserManager {
         } catch {
           // Ignore duplicate resolution failures.
         }
+      }).finally(() => {
+        reservation.finish();
       });
     });
     page.on("response", (response) => {
@@ -607,6 +1006,11 @@ class PreviewBrowserManager {
       const frameId = this.ensureFrameId(state, frame);
       if (frame === page.mainFrame()) {
         state.activeFrameId ??= frameId;
+        state.directLoopbackOrigin = retainDirectLoopbackOrigin(
+          state.directLoopbackOrigin,
+          frame.url(),
+          state.navigationMode,
+        );
       }
       if (state.selectedElement?.frameId === frameId) {
         state.selectedElement = null;
@@ -655,16 +1059,36 @@ class PreviewBrowserManager {
 
     const context = await this.ensureContext(state, browser);
     const page = await context.newPage();
-    await page.setViewport(VIEWPORT);
-    page.setDefaultNavigationTimeout(30_000);
-    page.setDefaultTimeout(15_000);
-    this.attachListeners(state, page);
-    await this.syncRequestInterception(state, page);
-    state.page = page;
-    state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
-    state.selectedElement = null;
-    state.lastError = null;
-    return { state, page };
+    try {
+      await page.setViewport(VIEWPORT);
+      page.setDefaultNavigationTimeout(30_000);
+      page.setDefaultTimeout(15_000);
+      state.networkGuardSession = await installPreviewBrowserNetworkGuard(page, (url) => {
+        pushLog(state.networkLogs, {
+          id: buildLogId("blocked-websocket"),
+          kind: "network",
+          level: "error",
+          message: "Blocked WebSocket connection: preview sessions only permit controlled HTTP(S) network requests.",
+          timestamp: new Date().toISOString(),
+          url,
+          method: "GET",
+          status: null,
+          resourceType: "websocket",
+        });
+      });
+      this.attachListeners(state, page);
+      await this.syncRequestInterception(state, page);
+      state.page = page;
+      state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
+      state.selectedElement = null;
+      state.lastError = null;
+      return { state, page };
+    } catch (error) {
+      await state.networkGuardSession?.detach().catch(() => {});
+      state.networkGuardSession = null;
+      await page.close().catch(() => {});
+      throw error;
+    }
   }
 
   private collectFrames(state: PreviewState, page: Page): PreviewFrameInfo[] {
@@ -860,10 +1284,13 @@ class PreviewBrowserManager {
       }
 
       const previousUrl = page.url();
+      const previousNavigationMode = state.navigationMode;
+      const previousDirectLoopbackOrigin = state.directLoopbackOrigin;
       try {
-        if (navigationMode === "direct") {
-          await assertSafeDirectNavigationTarget(candidate);
-        }
+        state.navigationMode = navigationMode;
+        state.directLoopbackOrigin = navigationMode === "direct" && isLocalHost(new URL(candidate).hostname)
+          ? new URL(candidate).origin
+          : null;
         await this.syncRequestInterception(state, page, candidate);
         await page.goto(candidate, { waitUntil: "domcontentloaded" });
         await this.syncRequestInterception(state, page);
@@ -879,6 +1306,12 @@ class PreviewBrowserManager {
           state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
           return;
         }
+        state.navigationMode = previousNavigationMode;
+        state.directLoopbackOrigin = retainDirectLoopbackOrigin(
+          previousDirectLoopbackOrigin,
+          page.url(),
+          previousNavigationMode,
+        );
         lastError = error;
       }
     }

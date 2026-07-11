@@ -8,6 +8,7 @@ Thanks for your interest in contributing! Here's how to get started.
 git clone https://github.com/charannyk06/conductor-oss.git
 cd conductor-oss
 bun install
+bun install --cwd preview-worker
 cargo build --workspace
 ```
 
@@ -34,7 +35,7 @@ bun run dev
 cargo test --workspace
 
 # Run TS tests
-bun run --cwd packages/core test
+bun run test:packages
 
 # Type check
 bun run typecheck
@@ -69,7 +70,7 @@ packages/                    # TypeScript
   cli/                       # npm CLI entrypoint, native binary launcher
   core/                      # Shared TS types and schemas
   web/                       # Next.js 16 dashboard
-.github/workflows/           # CI, release, security, docs sync
+.github/workflows/           # CI, release, security, docs validation, deployment
 ```
 
 ## Submitting Changes
@@ -130,8 +131,8 @@ Register new adapters in `crates/conductor-executors/src/agents/mod.rs` and add 
 
 ## Releases
 
-Releases are triggered manually via the **Release** GitHub Action (`workflow_dispatch`). This:
-1. Bumps versions across all packages
+Releases are triggered by merges to `main` when the version job detects releasable changes. Maintainers can also use the **Release** workflow's manual trigger. The workflow:
+1. Computes the next product version and stamps publishable package artifacts in the release runner
 2. Builds and tests (Rust + TypeScript)
 3. Creates GitHub release notes from merged PRs' `User-Facing Release Notes` sections
 4. Publishes to npm with provenance (includes platform-native Rust binaries)
@@ -142,4 +143,4 @@ Be respectful. We're building tools for developers, by developers.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the project's MIT license.
+By contributing, you agree that your contributions will be licensed under the project's Apache License 2.0.

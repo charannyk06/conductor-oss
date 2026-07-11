@@ -59,7 +59,7 @@ const NotifierConfigSchema = z
 
 const AgentSpecificConfigSchema = z
   .object({
-    permissions: z.enum(["skip", "default"]).default("skip"),
+    permissions: z.enum(["skip", "default"]).default("default"),
     model: z.string().optional(),
     reasoningEffort: z.string().optional(),
   })
@@ -75,7 +75,7 @@ const AgentProfileSchema = z
   .passthrough();
 
 const DEFAULT_AGENT_CONFIG = {
-  permissions: "skip" as const,
+  permissions: "default" as const,
 };
 
 const DEFAULT_PROJECT_PLUGINS = {

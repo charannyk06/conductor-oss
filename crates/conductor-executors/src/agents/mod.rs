@@ -402,6 +402,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("runtime-env");
         let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
+        #[cfg(target_os = "macos")]
         let homebrew_dir = PathBuf::from("/opt/homebrew/bin");
         fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
 

@@ -39,7 +39,12 @@ export type AgentSetupConfig = {
 };
 
 function commandExists(command: string): boolean {
-  const result = spawnSync("sh", ["-lc", `command -v ${command}`], { stdio: "ignore" });
+  if (!/^[a-zA-Z0-9._+-]+$/.test(command)) {
+    return false;
+  }
+  const result = spawnSync("sh", ["-c", 'command -v "$1"', "sh", command], {
+    stdio: "ignore",
+  });
   return result.status === 0;
 }
 
@@ -148,7 +153,7 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
   const normalized = agent.trim();
   const byAgent: Record<string, AgentSetupConfig> = {
     "claude-code": {
-      commands: ["claude-code", "claude", "cc"],
+      commands: ["claude-code", "claude"],
       installPackage: "@anthropic-ai/claude-code",
       installLabel: "Install Claude Code",
     },

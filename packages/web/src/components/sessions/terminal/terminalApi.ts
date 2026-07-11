@@ -7,6 +7,7 @@
 
 import type { TerminalConnectionInfo } from "./terminalTypes";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 
 // ---------------------------------------------------------------------------
 // Direct backend URL resolution — no server round-trip
@@ -293,8 +294,30 @@ export async function resolveTerminalConnection(
   sessionId: string,
   options?: ResolveTerminalConnectionOptions,
 ): Promise<TerminalConnectionInfo> {
-  const backendOrigin = resolveBackendOrigin();
   const dashboardOrigin = resolveDashboardOrigin();
+  const bridgeId = options?.bridgeId?.trim() || decodeBridgeSessionId(sessionId)?.bridgeId;
+  if (bridgeId) {
+    // Paired devices are an external trust boundary. Render the terminal with
+    // Conductor's first-party xterm client instead of executing device-provided
+    // ttyd HTML in a same-origin iframe.
+    const embeddedTerminalUrl = new URL(
+      `/embed/terminal/${encodeURIComponent(sessionId)}`,
+      dashboardOrigin,
+    );
+    embeddedTerminalUrl.searchParams.set("bridgeId", bridgeId);
+    const terminalUrl = embeddedTerminalUrl.toString();
+    return {
+      terminalUrl,
+      terminalLinkUrl: terminalUrl,
+      relayTtydWsUrl: null,
+      interactive: true,
+      reason: null,
+      expiresInSeconds: null,
+      tunnelUrl: null,
+    };
+  }
+
+  const backendOrigin = resolveBackendOrigin();
   const auth = await fetchTerminalToken(sessionId, options);
   if (auth.interactive === false) {
     return {

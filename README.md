@@ -8,7 +8,7 @@
 
 [![npm version](https://img.shields.io/npm/v/conductor-oss?style=flat-square&color=0ea5e9)](https://www.npmjs.com/package/conductor-oss)
 [![CI](https://img.shields.io/github/actions/workflow/status/charannyk06/conductor-oss/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-22c55e?style=flat-square)](LICENSE)
 [![Rust Backend](https://img.shields.io/badge/rust-local_backend-ce422b?style=flat-square)](https://www.rust-lang.org)
 [![GitHub Stars](https://img.shields.io/github/stars/charannyk06/conductor-oss?style=flat-square&color=facc15)](https://github.com/charannyk06/conductor-oss/stargazers)
 
@@ -79,6 +79,9 @@ It is **not**:
 - a hosted cloud IDE that stores your code by default
 - a fake browser chat wrapper around terminal output
 - dependent on one agent vendor
+- an operating-system sandbox for coding agents; worktrees separate concurrent Git changes, but agents still run with the permissions of your local account
+
+New repositories use each agent's normal permission behavior. Depending on the agent, that may include approval prompts or an agent-provided sandbox; it is not an OS isolation guarantee. The optional automatic permission mode is an explicit trust decision for workspaces where broad local execution is acceptable.
 
 ## The main user flow
 
@@ -286,6 +289,8 @@ If that backend is reachable off-host and dashboard auth is enabled, also set th
 
 Relay deployment is separate from dashboard deployment. See `docs/relay-deployment.md` if you are rolling out the paired-device stack.
 
+The hosted Chromium preview worker is also deployed independently. See `docs/preview-worker-deployment.md` for its digest-pinned rollout, sandbox smoke test, and private-network requirements.
+
 ## Develop from source
 
 ### Prerequisites
@@ -298,6 +303,7 @@ Relay deployment is separate from dashboard deployment. See `docs/relay-deployme
 
 ```bash
 bun install
+bun install --cwd preview-worker
 ```
 
 ### Run

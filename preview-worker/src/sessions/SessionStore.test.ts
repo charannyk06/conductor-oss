@@ -26,6 +26,10 @@ function buildSession(id: string, apiKey: string, clientSessionId: string | null
     frameSequence: 0,
     requestStarts: new WeakMap(),
     requestInterceptionEnabled: false,
+    navigationMode: "direct",
+    directLoopbackOrigin: null,
+    networkGuardSession: null,
+    interceptionBudget: { activeRequests: 0, bufferedBytes: 0 },
     lastRequestedUrl: null,
   };
 }
@@ -56,4 +60,28 @@ test("listByApiKey returns all sessions for the same API key, including legacy s
     ["preview-1", "preview-legacy"],
   );
   assert.equal(store.countByApiKey("key-a"), 2);
+});
+
+test("capacity reservations are atomic per API key and roll back cleanly", () => {
+  const store = new SessionStore(60_000);
+
+  assert.equal(store.tryReserveCreation("key-a", 1), true);
+  assert.equal(store.tryReserveCreation("key-a", 1), false);
+  assert.equal(store.tryReserveCreation("key-b", 1), true);
+
+  store.releaseCreation("key-a");
+  assert.equal(store.tryReserveCreation("key-a", 1), true);
+
+  store.releaseCreation("key-a");
+  store.releaseCreation("key-b");
+});
+
+test("an installed session consumes the slot after its reservation is released", () => {
+  const store = new SessionStore(60_000);
+
+  assert.equal(store.tryReserveCreation("key-a", 1), true);
+  store.set(buildSession("preview-1", "key-a", "session-1"));
+  store.releaseCreation("key-a");
+
+  assert.equal(store.tryReserveCreation("key-a", 1), false);
 });

@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { validatePrDescription } from "./release-notes-lib.mjs";
+import {
+  isTrustedDependabotUpdate,
+  validatePrDescription,
+} from "./release-notes-lib.mjs";
 
 const eventPath = process.env["GITHUB_EVENT_PATH"];
 
@@ -18,9 +21,14 @@ if (!pr) {
   process.exit(0);
 }
 
+const isDependabotUpdate = isTrustedDependabotUpdate(payload);
+const validationBody = isDependabotUpdate
+  ? "## User-Facing Release Notes\n\nN/A - internal maintenance only\n\n## Type of Change\n\n- [x] Refactor / chore\n"
+  : pr.body ?? "";
+
 const result = validatePrDescription({
   title: pr.title ?? "",
-  body: pr.body ?? "",
+  body: validationBody,
 });
 
 if (result.errors.length > 0) {
@@ -41,7 +49,9 @@ if (result.errors.length > 0) {
   process.exit(1);
 }
 
-if (result.releaseNotes.internalOnly) {
+if (isDependabotUpdate) {
+  console.log("PR description validated: trusted Dependabot update treated as internal maintenance.");
+} else if (result.releaseNotes.internalOnly) {
   console.log("PR description validated: internal-only change documented.");
 } else {
   console.log(`PR description validated: ${result.releaseNotes.notes.length} user-facing release note bullet(s) found.`);

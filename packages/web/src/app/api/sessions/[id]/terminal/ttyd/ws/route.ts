@@ -12,5 +12,5 @@ export const runtime = "nodejs";
 
 export const GET = guardedSessionProxyParamRoute(
   ({ id }) => `/api/sessions/${encodeURIComponent(id ?? "")}/terminal/ttyd/ws`,
-  { role: "viewer" },
+  { role: "operator" },
 );

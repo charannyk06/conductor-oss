@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 import {
   assertSafeDirectNavigationTarget,
+  buildPinnedRequestOptions,
   buildPreviewNavigationCandidates,
   isLocalHost,
   isPrivateNetworkHostname,
   normalizeNavigationHostname,
   normalizeNavigationInput,
+  requestSafeDirectNavigation,
+  resolveSafeDirectNavigationTarget,
   resolvePreviewNavigationMode,
 } from "./security.js";
 
@@ -41,6 +45,7 @@ test("isLocalHost recognizes loopback names", () => {
 test("isPrivateNetworkHostname covers RFC4193 ULA and link-local", () => {
   assert.equal(isPrivateNetworkHostname("fe80::1"), true);
   assert.equal(isPrivateNetworkHostname("fd12::1"), true);
+  assert.equal(isPrivateNetworkHostname("ff02::1"), true);
   assert.equal(isPrivateNetworkHostname("2001:4860:4860::8888"), false);
 });
 
@@ -82,7 +87,148 @@ test("assertSafeDirectNavigationTarget skips checks when unsafe preview hosts ar
 });
 
 test("assertSafeDirectNavigationTarget allows public http when DNS resolves to public addresses", async () => {
-  await assertSafeDirectNavigationTarget("http://example.com/");
+  await assertSafeDirectNavigationTarget("http://example.com/", {
+    resolver: async () => [{ address: "93.184.216.34", family: 4 }],
+  });
+});
+
+test("direct navigation pins the validated address used by the connection", async () => {
+  let lookups = 0;
+  const target = await resolveSafeDirectNavigationTarget("https://preview.example/app", {
+    resolver: async () => {
+      lookups += 1;
+      return [{ address: "93.184.216.34", family: 4 }];
+    },
+  });
+  const options = buildPinnedRequestOptions(target, "GET", {});
+
+  assert.equal(lookups, 1);
+  assert.equal(options.hostname, "93.184.216.34");
+  assert.equal(options.servername, "preview.example");
+  assert.equal((options.headers as Record<string, string>).host, "preview.example");
+});
+
+test("direct navigation rejects mixed public and private DNS answers", async () => {
+  await assert.rejects(
+    () => resolveSafeDirectNavigationTarget("https://preview.example/app", {
+      resolver: async () => [
+        { address: "93.184.216.34", family: 4 },
+        { address: "127.0.0.1", family: 4 },
+      ],
+    }),
+    /private network address/,
+  );
+});
+
+test("the controlled direct request returns redirects for browser-side revalidation", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(302, { location: "http://10.0.0.1/private" });
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const response = await requestSafeDirectNavigation({
+      url: `http://127.0.0.1:${address.port}/redirect`,
+      method: "GET",
+      headers: {},
+      body: null,
+      timeoutMs: 1_000,
+      allowLoopback: true,
+    });
+
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.location, "http://10.0.0.1/private");
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("the controlled direct request enforces the session aggregate byte reservation while streaming", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/octet-stream" });
+    response.end(Buffer.alloc(16 * 1024, 7));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    let reserved = 0;
+    await assert.rejects(
+      requestSafeDirectNavigation({
+        url: `http://127.0.0.1:${address.port}/large`,
+        method: "GET",
+        headers: {},
+        body: null,
+        timeoutMs: 1_000,
+        allowLoopback: true,
+        reserveBufferedBytes: (bytes) => {
+          reserved += bytes;
+          if (reserved > 1_024) {
+            throw new Error("session aggregate byte budget exceeded");
+          }
+        },
+      }),
+      /session aggregate byte budget exceeded/,
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("the controlled direct request enforces an absolute deadline against slow-drip responses", async () => {
+  const intervals = new Set<NodeJS.Timeout>();
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/octet-stream" });
+    response.write(Buffer.from([1]));
+    const interval = setInterval(() => response.write(Buffer.from([1])), 20);
+    intervals.add(interval);
+    response.once("close", () => {
+      clearInterval(interval);
+      intervals.delete(interval);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const startedAt = Date.now();
+    await assert.rejects(
+      requestSafeDirectNavigation({
+        url: `http://127.0.0.1:${address.port}/drip`,
+        method: "GET",
+        headers: {},
+        body: null,
+        timeoutMs: 100,
+        allowLoopback: true,
+      }),
+      /timed out/,
+    );
+    assert.ok(Date.now() - startedAt < 1_000, "a continuously active socket must still expire");
+  } finally {
+    for (const interval of intervals) clearInterval(interval);
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
 });
 
 

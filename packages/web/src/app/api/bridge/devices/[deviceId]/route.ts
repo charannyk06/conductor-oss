@@ -12,7 +12,7 @@ export async function DELETE(request: Request, context: RouteContext): Promise<R
     request,
     `/api/devices/${encodeURIComponent(deviceId)}`,
     {
-      role: "viewer",
+      role: "operator",
       requireActionGuard: true,
     },
   );

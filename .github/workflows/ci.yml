@@ -47,7 +47,7 @@ jobs:
         run: cargo check --workspace
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
@@ -64,7 +64,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: bridge-cmd/go.mod
           cache-dependency-path: bridge-cmd/go.sum
@@ -75,6 +75,9 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Test
+        run: go test ./...
 
   frontend:
     name: Frontend (build, typecheck, test)
@@ -92,10 +95,16 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install preview-worker dependencies
+        run: bun install --cwd preview-worker --frozen-lockfile
+
       # Build + typecheck are the preview-confidence gate and do not require Vercel secrets.
-      # Build in dependency order: core → cli → web
+      # Build in dependency order: core → dispatcher/cli → web
       - name: Build core
         run: bun run --cwd packages/core build
+
+      - name: Build openclaw-dispatcher
+        run: bun run --cwd packages/openclaw-dispatcher build
 
       - name: Build CLI
         run: bun run --cwd packages/cli build
@@ -107,6 +116,9 @@ jobs:
       - name: Typecheck core
         run: bun run --cwd packages/core typecheck
 
+      - name: Typecheck openclaw-dispatcher
+        run: bun run --cwd packages/openclaw-dispatcher typecheck
+
       - name: Typecheck CLI
         run: bun run --cwd packages/cli typecheck
 
@@ -115,6 +127,9 @@ jobs:
 
       - name: Typecheck preview-worker
         run: bun run --cwd preview-worker typecheck
+
+      - name: Build preview-worker
+        run: bun run --cwd preview-worker build
 
       - name: Test core
         run: bun run --cwd packages/core test
@@ -130,3 +145,6 @@ jobs:
 
       - name: Test preview-worker
         run: bun run --cwd preview-worker test
+
+      - name: Test release tooling
+        run: node --test scripts/*.test.mjs

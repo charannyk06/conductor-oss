@@ -48,12 +48,12 @@ impl AgentKind {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_lowercase().as_str() {
             "claude" | "claude-code" => Self::ClaudeCode,
-            "codex" => Self::Codex,
-            "gemini" => Self::Gemini,
+            "codex" | "openai-codex" => Self::Codex,
+            "gemini" | "google-gemini" => Self::Gemini,
             "amp" => Self::Amp,
             "hermes" | "hermes-agent" => Self::Hermes,
             "cursor" | "cursor-cli" => Self::CursorCli,
-            "opencode" => Self::OpenCode,
+            "opencode" | "open-code" | "open_code" => Self::OpenCode,
             "openclaw" => Self::OpenClaw,
             "pi" | "pi-coding-agent" | "pi-agent" => Self::Pi,
             "droid" => Self::Droid,
@@ -454,6 +454,9 @@ mod tests {
         assert_eq!(AgentKind::parse("claude-code"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("claude"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("codex"), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("openai-codex"), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("google-gemini"), AgentKind::Gemini);
+        assert_eq!(AgentKind::parse("open-code"), AgentKind::OpenCode);
         assert_eq!(AgentKind::parse("hermes"), AgentKind::Hermes);
         assert_eq!(AgentKind::parse("hermes-agent"), AgentKind::Hermes);
         assert_eq!(AgentKind::parse("openclaw"), AgentKind::OpenClaw);

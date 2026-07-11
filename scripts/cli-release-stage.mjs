@@ -216,11 +216,11 @@ function ensureWebBundle(rootDir) {
   const publicDir = resolve(webDir, "public");
 
   if (!existsSync(standaloneDir)) {
-    throw new Error("Missing web standalone build at packages/web/.next/standalone. Run `pnpm build:release` first.");
+    throw new Error("Missing web standalone build at packages/web/.next/standalone. Run `bun run build:frontend` first.");
   }
 
   if (!existsSync(staticDir)) {
-    throw new Error("Missing web static assets at packages/web/.next/static. Run `pnpm build:release` first.");
+    throw new Error("Missing web static assets at packages/web/.next/static. Run `bun run build:frontend` first.");
   }
 
   return { standaloneDir, staticDir, publicDir };
@@ -247,7 +247,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
     const sourceManifest = readJson(join(sourceDir, "package.json"));
     const sourceDistDir = join(sourceDir, "dist");
     if (!existsSync(sourceDistDir)) {
-      throw new Error(`Missing build output for ${packageName} at ${sourceDistDir}. Run \`pnpm build:release\` first.`);
+      throw new Error(`Missing build output for ${packageName} at ${sourceDistDir}. Run \`bun run build:frontend\` first.`);
     }
 
     const packageStageDir = join(stagingRoot, ...packageName.split("/"));

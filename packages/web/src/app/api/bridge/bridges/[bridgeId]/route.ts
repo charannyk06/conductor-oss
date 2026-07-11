@@ -12,7 +12,7 @@ export async function DELETE(request: Request, context: RouteContext): Promise<R
     request,
     `/api/bridges/${encodeURIComponent(bridgeId)}`,
     {
-      role: "viewer",
+      role: "operator",
       requireActionGuard: true,
     },
   );

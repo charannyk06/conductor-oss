@@ -73,6 +73,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use terminal_hosts::TerminalHostRegistry;
@@ -196,6 +197,7 @@ pub struct AppState {
     dispatcher_runtimes: Mutex<HashMap<String, DispatcherRuntimeHandle>>,
     pub active_session_skills: Mutex<HashMap<String, Vec<String>>>,
     terminal_restore_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    kill_detached_children_on_drop: AtomicBool,
 }
 
 impl AppState {
@@ -238,6 +240,7 @@ impl AppState {
             dispatcher_runtimes: Mutex::new(HashMap::new()),
             active_session_skills: Mutex::new(HashMap::new()),
             terminal_restore_guards: Mutex::new(HashMap::new()),
+            kill_detached_children_on_drop: AtomicBool::new(cfg!(test)),
         });
         state.ensure_session_store();
         state.ensure_dispatcher_store();
@@ -248,6 +251,22 @@ impl AppState {
         state.load_board_collaboration_from_disk().await;
         state.start_session_flush_watchdog();
         state
+    }
+
+    /// Enable child-process RAII for external integration-test harnesses.
+    ///
+    /// Production keeps detached terminals alive across backend restarts.
+    /// Integration tests compile this crate without `cfg(test)`, so their
+    /// harness opts in explicitly to prevent test listeners and credentials
+    /// from surviving Tokio runtime teardown.
+    #[doc(hidden)]
+    pub fn enable_test_process_cleanup(&self) {
+        self.kill_detached_children_on_drop
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn kill_detached_children_on_drop(&self) -> bool {
+        self.kill_detached_children_on_drop.load(Ordering::Relaxed)
     }
 
     pub async fn discover_executors(self: &Arc<Self>) {

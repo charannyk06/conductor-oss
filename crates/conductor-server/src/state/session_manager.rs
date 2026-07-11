@@ -246,9 +246,9 @@ fn enforce_conversation_limit(session: &mut SessionRecord) {
 }
 
 fn project_defaults_to_skip_permissions(project: &conductor_core::config::ProjectConfig) -> bool {
-    !matches!(
+    matches!(
         project.agent_config.permissions.as_deref().map(str::trim),
-        Some("default")
+        Some("skip")
     )
 }
 
@@ -2983,25 +2983,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_skip_permissions_defaults_to_unsandboxed_when_project_does_not_override() {
+    fn resolve_skip_permissions_defaults_to_sandboxed_when_project_does_not_override() {
         let project = ProjectConfig::default();
 
-        assert!(project_defaults_to_skip_permissions(&project));
-        assert!(resolve_skip_permissions(None, &project));
-        assert!(resolve_skip_permissions(Some("default"), &project));
+        assert!(!project_defaults_to_skip_permissions(&project));
+        assert!(!resolve_skip_permissions(None, &project));
+        assert!(!resolve_skip_permissions(Some("default"), &project));
         assert!(!resolve_skip_permissions(Some("ask"), &project));
         assert!(!resolve_skip_permissions(Some("plan"), &project));
         assert!(resolve_skip_permissions(Some("auto"), &project));
     }
 
     #[test]
-    fn resolve_skip_permissions_respects_explicit_sandbox_modes() {
+    fn resolve_skip_permissions_respects_explicit_automatic_mode() {
         let mut project = ProjectConfig::default();
-        project.agent_config.permissions = Some("default".to_string());
+        project.agent_config.permissions = Some("skip".to_string());
 
-        assert!(!project_defaults_to_skip_permissions(&project));
-        assert!(!resolve_skip_permissions(None, &project));
-        assert!(!resolve_skip_permissions(Some("default"), &project));
+        assert!(project_defaults_to_skip_permissions(&project));
+        assert!(resolve_skip_permissions(None, &project));
+        assert!(resolve_skip_permissions(Some("default"), &project));
         assert!(!resolve_skip_permissions(Some("ask"), &project));
         assert!(!resolve_skip_permissions(Some("plan"), &project));
         assert!(resolve_skip_permissions(Some("auto"), &project));

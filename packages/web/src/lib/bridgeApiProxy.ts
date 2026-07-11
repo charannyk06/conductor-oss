@@ -41,11 +41,88 @@ export type BridgePreviewResponse = {
   bodyBase64?: string | null;
 };
 
+export type BridgePreviewReadOptions = {
+  maxResponseBytes?: number;
+  onResponseChunk?: (bytes: number) => void;
+  signal?: AbortSignal;
+};
+
 type BridgePreviewResponsePayload = {
   status?: unknown;
   headers?: unknown;
   body_base64?: unknown;
 };
+
+function previewAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Paired device preview response was aborted.");
+}
+
+async function readPreviewChunk<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return await operation();
+  if (signal.aborted) throw previewAbortError(signal);
+
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(previewAbortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation().then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function readBridgePreviewJson(
+  response: Response,
+  options: BridgePreviewReadOptions,
+): Promise<BridgePreviewResponse | { error?: string } | null> {
+  const maxResponseBytes = options.maxResponseBytes ?? Number.MAX_SAFE_INTEGER;
+  const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+  if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+    throw new Error("Paired device preview response exceeded its buffered-data safety limit.");
+  }
+  if (!response.body) return null;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await readPreviewChunk(
+        () => reader.read(),
+        options.signal,
+      );
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxResponseBytes) {
+        throw new Error("Paired device preview response exceeded its buffered-data safety limit.");
+      }
+      options.onResponseChunk?.(value.byteLength);
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
+  }
+
+  try {
+    return JSON.parse(chunks.join("")) as BridgePreviewResponse | { error?: string };
+  } catch {
+    return null;
+  }
+}
 
 function isJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -190,6 +267,7 @@ export async function requestBridgePreview(
   bridgeId: string,
   forwardedHeaders: HeadersInit,
   payload: BridgePreviewRequest,
+  readOptions: BridgePreviewReadOptions = {},
 ): Promise<BridgePreviewResponse> {
   const relayUrl = requireBridgeRelayUrl();
   const target = new URL(`/api/devices/${encodeURIComponent(bridgeId)}/preview`, relayUrl);
@@ -208,12 +286,10 @@ export async function requestBridgePreview(
     }),
     cache: "no-store",
     redirect: "manual",
+    signal: readOptions.signal,
   });
 
-  const body = await response.json().catch(() => null) as
-    | BridgePreviewResponse
-    | { error?: string }
-    | null;
+  const body = await readBridgePreviewJson(response, readOptions);
 
   if (!response.ok) {
     throw new Error(

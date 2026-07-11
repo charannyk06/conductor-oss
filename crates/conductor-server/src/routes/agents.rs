@@ -2276,7 +2276,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
     output.as_ref()?;
 
     // Try to find Claude binary to build its catalog
-    let claude_binary = which_command(&["claude", "claude-code", "cc"]).await;
+    let claude_binary = which_command(&["claude", "claude-code"]).await;
     let claude_catalog = if let Some(bp) = claude_binary {
         build_claude_runtime_model_catalog(&bp).await
     } else {
@@ -2312,7 +2312,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         .get("reasoningOptionsByAccess")
         .and_then(|r| r.get("pro"))
         .cloned()
-        .and_then(|v| if v.is_array() { Some(v) } else { None });
+        .filter(Value::is_array);
     let default_reasoning = claude
         .get("defaultReasoningByAccess")
         .and_then(|r| r.get("pro"))

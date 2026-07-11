@@ -18,7 +18,7 @@ User browser → Vercel app → Preview Worker (Contabo VPS)
 
 **Location:** `preview-worker/` directory in the conductor-oss repo
 
-**Tech stack:** Node.js + Fastify + puppeteer-core + cloudflared
+**Tech stack:** Node.js + TypeScript + Fastify + puppeteer-core + cloudflared
 
 **Docker image:** Based on `node:22-alpine`, installs Chrome/Chromium + cloudflared binary
 
@@ -29,19 +29,23 @@ User browser → Vercel app → Preview Worker (Contabo VPS)
 | POST | `/sessions` | Create preview session, returns `sessionId` |
 | POST | `/sessions/:id/command` | Run a command (connect, click, type, navigate, screenshot, dom) |
 | DELETE | `/sessions/:id` | Destroy session, close Chrome, close tunnel |
-| GET | `/health` | Health check |
+| GET | `/health` | Health check with `buildSha` deployment identity (`CONDUCTOR_BUILD_SHA`, default `unknown`) |
 
 **Session Lifecycle:**
 1. `POST /sessions` — launch Chrome, configure viewport/listeners, return sessionId
-2. For localhost URLs: create cloudflared tunnel, return tunnel URL
+2. For localhost URLs: create a temporary cloudflared quick tunnel and wait until it resolves and responds
 3. `POST /sessions/:id/command` — run commands, return result (screenshot as base64, DOM as JSON)
 4. `DELETE /sessions/:id` — close Chrome process, close cloudflared tunnel, remove session
 
 **Security:**
 - API key authentication via `Authorization: Bearer <key>` header
-- Private network blocking (reject navigation to RFC1918 addresses without tunnel)
+- Direct public navigation resolves DNS first, rejects private/special addresses, and connects to the validated IP so DNS cannot be rebound between validation and the request
+- Redirects and browser subrequests pass through the same validation path; localhost uses the tunnel path instead of direct worker-network access
+- WebSocket and other network-capable non-HTTP schemes are blocked below the page at the Chromium DevTools Protocol layer. Public `ws:`/`wss:` is intentionally fail-closed because it cannot reuse the preview worker's DNS-pinned HTTP client.
+- Each session permits at most 32 in-flight intercepted requests and 64 MiB of aggregate buffered request/response data; individual request bodies are capped at 8 MiB and responses at 25 MiB.
 - Session timeout: 10 minutes of inactivity → auto-destroy
-- Max sessions per API key: 5 concurrent
+- Max sessions per API key: 5 concurrent, including in-flight creation reservations
+- Session creation is idempotent for a supplied client session ID and concurrent commands are serialized per session
 - No external file system access, no child processes except Chrome/cloudflared
 
 **Commands (same interface as existing `PreviewCommandRequest`):**
@@ -101,7 +105,7 @@ services:
       - WORKER_API_KEY=${WORKER_API_KEY}
       - WORKER_SESSION_TIMEOUT_MS=600000
       - WORKER_MAX_SESSIONS=5
-      - CLOUDFLARED_TOKEN=${CLOUDFLARED_TOKEN}
+      - CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX=false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3099/health"]
@@ -117,12 +121,10 @@ When a user wants to preview `localhost:3000`:
 1. Worker receives `connect` command with `url: "http://localhost:3000"`
 2. Worker calls cloudflared to create a tunnel to `localhost:3000`
 3. Cloudflared returns a `*.trycloudflare.com` URL
-4. Worker updates Chrome's request interception to route `localhost` requests through the tunnel
+4. Worker rewrites loopback requests to the tunnel origin while preserving the requested path and query
 5. When session is destroyed, cloudflared tunnel is closed
 
-**Cloudflared authentication:** Uses a one-time token per tunnel creation (cloudflared tunnel --url approach, not persistent tunnels)
-
-**Security note:** cloudflared tunnel tokens are short-lived and authenticated. No persistent tunnel access.
+**Cloudflared mode:** Uses `cloudflared --url <local-origin>` quick tunnels. This mode does not use a persistent tunnel token. Treat the generated public URL as temporary bearer-like access and close the process when the session ends.
 
 ## File Structure
 
@@ -176,10 +178,10 @@ const CHROME_ARGS = [
   "--disable-translate",
   "--hide-scrollbars",
   "--mute-audio",
-  "--no-sandbox",  // needed for containerized environment
-  "--disable-setuid-sandbox",
 ];
 ```
+
+Chrome's sandbox remains enabled by default. Only deployments that provide an equivalent container/VM isolation boundary may explicitly set `CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX=true`, which adds `--no-sandbox` and `--disable-setuid-sandbox`.
 
 ## API Authentication
 
@@ -209,7 +211,7 @@ interface PreviewSession {
 }
 ```
 
-Session auto-destroyed after 10 minutes of inactivity (checked on each command).
+Expired sessions are destroyed by periodic cleanup and before capacity is allocated. Creation reserves capacity before Chrome launches, rolls back partially created browser/tunnel resources on failure, and coalesces concurrent requests with the same client session ID. Commands run under a per-session lock. A command timeout closes the affected session so an underlying Chrome operation cannot continue as untracked work.
 
 ## Error Responses
 
@@ -226,12 +228,12 @@ Session auto-destroyed after 10 minutes of inactivity (checked on each command).
 ## What NOT to build (out of scope)
 
 - Persistent storage of screenshots or DOM dumps
-- User accounts / multi-tenancy (single API key for now)
+- User accounts / multi-tenancy (the configured API key is the only tenant boundary)
 - Recording / playback of sessions
 - PDF export
 - Mobile device emulation
 - Browser profile management
-- Concurrent command queue (serial execution is fine for preview use)
+- Parallel command execution within one session (commands are deliberately serialized)
 
 ## Build/Deploy Steps
 

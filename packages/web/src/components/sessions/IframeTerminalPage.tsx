@@ -12,6 +12,11 @@ import {
 } from "@/components/sessions/sessionTerminalUtils";
 import { resolveNativeTerminalWebSocketUrl } from "@/components/sessions/terminal/terminalClientUrls";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
+import {
+  encodeTtydInputFrame,
+  encodeTtydResizeFrame,
+  TTYD_SERVER_COMMAND,
+} from "@/components/sessions/terminal/ttydProtocol";
 
 type ConnectionInfo = {
   interactive?: boolean;
@@ -19,6 +24,7 @@ type ConnectionInfo = {
   wsUrl?: string | null;
   wsProtocol?: string | null;
   ttydWsUrl?: string | null;
+  relayTtydWsUrl?: string | null;
   outputUrl?: string | null;
 };
 
@@ -41,10 +47,6 @@ type ControlMessage =
 
 const RECONNECT_MAX_DELAY_MS = 4_000;
 const MAX_RECONNECT_ATTEMPTS = 20;
-const CMD_OUTPUT = "0".charCodeAt(0);
-const CMD_SET_WINDOW_TITLE = "1".charCodeAt(0);
-const CMD_SET_PREFERENCES = "2".charCodeAt(0);
-const CMD_RESIZE = "1".charCodeAt(0);
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 const TTYD_READY_MESSAGE_TYPE = "conductor-ttyd-ready";
 
@@ -271,19 +273,11 @@ export function IframeTerminalPage({
   }, [bridgeId, sessionId]);
 
   const encodeResizeFrame = useCallback((cols: number, rows: number): Uint8Array<ArrayBuffer> => {
-    const payload = new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
-    const frame = new Uint8Array(payload.length + 1);
-    frame[0] = CMD_RESIZE;
-    frame.set(payload, 1);
-    return frame;
+    return encodeTtydResizeFrame(cols, rows);
   }, []);
 
   const encodeInputFrame = useCallback((data: string): Uint8Array<ArrayBuffer> => {
-    const payload = new TextEncoder().encode(data);
-    const frame = new Uint8Array(payload.length + 1);
-    frame[0] = CMD_OUTPUT;
-    frame.set(payload, 1);
-    return frame;
+    return encodeTtydInputFrame(data);
   }, []);
 
   const connect = useCallback(async () => {
@@ -316,7 +310,15 @@ export function IframeTerminalPage({
     }
 
     const resolvedInfo = info as ConnectionInfo;
-    const relayConnection = usesRelayTerminal ? await fetchRelayTerminalUrl() : null;
+    const providedRelayWsUrl = typeof resolvedInfo.relayTtydWsUrl === "string"
+      && resolvedInfo.relayTtydWsUrl.trim().length > 0
+      ? resolvedInfo.relayTtydWsUrl.trim()
+      : null;
+    const relayConnection = usesRelayTerminal
+      ? providedRelayWsUrl
+        ? { wsUrl: providedRelayWsUrl, wsProtocol: "tty" }
+        : await fetchRelayTerminalUrl()
+      : null;
     const directWsProtocol = typeof resolvedInfo.wsProtocol === "string" && resolvedInfo.wsProtocol.trim().length > 0
       ? resolvedInfo.wsProtocol.trim()
       : (typeof resolvedInfo.ttydWsUrl === "string" && resolvedInfo.ttydWsUrl.trim().length > 0 ? "tty" : null);
@@ -363,14 +365,14 @@ export function IframeTerminalPage({
             return;
           }
           switch (frame[0]) {
-            case CMD_OUTPUT: {
+            case TTYD_SERVER_COMMAND.output: {
               const text = decoderRef.current.decode(frame.slice(1), { stream: true });
               if (text.length > 0) {
                 terminalRef.current?.write(text);
               }
               return;
             }
-            case CMD_SET_WINDOW_TITLE: {
+            case TTYD_SERVER_COMMAND.setWindowTitle: {
               try {
                 const title = new TextDecoder().decode(frame.slice(1)).trim();
                 if (title) {
@@ -381,7 +383,7 @@ export function IframeTerminalPage({
               }
               return;
             }
-            case CMD_SET_PREFERENCES:
+            case TTYD_SERVER_COMMAND.setPreferences:
               return;
             default:
               return;

@@ -22,4 +22,6 @@ jobs:
 
       - name: Dependency Review
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
-        continue-on-error: true # GitHub may report this repo as unsupported until dependency graph is fully available
+        with:
+          fail-on-severity: high
+          warn-only: false

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { assertArtifactIntegrity } from "./release-workflow-lib.mjs";
+
 function parseArgs(argv) {
   const options = {
     packageName: "",
@@ -18,6 +20,12 @@ function parseArgs(argv) {
 
     if (arg === "--package") {
       options.packageName = argv[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--local-tarball") {
+      options.localTarball = argv[index + 1] ?? "";
       index += 1;
       continue;
     }
@@ -177,6 +185,9 @@ async function main() {
 
   try {
     const metadata = await waitForPublication(options);
+    if (options.localTarball) {
+      assertArtifactIntegrity(options.localTarball, metadata.dist?.integrity);
+    }
     const tarballPath = await downloadPublishedTarball({
       packageName: options.packageName,
       version: options.version,

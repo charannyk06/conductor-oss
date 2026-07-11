@@ -37,6 +37,7 @@ const TYPE_LABEL_TO_CATEGORY = new Map([
   ["breaking change", "Breaking Changes"],
   ["new feature", "New Features"],
   ["plugin addition / modification", "Plugin Updates"],
+  ["agent or integration addition / modification", "Plugin Updates"],
   ["bug fix", "Fixes"],
   ["documentation update", "Documentation"],
   ["refactor / chore", "Maintenance"],
@@ -264,6 +265,20 @@ export function titleHasCodingAgentAttribution(title) {
   return PR_TITLE_AGENT_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+export function isTrustedDependabotUpdate(payload) {
+  const pr = payload?.pull_request;
+  const repositoryFullName = payload?.repository?.full_name;
+  return pr?.user?.login === "dependabot[bot]"
+    && typeof repositoryFullName === "string"
+    && repositoryFullName.length > 0
+    && pr?.head?.repo?.full_name === repositoryFullName;
+}
+
+export function isDependabotAuthor(pr) {
+  const login = pr?.author?.login ?? pr?.user?.login;
+  return login === "dependabot[bot]" || login === "app/dependabot";
+}
+
 export function extractReleaseNotes(body) {
   const section = extractSection(body, [
     "User-Facing Release Notes",
@@ -389,7 +404,9 @@ export function buildReleaseEntry(pr) {
     category = "Improvements";
   }
 
-  const internalOnly = releaseNotes.internalOnly || (!releaseNotes.explicit && category === "Maintenance");
+  const internalOnly = isDependabotAuthor(pr)
+    || releaseNotes.internalOnly
+    || (!releaseNotes.explicit && category === "Maintenance");
 
   return {
     number: pr.number,

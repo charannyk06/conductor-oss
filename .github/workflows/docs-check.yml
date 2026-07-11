@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   validate-manifest:
+    name: Manifest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

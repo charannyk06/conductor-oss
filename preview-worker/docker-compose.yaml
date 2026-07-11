@@ -1,6 +1,9 @@
 services:
   preview-worker:
-    build: .
+    build:
+      context: .
+      args:
+        CONDUCTOR_BUILD_SHA: ${CONDUCTOR_BUILD_SHA:-unknown}
     ports:
       - "3099:3099"
     environment:
@@ -8,8 +11,8 @@ services:
       WORKER_API_KEY: ${WORKER_API_KEY}
       WORKER_SESSION_TIMEOUT_MS: 600000
       WORKER_MAX_SESSIONS: 5
-      CLOUDFLARED_TOKEN: ${CLOUDFLARED_TOKEN:-}
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium-browser
+      CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX: ${CONDUCTOR_PREVIEW_WORKER_DISABLE_SANDBOX:-false}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3099/health"]

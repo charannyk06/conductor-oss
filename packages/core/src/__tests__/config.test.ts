@@ -73,7 +73,7 @@ test("validateConfig sanitizes null optional project fields from mixed writers",
   assert.equal(config.projects["demo"]?.boardDir, undefined);
   assert.deepEqual(config.projects["demo"]?.scm, { plugin: "github" });
   assert.equal(config.projects["demo"]?.agent, undefined);
-  assert.equal(config.projects["demo"]?.agentConfig?.permissions, "skip");
+  assert.equal(config.projects["demo"]?.agentConfig?.permissions, "default");
   assert.equal(config.projects["demo"]?.agentConfig?.model, undefined);
   assert.equal(config.projects["demo"]?.agentConfig?.reasoningEffort, undefined);
 });
