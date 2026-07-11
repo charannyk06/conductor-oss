@@ -2312,7 +2312,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         .get("reasoningOptionsByAccess")
         .and_then(|r| r.get("pro"))
         .cloned()
-        .and_then(|v| if v.is_array() { Some(v) } else { None });
+        .filter(Value::is_array);
     let default_reasoning = claude
         .get("defaultReasoningByAccess")
         .and_then(|r| r.get("pro"))

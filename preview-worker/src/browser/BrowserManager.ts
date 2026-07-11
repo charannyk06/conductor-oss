@@ -1335,7 +1335,6 @@ export class BrowserManager {
           timeoutId = setTimeout(() => {
             reject(this.error(408, "Preview command timed out."));
           }, timeoutMs);
-          timeoutId.unref();
         }),
       ]);
     } finally {
