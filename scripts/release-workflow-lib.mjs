@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -38,6 +39,35 @@ export function execTarArchiveSync(
 ) {
   const invocation = tarArchiveInvocation(archivePath, beforeArchiveArgs, afterArchiveArgs);
   return execFileSync("tar", invocation.args, { ...options, cwd: invocation.cwd });
+}
+
+export function npmCliInvocation({
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+  npmExecPath = process.env.npm_execpath,
+  pathExists = existsSync,
+} = {}) {
+  if (platform !== "win32") {
+    return { command: "npm", argsPrefix: [] };
+  }
+
+  // npm is exposed as a .cmd shim on Windows, which cannot be executed by
+  // spawnSync without a shell. Invoke npm-cli.js with the current Node binary
+  // instead, keeping registry arguments out of shell parsing entirely.
+  const colocatedNpmCli = win32.join(
+    win32.dirname(nodeExecutable),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  const npmCli = [npmExecPath, colocatedNpmCli]
+    .filter((candidate) => typeof candidate === "string" && /(?:^|[\\/])npm-cli\.js$/i.test(candidate))
+    .find((candidate) => pathExists(candidate));
+  if (!npmCli) {
+    throw new Error(`unable to locate npm-cli.js for ${nodeExecutable}`);
+  }
+  return { command: nodeExecutable, argsPrefix: [npmCli] };
 }
 
 function compareStableVersions(left, right) {
