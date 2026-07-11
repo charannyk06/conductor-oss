@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { assertArtifactIntegrity } from "./release-workflow-lib.mjs";
+import {
+  assertArtifactIntegrity,
+  assertBundledDependencyVersionsInTarball,
+} from "./release-workflow-lib.mjs";
 
 function parseArgs(argv) {
   const options = {
     packageName: "",
+    requireBundledDependencies: [],
     version: "",
     requireFiles: [],
     timeoutMs: 600_000,
@@ -38,6 +42,12 @@ function parseArgs(argv) {
 
     if (arg === "--require-file") {
       options.requireFiles.push(argv[index + 1] ?? "");
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--require-bundled-dependency") {
+      options.requireBundledDependencies.push(argv[index + 1] ?? "");
       index += 1;
       continue;
     }
@@ -187,6 +197,11 @@ async function main() {
     const metadata = await waitForPublication(options);
     if (options.localTarball) {
       assertArtifactIntegrity(options.localTarball, metadata.dist?.integrity);
+      if (options.requireBundledDependencies.length > 0) {
+        assertBundledDependencyVersionsInTarball(options.localTarball, {
+          requiredDependencies: options.requireBundledDependencies,
+        });
+      }
     }
     const tarballPath = await downloadPublishedTarball({
       packageName: options.packageName,
@@ -194,6 +209,12 @@ async function main() {
       tarballUrl: metadata.dist.tarball,
       destinationDir: tempDir,
     });
+    assertArtifactIntegrity(tarballPath, metadata.dist?.integrity);
+    if (options.requireBundledDependencies.length > 0) {
+      assertBundledDependencyVersionsInTarball(tarballPath, {
+        requiredDependencies: options.requireBundledDependencies,
+      });
+    }
     unpackTarball(tarballPath, tempDir);
     verifyExtractedPackage({
       packageName: options.packageName,

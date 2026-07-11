@@ -8,9 +8,42 @@ import {
   isLoopbackHost,
   quoteWindowsCliArg,
   resolveDashboardPackageManager,
+  resolveDashboardRuntimeMode,
+  resolveDashboardWebMode,
   resolveLocalDashboardAuthEnv,
   resolveRustBackendLaunch,
 } from "../commands/start.js";
+
+test("dashboard runtime modes keep installed launchers on the standalone server", () => {
+  for (const webMode of ["auto", "dev", "production", "standalone"] as const) {
+    assert.equal(resolveDashboardRuntimeMode({
+      webMode,
+      isSourceCheckout: false,
+      hasNextBuild: true,
+      hasStandaloneServer: true,
+    }), "standalone");
+  }
+
+  assert.equal(resolveDashboardRuntimeMode({
+    webMode: "auto",
+    isSourceCheckout: true,
+    hasNextBuild: true,
+    hasStandaloneServer: true,
+  }), "dev");
+  assert.equal(resolveDashboardRuntimeMode({
+    webMode: "production",
+    isSourceCheckout: true,
+    hasNextBuild: true,
+    hasStandaloneServer: true,
+  }), "production");
+  assert.equal(resolveDashboardRuntimeMode({
+    webMode: "standalone",
+    isSourceCheckout: false,
+    hasNextBuild: true,
+    hasStandaloneServer: false,
+  }), null);
+  assert.equal(resolveDashboardWebMode("prod"), "production");
+});
 
 test("isLoopbackHost recognizes local-only bind hosts", () => {
   assert.equal(isLoopbackHost("127.0.0.1"), true);

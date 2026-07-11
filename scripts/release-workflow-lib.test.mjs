@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   assertArtifactIntegrity,
+  assertBundledDependencyVersions,
   calculateFileIntegrity,
   detectReleaseBump,
   highestStableRegistryVersion,
@@ -14,6 +15,41 @@ import {
   registryDownloadHeaders,
   resolveExistingArtifact,
 } from "./release-workflow-lib.mjs";
+
+test("bundled package identities match the parent release version", () => {
+  const packageManifest = {
+    name: "conductor-oss",
+    version: "1.2.3",
+    dependencies: { "@conductor-oss/core": "1.2.3" },
+    bundleDependencies: ["@conductor-oss/core"],
+  };
+  const bundledManifests = {
+    "@conductor-oss/core": { name: "@conductor-oss/core", version: "1.2.3" },
+  };
+
+  assert.deepEqual(
+    assertBundledDependencyVersions(packageManifest, bundledManifests),
+    ["@conductor-oss/core"],
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(
+      packageManifest,
+      { "@conductor-oss/core": { name: "@conductor-oss/core", version: "0.2.7" } },
+    ),
+    /has version 0\.2\.7; expected 1\.2\.3/,
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(
+      { ...packageManifest, dependencies: { "@conductor-oss/core": "workspace:\*" } },
+      bundledManifests,
+    ),
+    /must be declared at 1\.2\.3/,
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(packageManifest, {}),
+    /is missing from the installed package/,
+  );
+});
 
 test("highestStableRegistryVersion is strict and compares numeric semver parts", () => {
   assert.equal(highestStableRegistryVersion('["0.9.9","0.10.0","1.0.0-beta.1"]'), "0.10.0");
