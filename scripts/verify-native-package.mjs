@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { findCliNativeTargetById } from "./cli-native-packages.mjs";
-import { readPackageManifestFromTarball } from "./release-workflow-lib.mjs";
+import { execTarArchiveSync, readPackageManifestFromTarball } from "./release-workflow-lib.mjs";
 
 function parseArguments(argv) {
   const options = {};
@@ -54,7 +54,7 @@ for (const field of ["os", "cpu"]) {
 
 const extractDir = mkdtempSync(join(tmpdir(), `conductor-native-verify-${options.targetId}-`));
 try {
-  execFileSync("tar", ["-xzf", tarball, "-C", extractDir], { stdio: "pipe" });
+  execTarArchiveSync(tarball, ["-xzf"], ["-C", extractDir], { stdio: "pipe" });
   const binaryPath = join(extractDir, "package", "bin", target.binaryName);
   if (!existsSync(binaryPath)) {
     throw new Error(`native package is missing bin/${target.binaryName}`);
