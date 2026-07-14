@@ -1398,17 +1398,20 @@ try {
     execNpmCommandSync(
       NPM_EXECUTABLE,
       ["ls", "--all", "--omit=dev"],
-      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (error) {
-    const diagnostic = error?.stderr?.toString().trim() || error?.message || String(error);
+    const diagnostic = error?.stdout?.toString().trim()
+      || error?.stderr?.toString().trim()
+      || error?.message
+      || String(error);
     fail(`installed npm dependency graph is invalid: ${diagnostic}`);
   }
   try {
     execNpmCommandSync(
       NPM_EXECUTABLE,
       ["audit", "--omit=dev", "--audit-level=low"],
-      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (error) {
     const diagnostic = error?.stdout?.toString().trim()

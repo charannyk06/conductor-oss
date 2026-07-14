@@ -55,28 +55,37 @@ jobs:
               exit 1
               ;;
           esac
-          echo "scan_mode=$scan_mode" >> "$GITHUB_OUTPUT"
+          printf 'scan_mode=%s\n' "$scan_mode" >> "$GITHUB_OUTPUT"
 
           target_url="${INPUT_TARGET_URL:-}"
-          if [ -n "$target_url" ] && ! printf '%s' "$target_url" | grep -Eq '^https?://'; then
-            echo "::error::target_url must start with http:// or https:// when provided."
-            exit 1
+          if [ -n "$target_url" ]; then
+            case "$target_url" in
+              *$'\r'*|*$'\n'*)
+                echo "::error::target_url must be a single line when provided."
+                exit 1
+                ;;
+              http://*|https://*) ;;
+              *)
+                echo "::error::target_url must start with http:// or https:// when provided."
+                exit 1
+                ;;
+            esac
           fi
-          echo "target_url=$target_url" >> "$GITHUB_OUTPUT"
+          printf 'target_url=%s\n' "$target_url" >> "$GITHUB_OUTPUT"
 
           if [ -z "${STRIX_LLM:-}" ]; then
-            echo "run_scan=false" >> "$GITHUB_OUTPUT"
+            printf 'run_scan=%s\n' "false" >> "$GITHUB_OUTPUT"
             echo "::error::STRIX_LLM is required; refusing to report a successful security workflow without a scan."
             exit 1
           fi
 
           if [ -z "${LLM_API_KEY:-}" ]; then
-            echo "run_scan=false" >> "$GITHUB_OUTPUT"
+            printf 'run_scan=%s\n' "false" >> "$GITHUB_OUTPUT"
             echo "::error::LLM_API_KEY is required for the configured Strix model; refusing to start the scan."
             exit 1
           fi
 
-          echo "run_scan=true" >> "$GITHUB_OUTPUT"
+          printf 'run_scan=%s\n' "true" >> "$GITHUB_OUTPUT"
 
   security-scan:
     name: Strix security scan

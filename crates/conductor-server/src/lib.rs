@@ -222,7 +222,7 @@ fn ensure_terminal_token_secret(workspace_path: &Path) -> Result<()> {
 
     let secret = if secret_path.exists() {
         harden_terminal_secret_permissions(&secret_path)?;
-        let existing = fs::read_to_string(&secret_path).unwrap_or_default();
+        let existing = fs::read_to_string(&secret_path)?;
         let trimmed = existing.trim();
         if trimmed.is_empty() {
             let generated = Uuid::new_v4().to_string();
