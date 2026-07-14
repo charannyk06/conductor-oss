@@ -1368,6 +1368,10 @@ export interface UserPreferences {
   markdownEditor?: string;
   /** Local root path for the markdown editor's notes workspace or vault. */
   markdownEditorPath?: string;
+  /** Extra absolute roots that stay visible in the filesystem picker. */
+  filesystemBrowseRoots?: string[];
+  /** Allow operator or admin sessions to browse the full local home directory. */
+  allowHomeBrowse?: boolean;
   /** Preferred account/access mode used to filter agent model choices in the UI. */
   modelAccess?: ModelAccessPreferences;
   notifications: NotificationPreferences;

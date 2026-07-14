@@ -80,6 +80,7 @@ struct PreferencesBody {
     markdown_editor: Option<String>,
     markdown_editor_path: Option<String>,
     filesystem_browse_roots: Option<Vec<String>>,
+    allow_home_browse: Option<bool>,
     notifications: Option<NotificationsBody>,
     model_access: Option<HashMap<String, String>>,
 }
@@ -158,6 +159,7 @@ async fn update_preferences(
         filesystem_browse_roots: body
             .filesystem_browse_roots
             .unwrap_or(current.filesystem_browse_roots),
+        allow_home_browse: body.allow_home_browse.unwrap_or(current.allow_home_browse),
         model_access: merge_model_access_preferences(
             &current.model_access,
             body.model_access.as_ref(),

@@ -1019,20 +1019,28 @@ mod tests {
         .await
         .expect("headless process should spawn with clean env");
 
-        let first = timeout(Duration::from_secs(5), handle.output_rx.recv())
-            .await
-            .expect("timed out waiting for env report")
-            .expect("output channel closed before env report");
-        let second = timeout(Duration::from_secs(5), handle.output_rx.recv())
-            .await
-            .expect("timed out waiting for completion")
-            .expect("output channel closed before completion");
+        let mut env_json = None;
+        let mut completed = None;
+
+        for _ in 0..4 {
+            let output = timeout(Duration::from_secs(5), handle.output_rx.recv())
+                .await
+                .expect("timed out waiting for process output")
+                .expect("output channel closed before completion");
+            match output {
+                ExecutorOutput::Stdout(stdout) => env_json = Some(stdout),
+                ExecutorOutput::Completed { exit_code } => completed = Some(exit_code),
+                ExecutorOutput::Stderr(_) => {}
+                other => panic!("unexpected process output while reading env report: {other:?}"),
+            }
+            if env_json.is_some() && completed.is_some() {
+                break;
+            }
+        }
 
         std::env::remove_var(noisy_key);
 
-        let ExecutorOutput::Stdout(env_json) = first else {
-            panic!("expected stdout env report, got {first:?}");
-        };
+        let env_json = env_json.expect("expected stdout env report before process completion");
         let env_report: serde_json::Value =
             serde_json::from_str(&env_json).expect("env report should parse");
 
@@ -1045,8 +1053,8 @@ mod tests {
             "clean-env spawn should not inherit parent env noise: {env_report:?}"
         );
         assert!(
-            matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
-            "expected completion after env report, got {second:?}"
+            completed == Some(0),
+            "expected completion after env report, got {completed:?}"
         );
     }
 

@@ -18,6 +18,7 @@ import {
   findCliNativeTargetById,
   resolveHostCliNativeTargetId,
 } from "./cli-native-packages.mjs";
+import { execNpmCommandSync } from "./npm-exec.mjs";
 import {
   assertBundledDependencyVersions,
   readPackageManifestFromTarball,
@@ -1302,15 +1303,13 @@ try {
   });
   tempDirs.push(nativeStageDir);
 
-  execFileSync(NPM_EXECUTABLE, ["init", "-y"], {
+  execNpmCommandSync(NPM_EXECUTABLE, ["init", "-y"], {
     cwd: installDir,
     stdio: "ignore",
-    shell: true,
   });
-  execFileSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, tarballPath, nativeStageDir], {
+  execNpmCommandSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, tarballPath, nativeStageDir], {
     cwd: installDir,
     stdio: "inherit",
-    shell: true,
   });
   const installedCliRoot = join(installDir, "node_modules", "conductor-oss");
   const installedCliManifest = JSON.parse(readTextFile(join(installedCliRoot, "package.json")));
@@ -1396,20 +1395,20 @@ try {
   }
   assertBundledDependencyVersions(installedCliManifest, bundledManifests);
   try {
-    execFileSync(
+    execNpmCommandSync(
       NPM_EXECUTABLE,
       ["ls", "--all", "--omit=dev"],
-      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], shell: true },
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
     );
   } catch (error) {
     const diagnostic = error?.stderr?.toString().trim() || error?.message || String(error);
     fail(`installed npm dependency graph is invalid: ${diagnostic}`);
   }
   try {
-    execFileSync(
+    execNpmCommandSync(
       NPM_EXECUTABLE,
       ["audit", "--omit=dev", "--audit-level=low"],
-      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"], shell: true },
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "ignore", "pipe"] },
     );
   } catch (error) {
     const diagnostic = error?.stdout?.toString().trim()

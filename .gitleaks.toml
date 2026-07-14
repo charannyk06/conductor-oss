@@ -1,0 +1,28 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Reviewed Clerk test placeholders"
+paths = [
+  '''packages/web/src/lib/auth.test.ts''',
+  '''packages/web/src/lib/clerkConfig.test.ts''',
+]
+targetRules = ['''generic-api-key''']
+
+[[allowlists]]
+description = "Reviewed static ttyd frontend bundle false positives"
+paths = [
+  '''crates/conductor-server/src/routes/ttyd_frontend_v1.7.7.html''',
+  '''packages/web/src/lib/ttyd_frontend_v1.7.7.html''',
+]
+targetRules = ['''generic-api-key''']
+
+[[allowlists]]
+description = "Reviewed API label copy false positive"
+paths = ['''packages/core/src/types.ts''']
+targetRules = ['''generic-api-key''']
+
+[[allowlists]]
+description = "Reviewed ephemeral test key generation path"
+paths = ['''crates/conductor-server/src/routes/config.rs''']
+targetRules = ['''private-key''']

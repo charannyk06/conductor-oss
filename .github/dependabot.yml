@@ -9,6 +9,8 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       compatible-minor-and-patch:
         update-types:
@@ -25,6 +27,8 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       compatible-minor-and-patch:
         update-types:
@@ -41,6 +45,8 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       compatible-minor-and-patch:
         update-types:
@@ -57,6 +63,8 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
 
   # Strix scanner requirements used by CI
   - package-ecosystem: pip
@@ -66,6 +74,8 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
 
   # GitHub Actions
   - package-ecosystem: github-actions
@@ -75,3 +85,5 @@ updates:
       day: monday
       time: "08:00"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
