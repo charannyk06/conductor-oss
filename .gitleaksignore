@@ -1,0 +1,3 @@
+# Synthetic runtime-generated Cloudflare Access private-key test fixture.
+# Exact historical Gitleaks fingerprint, not a path- or rule-level suppression.
+d85d15704e5c12191398cbafed900c952fc88032:crates/conductor-server/src/routes/config.rs:private-key:1486

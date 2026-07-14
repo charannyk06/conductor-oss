@@ -1483,7 +1483,7 @@ mod tests {
         // committed private key material in the repository.
         let temp_dir =
             std::env::temp_dir().join(format!("conductor-cf-test-key-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_dir).unwrap();
+        fs::create_dir_all(&temp_dir).unwrap(); // gitleaks:allow test-only runtime-generated private-key fixture
         let private_key_path = temp_dir.join("private.pem");
 
         let generate = StdCommand::new("openssl")

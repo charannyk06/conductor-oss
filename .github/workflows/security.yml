@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Gitleaks
-        run: go install github.com/gitleaks/gitleaks/v8@v8.24.2
+        run: go install github.com/zricethezav/gitleaks/v8@v8.24.2
 
       - name: Gitleaks full-history scan
         run: ~/go/bin/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
