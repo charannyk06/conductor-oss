@@ -6,14 +6,101 @@ import test from "node:test";
 
 import {
   assertArtifactIntegrity,
+  assertBundledDependencyVersions,
   calculateFileIntegrity,
   detectReleaseBump,
   highestStableRegistryVersion,
   isNpmNotFound,
+  npmCliInvocation,
   parseNpmDistMetadata,
   registryDownloadHeaders,
   resolveExistingArtifact,
+  tarArchiveInvocation,
 } from "./release-workflow-lib.mjs";
+
+test("npm CLI invocation bypasses Windows command shims without a shell", () => {
+  const nodeExecutable = "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\node.exe";
+  const npmCli = "C:\\hostedtoolcache\\windows\\node\\22.23.1\\x64\\node_modules\\npm\\bin\\npm-cli.js";
+  assert.deepEqual(
+    npmCliInvocation({
+      platform: "win32",
+      nodeExecutable,
+      npmExecPath: undefined,
+      pathExists: (candidate) => candidate === npmCli,
+    }),
+    { command: nodeExecutable, argsPrefix: [npmCli] },
+  );
+  assert.deepEqual(npmCliInvocation({ platform: "linux" }), {
+    command: "npm",
+    argsPrefix: [],
+  });
+  assert.throws(
+    () => npmCliInvocation({
+      platform: "win32",
+      nodeExecutable,
+      npmExecPath: "C:\\Program Files\\nodejs\\npm.cmd",
+      pathExists: () => false,
+    }),
+    /unable to locate npm-cli\.js/,
+  );
+});
+
+test("tar commands localize Windows drive-letter archives for GNU tar and bsdtar", () => {
+  assert.deepEqual(
+    tarArchiveInvocation(
+      "D:\\a\\conductor-oss\\package.tgz",
+      ["-xOf"],
+      ["package/package.json"],
+      "win32",
+    ),
+    {
+      args: ["-xOf", "package.tgz", "package/package.json"],
+      cwd: "D:\\a\\conductor-oss",
+    },
+  );
+  assert.deepEqual(
+    tarArchiveInvocation("/tmp/conductor/package.tgz", ["-xzf"], ["-C", "/tmp/out"], "darwin"),
+    {
+      args: ["-xzf", "package.tgz", "-C", "/tmp/out"],
+      cwd: "/tmp/conductor",
+    },
+  );
+});
+
+test("bundled package identities match the parent release version", () => {
+  const packageManifest = {
+    name: "conductor-oss",
+    version: "1.2.3",
+    dependencies: { "@conductor-oss/core": "1.2.3" },
+    bundleDependencies: ["@conductor-oss/core"],
+  };
+  const bundledManifests = {
+    "@conductor-oss/core": { name: "@conductor-oss/core", version: "1.2.3" },
+  };
+
+  assert.deepEqual(
+    assertBundledDependencyVersions(packageManifest, bundledManifests),
+    ["@conductor-oss/core"],
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(
+      packageManifest,
+      { "@conductor-oss/core": { name: "@conductor-oss/core", version: "0.2.7" } },
+    ),
+    /has version 0\.2\.7; expected 1\.2\.3/,
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(
+      { ...packageManifest, dependencies: { "@conductor-oss/core": "workspace:\*" } },
+      bundledManifests,
+    ),
+    /must be declared at 1\.2\.3/,
+  );
+  assert.throws(
+    () => assertBundledDependencyVersions(packageManifest, {}),
+    /is missing from the installed package/,
+  );
+});
 
 test("highestStableRegistryVersion is strict and compares numeric semver parts", () => {
   assert.equal(highestStableRegistryVersion('["0.9.9","0.10.0","1.0.0-beta.1"]'), "0.10.0");

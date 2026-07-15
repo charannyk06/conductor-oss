@@ -34,22 +34,58 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_scan: ${{ steps.config.outputs.run_scan }}
+      scan_mode: ${{ steps.config.outputs.scan_mode }}
+      target_url: ${{ steps.config.outputs.target_url }}
     steps:
       - name: Check scanner configuration
         id: config
         env:
           STRIX_LLM: ${{ secrets.STRIX_LLM }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          INPUT_SCAN_MODE: ${{ github.event.inputs.scan_mode }}
+          INPUT_TARGET_URL: ${{ github.event.inputs.target_url }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${STRIX_LLM:-}" ]; then
-            echo "run_scan=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          scan_mode="${INPUT_SCAN_MODE:-quick}"
+          case "$scan_mode" in
+            quick|standard|deep) ;;
+            *)
+              echo "::error::Invalid scan_mode '$scan_mode'. Expected quick, standard, or deep."
+              exit 1
+              ;;
+          esac
+          printf 'scan_mode=%s\n' "$scan_mode" >> "$GITHUB_OUTPUT"
+
+          target_url="${INPUT_TARGET_URL:-}"
+          if [ -n "$target_url" ]; then
+            case "$target_url" in
+              *$'\r'*|*$'\n'*)
+                echo "::error::target_url must be a single line when provided."
+                exit 1
+                ;;
+              http://*|https://*) ;;
+              *)
+                echo "::error::target_url must start with http:// or https:// when provided."
+                exit 1
+                ;;
+            esac
+          fi
+          printf 'target_url=%s\n' "$target_url" >> "$GITHUB_OUTPUT"
+
+          if [ -z "${STRIX_LLM:-}" ]; then
+            printf 'run_scan=%s\n' "false" >> "$GITHUB_OUTPUT"
+            echo "::error::STRIX_LLM is required; refusing to report a successful security workflow without a scan."
+            exit 1
           fi
 
-          echo "run_scan=false" >> "$GITHUB_OUTPUT"
-          echo "::error::STRIX_LLM is required; refusing to report a successful security workflow without a scan."
-          exit 1
+          if [ -z "${LLM_API_KEY:-}" ]; then
+            printf 'run_scan=%s\n' "false" >> "$GITHUB_OUTPUT"
+            echo "::error::LLM_API_KEY is required for the configured Strix model; refusing to start the scan."
+            exit 1
+          fi
+
+          printf 'run_scan=%s\n' "true" >> "$GITHUB_OUTPUT"
 
   security-scan:
     name: Strix security scan
@@ -79,8 +115,8 @@ jobs:
         env:
           STRIX_LLM: ${{ secrets.STRIX_LLM }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          TARGET_URL: ${{ inputs.target_url }}
-          SCAN_MODE: ${{ inputs.scan_mode || 'quick' }}
+          TARGET_URL: ${{ needs.preflight.outputs.target_url }}
+          SCAN_MODE: ${{ needs.preflight.outputs.scan_mode }}
         run: |
           set -uo pipefail
           status=0

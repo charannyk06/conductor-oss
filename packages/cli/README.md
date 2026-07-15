@@ -4,6 +4,10 @@
 
 It starts the local dashboard and Rust backend, scaffolds `conductor.yaml` and `CONDUCTOR.md`, launches agent sessions, and powers the bridge setup flow for paired-device access.
 
+The published launcher requires Node.js `>= 20.9.0`. Prebuilt native backends
+are included for macOS (Apple Silicon and Intel), Linux x64, and Windows x64;
+other platforms require a source build.
+
 ## Choose the right setup
 
 ### Local dashboard on the same machine

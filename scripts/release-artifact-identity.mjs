@@ -8,8 +8,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import {
   assertArtifactIntegrity,
+  assertBundledDependencyVersionsInTarball,
   assertTarballFiles,
   isNpmNotFound,
+  npmCliInvocation,
   parseNpmDistMetadata,
   readPackageManifestFromTarball,
   registryDownloadHeaders,
@@ -21,6 +23,7 @@ function parseArguments(argv) {
     allowMissing: false,
     onExisting: "verify",
     registry: "https://registry.npmjs.org",
+    requireBundledDependencies: [],
     requireFiles: [],
     waitMs: 0,
   };
@@ -36,6 +39,8 @@ function parseArguments(argv) {
       options.onExisting = argv[++index];
     } else if (argument === "--require-file") {
       options.requireFiles.push(argv[++index]);
+    } else if (argument === "--require-bundled-dependency") {
+      options.requireBundledDependencies.push(argv[++index]);
     } else if (argument === "--wait-ms") {
       options.waitMs = Number(argv[++index]);
     } else {
@@ -61,15 +66,18 @@ function parseArguments(argv) {
 }
 
 function queryDist(packageName, version, registry) {
+  const npm = npmCliInvocation();
   const result = spawnSync(
-    "npm",
-    ["view", `${packageName}@${version}`, "dist", "--json", "--registry", registry],
+    npm.command,
+    [...npm.argsPrefix, "view", `${packageName}@${version}`, "dist", "--json", "--registry", registry],
     { encoding: "utf8", env: process.env },
   );
   if (result.status === 0) {
     return { status: "found", metadata: parseNpmDistMetadata(result.stdout) };
   }
-  const diagnostic = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const diagnostic = [result.error?.message, result.stdout, result.stderr]
+    .filter(Boolean)
+    .join("\n");
   if (isNpmNotFound(diagnostic)) {
     return { status: "missing" };
   }
@@ -95,7 +103,11 @@ async function downloadCanonicalTarball(metadata, destination, registry) {
 
 async function main() {
   const options = parseArguments(process.argv.slice(2));
-  const expectedManifest = readPackageManifestFromTarball(options.tarball);
+  const expectedManifest = options.requireBundledDependencies.length > 0
+    ? assertBundledDependencyVersionsInTarball(options.tarball, {
+      requiredDependencies: options.requireBundledDependencies,
+    })
+    : readPackageManifestFromTarball(options.tarball);
   assertTarballFiles(options.tarball, options.requireFiles);
   const startedAt = Date.now();
 
@@ -146,6 +158,11 @@ async function main() {
         throw new Error("canonical npm tarball package identity does not match the release artifact");
       }
       assertTarballFiles(canonicalPath, options.requireFiles);
+      if (options.requireBundledDependencies.length > 0) {
+        assertBundledDependencyVersionsInTarball(canonicalPath, {
+          requiredDependencies: options.requireBundledDependencies,
+        });
+      }
       copyFileSync(canonicalPath, options.tarball);
     } finally {
       rmSync(directory, { recursive: true, force: true });

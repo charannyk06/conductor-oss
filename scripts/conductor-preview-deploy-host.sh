@@ -147,6 +147,8 @@ run_docker run -d \
   --read-only \
   --security-opt no-new-privileges:true \
   --cap-drop ALL \
+  --cap-add SYS_ADMIN \
+  --cap-add SYS_CHROOT \
   --pids-limit 512 \
   --memory 4g \
   --cpus 2 \

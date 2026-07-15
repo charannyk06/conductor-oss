@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execNpmCommandSync } from "./npm-exec.mjs";
 
 const NPM_EXECUTABLE = "npm";
 
@@ -139,10 +139,9 @@ export function packCliNativeReleasePackage({
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 
-  const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
+  const tarballName = execNpmCommandSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
-    shell: true,
   }).trim();
 
   return {

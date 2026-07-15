@@ -119,12 +119,26 @@ jobs:
 
           echo "Tag: $tag_ver | Package: $pkg_ver | npm-highest: $npm_highest"
 
-          base=$(node -e "
-            const vs=['$tag_ver','$pkg_ver','$npm_highest'];
-            const p=v=>v.split('.').map(Number);
-            vs.sort((a,b)=>{const pa=p(a),pb=p(b);for(let i=0;i<3;i++)if((pa[i]||0)!==(pb[i]||0))return(pa[i]||0)-(pb[i]||0);return 0});
-            console.log(vs[vs.length-1]);
-          ")
+          base=$(TAG_VERSION="$tag_ver" PACKAGE_VERSION="$pkg_ver" NPM_HIGHEST="$npm_highest" node <<'NODE'
+          const versions = [
+            process.env.TAG_VERSION,
+            process.env.PACKAGE_VERSION,
+            process.env.NPM_HIGHEST,
+          ];
+          const parse = (version) => version.split('.').map(Number);
+          versions.sort((left, right) => {
+            const leftParts = parse(left);
+            const rightParts = parse(right);
+            for (let index = 0; index < 3; index += 1) {
+              if ((leftParts[index] || 0) !== (rightParts[index] || 0)) {
+                return (leftParts[index] || 0) - (rightParts[index] || 0);
+              }
+            }
+            return 0;
+          });
+          console.log(versions.at(-1));
+          NODE
+          )
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             bump="${{ inputs.version_type }}"
@@ -137,12 +151,20 @@ jobs:
             bump=$(node scripts/release-version.mjs bump < /tmp/release-commits)
           fi
 
-          next=$(node -e "
-            const [M,m,p]='$base'.split('.').map(Number);
-            if('$bump'==='major')console.log((M+1)+'.0.0');
-            else if('$bump'==='minor')console.log(M+'.'+(m+1)+'.0');
-            else console.log(M+'.'+m+'.'+(p+1));
-          ")
+          next=$(BASE_VERSION="$base" BUMP_KIND="$bump" node <<'NODE'
+          const [major, minor, patch] = process.env.BASE_VERSION.split('.').map(Number);
+          switch (process.env.BUMP_KIND) {
+            case 'major':
+              console.log(`${major + 1}.0.0`);
+              break;
+            case 'minor':
+              console.log(`${major}.${minor + 1}.0`);
+              break;
+            default:
+              console.log(`${major}.${minor}.${patch + 1}`);
+          }
+          NODE
+          )
 
           echo "Bump: $bump | $base -> $next"
           echo "new_version=$next" >> "$GITHUB_OUTPUT"
@@ -410,6 +432,32 @@ jobs:
             --pack-destination .release-native | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve native npm artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.version.outputs.recovering }}" = true ]; then
+            existing_mode=canonicalize
+          else
+            existing_mode=reject
+          fi
+          required_file=bin/conductor
+          if [ "${{ matrix.id }}" = win32-x64 ]; then
+            required_file=bin/conductor.exe
+          fi
+          node scripts/release-artifact-identity.mjs \
+            --tarball "${{ steps.pack.outputs.tarball_path }}" \
+            --allow-missing \
+            --on-existing "$existing_mode" \
+            --require-file "$required_file"
+
+      - name: Verify packed native artifact
+        run: >-
+          node scripts/verify-native-package.mjs
+          --tarball "${{ steps.pack.outputs.tarball_path }}"
+          --target "${{ matrix.id }}"
+          --version "${{ needs.version.outputs.new_version }}"
+
       - name: Upload native tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -558,11 +606,8 @@ jobs:
             --publish-registry https://npm.pkg.github.com | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Verify packaged CLI
-        run: node scripts/verify-cli-package.mjs
+      - name: Install tmux and ttyd
+        run: sudo apt-get update && sudo apt-get install -y tmux ttyd
 
       - name: Download native tarballs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -585,6 +630,7 @@ jobs:
             --tarball "${{ steps.pack.outputs.tarball_path }}" \
             --allow-missing \
             --on-existing "$existing_mode" \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
 
@@ -597,9 +643,12 @@ jobs:
             node scripts/release-artifact-identity.mjs \
               --tarball "$tarball" \
               --allow-missing \
-              --on-existing "$existing_mode" \
+              --on-existing verify \
               --require-file "$required_file"
           done
+
+      - name: Verify packaged CLI
+        run: node scripts/verify-cli-package.mjs --tarball "${{ steps.pack.outputs.tarball_path }}"
 
       - name: Generate release notes
         env:
@@ -686,8 +735,15 @@ jobs:
           set -euo pipefail
           cli_tarball=""
           github_tarball=""
+          expected_version="${{ needs.version.outputs.new_version }}"
           for tarball in .release-artifacts/*.tgz; do
-            package_name=$(tar -xOf "$tarball" package/package.json | jq -r '.name')
+            package_json=$(tar -xOf "$tarball" package/package.json)
+            package_name=$(jq -r '.name' <<< "$package_json")
+            package_version=$(jq -r '.version' <<< "$package_json")
+            if [ "$package_version" != "$expected_version" ]; then
+              echo "::error::CLI artifact $package_name has version $package_version, expected $expected_version."
+              exit 1
+            fi
             case "$package_name" in
               conductor-oss) cli_tarball="$tarball" ;;
               @charannyk06/conductor-oss) github_tarball="$tarball" ;;
@@ -700,6 +756,35 @@ jobs:
           fi
           echo "CLI_TARBALL=$cli_tarball" >> "$GITHUB_ENV"
           echo "GITHUB_TARBALL=$github_tarball" >> "$GITHUB_ENV"
+
+          declare -A native_packages=()
+          for tarball in .release-native/*.tgz; do
+            package_json=$(tar -xOf "$tarball" package/package.json)
+            package_name=$(jq -r '.name' <<< "$package_json")
+            package_version=$(jq -r '.version' <<< "$package_json")
+            case "$package_name" in
+              conductor-oss-native-darwin-universal|conductor-oss-native-linux-x64|conductor-oss-native-win32-x64) ;;
+              *) echo "::error::Unexpected native artifact package $package_name"; exit 1 ;;
+            esac
+            if [ "${native_packages[$package_name]+present}" = present ]; then
+              echo "::error::Duplicate native artifact package $package_name"
+              exit 1
+            fi
+            if [ "$package_version" != "$expected_version" ]; then
+              echo "::error::Native artifact $package_name has version $package_version, expected $expected_version."
+              exit 1
+            fi
+            native_packages[$package_name]=present
+          done
+          for package_name in \
+            conductor-oss-native-darwin-universal \
+            conductor-oss-native-linux-x64 \
+            conductor-oss-native-win32-x64; do
+            if [ "${native_packages[$package_name]+present}" != present ]; then
+              echo "::error::Release bundle is missing native artifact $package_name."
+              exit 1
+            fi
+          done
 
           verify_dir=$(mktemp -d)
           cp "$cli_tarball" .release-native/*.tgz \
@@ -728,6 +813,7 @@ jobs:
             --tarball "$CLI_TARBALL" \
             --allow-missing \
             --on-existing "$existing_mode" \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
           for tarball in .release-native/*.tgz; do
@@ -766,8 +852,16 @@ jobs:
             --registry https://npm.pkg.github.com \
             --allow-missing \
             --on-existing "$existing_mode" \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
+
+      - name: Verify public and GitHub CLI artifact equivalence
+        run: >-
+          node scripts/verify-cli-artifact-equivalence.mjs
+          --public-tarball "$CLI_TARBALL"
+          --github-tarball "$GITHUB_TARBALL"
+          --version "${{ needs.version.outputs.new_version }}"
 
       - name: Attest release provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
@@ -889,6 +983,7 @@ jobs:
           status=$(node scripts/release-artifact-identity.mjs \
             --tarball "$CLI_TARBALL" \
             --allow-missing \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json)
           if [ "$status" = missing ]; then
@@ -901,12 +996,14 @@ jobs:
           node scripts/release-artifact-identity.mjs \
             --tarball "$CLI_TARBALL" \
             --wait-ms 600000 \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
           node scripts/verify-npm-publication.mjs \
             --package conductor-oss \
             --version "${{ needs.version.outputs.new_version }}" \
             --local-tarball "$CLI_TARBALL" \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
 
@@ -927,6 +1024,7 @@ jobs:
             --tarball "$GITHUB_TARBALL" \
             --registry https://npm.pkg.github.com \
             --allow-missing \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json)
           if [ "$status" = missing ]; then
@@ -936,6 +1034,7 @@ jobs:
             --tarball "$GITHUB_TARBALL" \
             --registry https://npm.pkg.github.com \
             --wait-ms 600000 \
+            --require-bundled-dependency @conductor-oss/core \
             --require-file dist/launcher.js \
             --require-file web/package.json
 

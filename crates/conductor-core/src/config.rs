@@ -536,6 +536,8 @@ pub struct PreferencesConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_browse_roots: Vec<String>,
     #[serde(default)]
+    pub allow_home_browse: bool,
+    #[serde(default)]
     pub model_access: ModelAccessPreferences,
     #[serde(default)]
     pub notifications: NotificationPreferences,
@@ -550,6 +552,7 @@ impl Default for PreferencesConfig {
             markdown_editor: default_markdown_editor(),
             markdown_editor_path: String::new(),
             filesystem_browse_roots: Vec::new(),
+            allow_home_browse: false,
             model_access: ModelAccessPreferences::default(),
             notifications: NotificationPreferences::default(),
         }
@@ -904,6 +907,26 @@ preferences:
             config.preferences.filesystem_browse_roots,
             vec!["/Users".to_string(), "/Volumes/projects".to_string()]
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_load_preserves_allow_home_browse() {
+        let root = std::env::temp_dir().join(format!("conductor-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("conductor.yaml");
+        std::fs::write(
+            &path,
+            r#"
+preferences:
+  allowHomeBrowse: true
+"#,
+        )
+        .unwrap();
+
+        let config = ConductorConfig::load(&path).unwrap();
+        assert!(config.preferences.allow_home_browse);
 
         std::fs::remove_dir_all(root).unwrap();
     }

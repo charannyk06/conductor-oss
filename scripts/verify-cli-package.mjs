@@ -1,5 +1,13 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +18,11 @@ import {
   findCliNativeTargetById,
   resolveHostCliNativeTargetId,
 } from "./cli-native-packages.mjs";
+import { execNpmCommandSync } from "./npm-exec.mjs";
+import {
+  assertBundledDependencyVersions,
+  readPackageManifestFromTarball,
+} from "./release-workflow-lib.mjs";
 
 const NPM_EXECUTABLE = "npm";
 const CARGO_EXECUTABLE = "cargo";
@@ -18,11 +31,27 @@ function fail(message) {
   throw new Error(`release preflight failed: ${message}`);
 }
 
-function buildHostNativeBinary(rootDir) {
+function buildHostNativeBinary(rootDir, releaseVersion) {
   execFileSync(CARGO_EXECUTABLE, ["build", "-p", "conductor-cli", "--release"], {
     cwd: rootDir,
+    env: { ...process.env, CONDUCTOR_BUILD_VERSION: releaseVersion },
     stdio: "inherit",
   });
+}
+
+function parseArguments(argv) {
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--tarball") {
+      options.tarballPath = argv[++index];
+      continue;
+    }
+    throw new Error(`unknown argument: ${argv[index]}`);
+  }
+  if (Object.hasOwn(options, "tarballPath") && !options.tarballPath) {
+    throw new Error("--tarball requires a path");
+  }
+  return options;
 }
 
 function createTempDir(prefix, tempDirs) {
@@ -62,7 +91,9 @@ const TMUX_STREAM_AGENT_FIXTURES = [
   },
   {
     agent: "cursor-cli",
-    binary: "cursor",
+    // Match the executor's preferred discovery order so an installed
+    // cursor-agent cannot bypass the fixture through a later alias.
+    binary: "cursor-agent",
     expectedPrefix: [],
     requiredArgs: [],
     forbiddenArgs: ["--output-format", "stream-json"],
@@ -219,6 +250,14 @@ async function allocatePort() {
   });
 }
 
+async function allocateDistinctPorts(count) {
+  const ports = new Set();
+  while (ports.size < count) {
+    ports.add(await allocatePort());
+  }
+  return [...ports];
+}
+
 function getInstalledCliEntry(installDir) {
   return join(installDir, "node_modules", "conductor-oss", "dist", "launcher.js");
 }
@@ -278,10 +317,12 @@ function replaceProjectPathInYaml(content, projectId, nextPath) {
 
 function spawnInstalledCli(installDir, args, options = {}) {
   const cliEntry = getInstalledCliEntry(installDir);
+  const detached = process.platform !== "win32";
   const child = spawn("node", [cliEntry, ...args], {
     cwd: installDir,
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
+    detached,
   });
 
   let bufferedStdout = "";
@@ -295,19 +336,107 @@ function spawnInstalledCli(installDir, args, options = {}) {
 
   return {
     child,
+    processGroupId: detached ? child.pid : null,
     getLogs() {
       return `${bufferedStdout}\n${bufferedStderr}`.trim();
     },
   };
 }
 
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null) return;
-  child.kill("SIGTERM");
-  await sleep(1000);
-  if (child.exitCode === null) {
-    child.kill("SIGKILL");
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
+}
+
+function processGroupIsAlive(processGroupId) {
+  if (process.platform === "win32" || !processGroupId) return false;
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stopProcess(handle) {
+  const child = handle?.child;
+  if (!child) return;
+  const processGroupId = handle.processGroupId;
+  try {
+    if (processGroupId) {
+      process.kill(-processGroupId, "SIGTERM");
+    } else if (child.exitCode === null) {
+      child.kill("SIGTERM");
+    }
+  } catch {
+    // The process may already have exited.
+  }
+  await sleep(1000);
+  try {
+    if (processGroupIsAlive(processGroupId)) {
+      process.kill(-processGroupId, "SIGKILL");
+    } else if (child.exitCode === null) {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    // The process exited between the liveness check and signal.
+  }
+}
+
+async function terminatePid(pid) {
+  if (!processIsAlive(pid)) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 1500 && processIsAlive(pid)) {
+    await sleep(50);
+  }
+  if (processIsAlive(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // The process exited between the liveness check and signal.
+    }
+  }
+}
+
+async function cleanupTerminalDaemons(homeDir) {
+  if (process.platform === "win32") return;
+  const runtimeRoot = join(homeDir, ".conductor", "runtime", "terminal-daemon");
+  if (!existsSync(runtimeRoot)) return;
+
+  const sessionPids = new Set();
+  const daemonPids = new Set();
+  for (const entry of readdirSync(runtimeRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const runtimeDir = join(runtimeRoot, entry.name);
+    try {
+      const state = JSON.parse(readTextFile(join(runtimeDir, "state.json")));
+      for (const session of Object.values(state.sessions ?? {})) {
+        if (Number.isInteger(session?.childPid)) sessionPids.add(session.childPid);
+        if (Number.isInteger(session?.hostPid)) sessionPids.add(session.hostPid);
+      }
+    } catch {
+      // No session state was persisted.
+    }
+    try {
+      const info = JSON.parse(readTextFile(join(runtimeDir, "info.json")));
+      if (Number.isInteger(info.pid)) daemonPids.add(info.pid);
+    } catch {
+      // No daemon info was persisted.
+    }
+  }
+
+  for (const pid of sessionPids) await terminatePid(pid);
+  for (const pid of daemonPids) await terminatePid(pid);
 }
 
 async function waitForDashboard(url, timeoutMs) {
@@ -345,8 +474,18 @@ async function waitForCondition(description, check, timeoutMs = 20_000) {
 
 async function fetchJson(url, init) {
   const response = await fetch(url, init);
-  const payload = await response.json().catch(() => null);
-  return { response, payload };
+  const bodyText = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    // Preserve a bounded diagnostic for unexpected HTML/text proxy responses.
+  }
+  return {
+    response,
+    payload,
+    diagnosticBody: payload === null ? bodyText.slice(0, 500) : null,
+  };
 }
 
 const SPAWN_AGENT_PRIORITY = [
@@ -402,6 +541,32 @@ async function verifyDashboardAssets(baseUrl) {
       const assetResponse = await fetch(new URL(assetPath, baseUrl));
       return assetResponse.ok;
     }, 10_000);
+  }
+}
+
+async function verifyDashboardImageOptimization(baseUrl) {
+  const imageUrl = new URL("/_next/image", baseUrl);
+  imageUrl.searchParams.set("url", "/brand/conductor-wordmark-dark.png");
+  imageUrl.searchParams.set("w", "64");
+  imageUrl.searchParams.set("q", "75");
+
+  const response = await fetch(imageUrl, {
+    headers: { Accept: "image/webp" },
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!response.ok) {
+    throw new Error(`dashboard image optimizer returned ${response.status}`);
+  }
+  if (!contentType.startsWith("image/webp")) {
+    throw new Error(`dashboard image optimizer returned ${contentType || "no content type"}; expected image/webp`);
+  }
+  if (
+    body.length < 12
+    || body.subarray(0, 4).toString("ascii") !== "RIFF"
+    || body.subarray(8, 12).toString("ascii") !== "WEBP"
+  ) {
+    throw new Error("dashboard image optimizer did not return a valid WebP payload");
   }
 }
 
@@ -479,8 +644,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   const homeDir = createTempDir("conductor-cli-home-", tempDirs);
   const projectDir = createTempDir("conductor-cli-project-", tempDirs);
   const canonicalProjectDir = realpathSync.native(projectDir);
-  const dashboardPort = await allocatePort();
-  const backendPort = await allocatePort();
+  const [dashboardPort, backendPort] = await allocateDistinctPorts(2);
   const baseUrl = `http://127.0.0.1:${dashboardPort}`;
 
   const launcher = spawnInstalledCli(installDir, [
@@ -499,6 +663,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   try {
     await waitForDashboard(`${baseUrl}/api/config`, 25_000);
     await verifyDashboardAssets(baseUrl);
+    await verifyDashboardImageOptimization(baseUrl);
     await verifyFirstRunOnboarding(baseUrl);
 
     const bootstrapWorkspace = join(homeDir, ".openclaw", "workspace");
@@ -724,11 +889,13 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
       throw new Error(`bare launcher exited early with code ${launcher.child.exitCode}\n${launcher.getLogs()}`);
     }
   } finally {
-    await stopProcess(launcher.child);
+    await stopProcess(launcher);
+    await cleanupTerminalDaemons(homeDir);
   }
 }
 
 async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
+  const homeDir = createTempDir("conductor-cli-configured-home-", tempDirs);
   const repoDir = createTempDir("conductor-cli-repo-", tempDirs);
   const baseUrl = "http://127.0.0.1:4111";
 
@@ -785,6 +952,7 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
   ], {
     env: {
       ...process.env,
+      HOME: homeDir,
       CONDUCTOR_WORKSPACE: repoDir,
       CO_CONFIG_PATH: configPath,
     },
@@ -843,7 +1011,8 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
       throw new Error(`configured-workspace dashboard exited early with code ${dashboard.child.exitCode}\n${dashboard.getLogs()}`);
     }
   } finally {
-    await stopProcess(dashboard.child);
+    await stopProcess(dashboard);
+    await cleanupTerminalDaemons(homeDir);
   }
 }
 
@@ -867,8 +1036,11 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
   }
 
   const { binDir, fixtures } = createFakeAgentBinDir(tempDirs);
+  const homeDir = createTempDir("conductor-cli-streaming-home-", tempDirs);
   const repoDir = createTempDir("conductor-cli-streaming-", tempDirs);
-  const baseUrl = "http://127.0.0.1:4113";
+  const [dashboardPort, backendPort] = await allocateDistinctPorts(2);
+  const baseUrl = `http://127.0.0.1:${dashboardPort}`;
+  const backendBaseUrl = `http://127.0.0.1:${backendPort}`;
   const configPath = join(repoDir, "conductor.yaml");
   const boardPath = join(repoDir, "CONDUCTOR.md");
 
@@ -895,12 +1067,15 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
     "start",
     "--no-watcher",
     "--port",
-    "4113",
+    String(dashboardPort),
+    "--backend-port",
+    String(backendPort),
     "--workspace",
     repoDir,
   ], {
     env: {
       ...process.env,
+      HOME: homeDir,
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
       CONDUCTOR_WORKSPACE: repoDir,
       CO_CONFIG_PATH: configPath,
@@ -953,7 +1128,7 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
       try {
         await waitForCondition(`packaged tmux structured streaming feed for ${fixture.agent}`, async () => {
           const [feedResult, outputResult] = await Promise.all([
-            fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`),
+            fetchJson(`${backendBaseUrl}/api/sessions/${createdSessionId}/feed`),
             fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null, response: { ok: false } })),
           ]);
           if (!feedResult.response.ok) {
@@ -971,14 +1146,17 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
         }, 20_000);
       } catch (error) {
         const [feedResult, outputResult] = await Promise.all([
-          fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`).catch(() => ({ payload: null })),
+          fetchJson(`${backendBaseUrl}/api/sessions/${createdSessionId}/feed`).catch(() => ({ payload: null })),
           fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null })),
         ]);
         throw new Error(
           [
             error instanceof Error ? error.message : String(error),
             `agent: ${fixture.agent}`,
+            `feed status: ${feedResult.response?.status ?? "unavailable"}`,
+            `feed content-type: ${feedResult.response?.headers?.get?.("content-type") ?? "unavailable"}`,
             `feed: ${JSON.stringify(feedResult.payload)}`,
+            `feed body: ${feedResult.diagnosticBody ?? ""}`,
             `output: ${outputResult.payload?.output ?? ""}`,
             `logs: ${dashboard.getLogs()}`,
           ].join("\n"),
@@ -1010,11 +1188,13 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
         // Best-effort cleanup.
       });
     }
-    await stopProcess(dashboard.child);
+    await stopProcess(dashboard);
+    await cleanupTerminalDaemons(homeDir);
   }
 }
 
 async function verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs) {
+  const homeDir = createTempDir("conductor-cli-legacy-home-", tempDirs);
   const legacyWorkspace = createTempDir("conductor-cli-legacy-", tempDirs);
   const baseUrl = "http://127.0.0.1:4112";
   const configPath = join(legacyWorkspace, "conductor.yaml");
@@ -1045,6 +1225,7 @@ async function verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs) {
   ], {
     env: {
       ...process.env,
+      HOME: homeDir,
       CONDUCTOR_WORKSPACE: legacyWorkspace,
       CO_CONFIG_PATH: configPath,
     },
@@ -1076,18 +1257,31 @@ async function verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs) {
       throw new Error(`legacy project-array dashboard exited early with code ${dashboard.child.exitCode}\n${dashboard.getLogs()}`);
     }
   } finally {
-    await stopProcess(dashboard.child);
+    await stopProcess(dashboard);
+    await cleanupTerminalDaemons(homeDir);
   }
 }
 
 const rootDir = resolve(process.cwd());
+const options = parseArguments(process.argv.slice(2));
 const tempDirs = [];
 const packDir = createTempDir("conductor-cli-pack-", tempDirs);
 const installDir = createTempDir("conductor-cli-install-", tempDirs);
 const npmCacheDir = createTempDir("conductor-cli-npm-cache-", tempDirs);
 let exitCode = 0;
 try {
-  const { tarballPath } = packCliReleasePackage({ rootDir, packDestination: packDir });
+  const packedRelease = options.tarballPath
+    ? { tarballPath: resolve(rootDir, options.tarballPath) }
+    : packCliReleasePackage({ rootDir, packDestination: packDir });
+  const { tarballPath } = packedRelease;
+  if (!existsSync(tarballPath)) {
+    fail(`CLI release tarball does not exist: ${tarballPath}`);
+  }
+  const releaseVersion = readPackageManifestFromTarball(tarballPath).version;
+  const sourceCliVersion = JSON.parse(readTextFile(join(rootDir, "packages", "cli", "package.json"))).version;
+  if (releaseVersion !== sourceCliVersion) {
+    fail(`CLI tarball version is ${releaseVersion}; checked-out release source is ${sourceCliVersion}`);
+  }
   const hostNativeTargetId = resolveHostCliNativeTargetId();
   if (!hostNativeTargetId) {
     fail(`release preflight does not support packaged native verification on ${process.platform}-${process.arch}`);
@@ -1101,7 +1295,7 @@ try {
   const hostBinaryPath = process.platform === "win32"
     ? resolve(rootDir, "target", "release", "conductor.exe")
     : resolve(rootDir, "target", "release", "conductor");
-  buildHostNativeBinary(rootDir);
+  buildHostNativeBinary(rootDir, releaseVersion);
   const { stageDir: nativeStageDir } = createCliNativeReleaseStage({
     rootDir,
     targetId: hostNativeTargetId,
@@ -1109,16 +1303,16 @@ try {
   });
   tempDirs.push(nativeStageDir);
 
-  execFileSync(NPM_EXECUTABLE, ["init", "-y"], {
+  execNpmCommandSync(NPM_EXECUTABLE, ["init", "-y"], {
     cwd: installDir,
     stdio: "ignore",
-    shell: true,
   });
-  execFileSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, "--omit=optional", tarballPath, nativeStageDir], {
+  execNpmCommandSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, tarballPath, nativeStageDir], {
     cwd: installDir,
     stdio: "inherit",
-    shell: true,
   });
+  const installedCliRoot = join(installDir, "node_modules", "conductor-oss");
+  const installedCliManifest = JSON.parse(readTextFile(join(installedCliRoot, "package.json")));
   verifyNodeShebang(getInstalledCliEntry(installDir), "installed CLI entrypoint");
   execFileSync("node", [getInstalledCliEntry(installDir), "--version"], {
     cwd: installDir,
@@ -1130,6 +1324,17 @@ try {
     fail("installed CLI package is missing the dashboard standalone directory");
   }
 
+  const installedSharpManifestPath = join(installDir, "node_modules", "sharp", "package.json");
+  if (!existsSync(installedSharpManifestPath)) {
+    fail("installed CLI package is missing the host image optimization runtime");
+  }
+  const installedSharpManifest = JSON.parse(readTextFile(installedSharpManifestPath));
+  if (installedSharpManifest.version !== installedCliManifest.optionalDependencies?.sharp) {
+    fail(
+      `installed sharp version is ${installedSharpManifest.version ?? "missing"}; expected ${installedCliManifest.optionalDependencies?.sharp ?? "an exact optional dependency"}`,
+    );
+  }
+
   const installedNativeBackend = join(
     installDir,
     "node_modules",
@@ -1139,6 +1344,25 @@ try {
   );
   if (!existsSync(installedNativeBackend)) {
     fail("installed CLI package is missing the host native runtime package");
+  }
+  const installedNativeManifest = JSON.parse(readTextFile(join(
+    installDir,
+    "node_modules",
+    ...hostNativeTarget.packageName.split("/"),
+    "package.json",
+  )));
+  if (installedNativeManifest.name !== hostNativeTarget.packageName) {
+    fail(`installed native package identity is ${installedNativeManifest.name ?? "missing"}; expected ${hostNativeTarget.packageName}`);
+  }
+  if (installedNativeManifest.version !== installedCliManifest.version) {
+    fail(`installed native package version is ${installedNativeManifest.version ?? "missing"}; expected ${installedCliManifest.version}`);
+  }
+  if (installedCliManifest.optionalDependencies?.[hostNativeTarget.packageName] !== installedCliManifest.version) {
+    fail(`CLI optional dependency ${hostNativeTarget.packageName} does not match release version ${installedCliManifest.version}`);
+  }
+  const nativeVersion = execFileSync(installedNativeBackend, ["--version"], { encoding: "utf8" }).trim();
+  if (nativeVersion !== `conductor ${installedCliManifest.version}`) {
+    fail(`installed native binary reports ${nativeVersion || "no version"}; expected conductor ${installedCliManifest.version}`);
   }
 
   const installedDashboardServer = join(
@@ -1156,17 +1380,45 @@ try {
     fail("installed CLI package is missing the dashboard server entrypoint");
   }
 
-  const bundledCorePackage = join(
-    installDir,
-    "node_modules",
-    "conductor-oss",
-    "node_modules",
-    "@conductor-oss",
-    "core",
-    "package.json",
-  );
-  if (!existsSync(bundledCorePackage)) {
-    fail("installed CLI package is missing bundled internal runtime packages");
+  const bundledDependencyNames = installedCliManifest.bundleDependencies
+    ?? installedCliManifest.bundledDependencies
+    ?? [];
+  if (!bundledDependencyNames.includes("@conductor-oss/core")) {
+    fail("installed CLI package is missing the bundled @conductor-oss/core runtime");
+  }
+  const bundledManifests = {};
+  for (const dependencyName of bundledDependencyNames) {
+    const manifestPath = join(installedCliRoot, "node_modules", ...dependencyName.split("/"), "package.json");
+    if (existsSync(manifestPath)) {
+      bundledManifests[dependencyName] = JSON.parse(readTextFile(manifestPath));
+    }
+  }
+  assertBundledDependencyVersions(installedCliManifest, bundledManifests);
+  try {
+    execNpmCommandSync(
+      NPM_EXECUTABLE,
+      ["ls", "--all", "--omit=dev"],
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    const diagnostic = error?.stdout?.toString().trim()
+      || error?.stderr?.toString().trim()
+      || error?.message
+      || String(error);
+    fail(`installed npm dependency graph is invalid: ${diagnostic}`);
+  }
+  try {
+    execNpmCommandSync(
+      NPM_EXECUTABLE,
+      ["audit", "--omit=dev", "--audit-level=low"],
+      { cwd: installDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    const diagnostic = error?.stdout?.toString().trim()
+      || error?.stderr?.toString().trim()
+      || error?.message
+      || String(error);
+    fail(`installed npm dependency audit is not clean: ${diagnostic}`);
   }
 
   await verifyBrowserFirstLauncherFlow(installDir, tempDirs);
