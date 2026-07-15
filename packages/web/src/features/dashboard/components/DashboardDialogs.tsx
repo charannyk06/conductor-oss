@@ -261,6 +261,7 @@ type PreferencesPayload = {
   markdownEditor: string;
   markdownEditorPath: string;
   filesystemBrowseRoots: string[];
+  allowHomeBrowse: boolean;
   modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
@@ -434,6 +435,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
         .map((item) => item.trim())
         .filter(Boolean)
     : [];
+  const allowHomeBrowse = payload["allowHomeBrowse"] === true;
 
   return {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
@@ -442,6 +444,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     markdownEditor,
     markdownEditorPath,
     filesystemBrowseRoots,
+    allowHomeBrowse,
     modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -2167,6 +2170,7 @@ export function SettingsDialog({
   const [markdownEditor, setMarkdownEditor] = useState(current.markdownEditor);
   const [markdownEditorPath, setMarkdownEditorPath] = useState<string>(current.markdownEditorPath ?? "");
   const [filesystemBrowseRootsInput, setFilesystemBrowseRootsInput] = useState(() => current.filesystemBrowseRoots.join("\n"));
+  const [allowHomeBrowse, setAllowHomeBrowse] = useState(current.allowHomeBrowse === true);
   const [modelAccess, setModelAccess] = useState<ModelAccessPreferences>(current.modelAccess);
   const [soundEnabled, setSoundEnabled] = useState(current.notifications.soundEnabled);
   const [soundFile, setSoundFile] = useState<string | null>(current.notifications.soundFile);
@@ -2467,6 +2471,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setMarkdownEditor(current.markdownEditor);
     setMarkdownEditorPath(current.markdownEditorPath ?? "");
     setFilesystemBrowseRootsInput(current.filesystemBrowseRoots.join("\n"));
+    setAllowHomeBrowse(current.allowHomeBrowse === true);
     setModelAccess(current.modelAccess);
     setSoundEnabled(current.notifications.soundEnabled);
     setSoundFile(current.notifications.soundFile);
@@ -2656,6 +2661,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       markdownEditor: markdownEditor.trim(),
       markdownEditorPath: (markdownEditorPath ?? "").trim(),
       filesystemBrowseRoots,
+      allowHomeBrowse,
       modelAccess,
       notifications: {
         soundEnabled,
@@ -3035,8 +3041,29 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                               </button>
                             </div>
                             <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                              Conductor already includes sensible defaults for each OS. Add extra roots here when you want the folder picker to expose more locations on macOS, Linux, or Windows.
+                              Conductor exposes the current workspace, configured project roots, and any extra roots listed here by default. Add another root only when the operator folder picker should expose that explicit location on this machine.
                             </p>
+                          </label>
+                        </div>
+                        <div className="rounded-[4px] border border-[var(--vk-border)] px-3 py-3">
+                          <label className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={allowHomeBrowse}
+                              onChange={(event) => setAllowHomeBrowse(event.target.checked)}
+                              className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent"
+                            />
+                            <span className="block">
+                              <span className="block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                                Allow full home-directory browse
+                              </span>
+                              <span className="mt-1 block text-[12px] text-[var(--vk-text-muted)]">
+                                Off by default. Enable this only when operator or admin sessions need to browse the full local home directory. Viewer sessions never get this access.
+                              </span>
+                              <span className="mt-1 block text-[11px] text-[var(--vk-text-dim)]">
+                                Saved as <code>preferences.allowHomeBrowse</code> in <code>conductor.yaml</code>.
+                              </span>
+                            </span>
                           </label>
                         </div>
                       </section>

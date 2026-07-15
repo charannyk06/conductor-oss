@@ -81,6 +81,8 @@ struct MirrorPreferences {
     markdown_editor_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     filesystem_browse_roots: Vec<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    allow_home_browse: bool,
     model_access: ModelAccessPreferences,
     notifications: NotificationPreferences,
 }
@@ -291,6 +293,7 @@ fn build_preferences(preferences: &PreferencesConfig) -> MirrorPreferences {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .collect(),
+        allow_home_browse: preferences.allow_home_browse,
         model_access: preferences.model_access.clone(),
         notifications: preferences.notifications.clone(),
     }

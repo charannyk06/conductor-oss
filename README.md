@@ -264,6 +264,8 @@ The dashboard only offers agents it can discover on your machine.
 | `attachments/` | Uploaded files and generated session artifacts |
 | `~/.conductor/` | Launcher runtime state and optional bridge state |
 
+The filesystem picker defaults to the current workspace, configured project roots, and any explicit `preferences.filesystemBrowseRoots` entries. Broad home-directory browsing stays off unless an operator or admin explicitly enables `preferences.allowHomeBrowse: true`.
+
 ## Ports
 
 ### Launcher defaults

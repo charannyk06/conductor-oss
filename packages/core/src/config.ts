@@ -191,6 +191,8 @@ const UserPreferencesSchema = z.object({
   ide: z.string().optional(),
   markdownEditor: z.string().optional(),
   markdownEditorPath: z.string().optional(),
+  filesystemBrowseRoots: z.array(z.string()).optional(),
+  allowHomeBrowse: z.boolean().default(false),
   modelAccess: ModelAccessPreferencesSchema.default(getDefaultModelAccessPreferences()),
   notifications: NotificationPreferencesSchema.default({
     soundEnabled: true,
@@ -248,6 +250,7 @@ const ConductorConfigSchema = z.object({
   access: DashboardAccessConfigSchema.optional(),
   preferences: UserPreferencesSchema.default({
     onboardingAcknowledged: false,
+    allowHomeBrowse: false,
     modelAccess: getDefaultModelAccessPreferences(),
     notifications: {
       soundEnabled: true,
