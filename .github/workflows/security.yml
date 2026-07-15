@@ -29,10 +29,10 @@ jobs:
           bun-version-file: package.json
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --minimum-release-age=604800
 
       - name: Install preview-worker dependencies
-        run: bun install --cwd preview-worker --frozen-lockfile
+        run: bun install --cwd preview-worker --frozen-lockfile --minimum-release-age=604800
 
       - name: Audit workspace dependencies
         run: bun audit --audit-level=high
@@ -48,11 +48,12 @@ jobs:
           cache-dependency-path: .github/requirements/strix-security-scan.txt
 
       - name: Audit Strix scanner dependencies
-        run: |
-          python -m pip install --disable-pip-version-check pip-audit==2.10.1
-          python -m pip_audit \
-            --requirement .github/requirements/strix-security-scan.txt \
-            --disable-pip
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: .github/requirements/strix-security-scan.txt
+          require-hashes: true
+          no-deps: true
+          disable-pip: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -67,7 +68,6 @@ jobs:
   secret-scan:
     name: Secret Scanning
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -75,7 +75,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Gitleaks
+        run: go install github.com/zricethezav/gitleaks/v8@v8.24.2
+
+      - name: Gitleaks full-history scan
+        run: ~/go/bin/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
+
       - name: TruffleHog OSS
+        if: github.event_name == 'pull_request'
         uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6
         with:
           extra_args: --only-verified

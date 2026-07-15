@@ -11,6 +11,7 @@ import {
   assertBundledDependencyVersionsInTarball,
   assertTarballFiles,
   isNpmNotFound,
+  npmCliInvocation,
   parseNpmDistMetadata,
   readPackageManifestFromTarball,
   registryDownloadHeaders,
@@ -65,15 +66,18 @@ function parseArguments(argv) {
 }
 
 function queryDist(packageName, version, registry) {
+  const npm = npmCliInvocation();
   const result = spawnSync(
-    "npm",
-    ["view", `${packageName}@${version}`, "dist", "--json", "--registry", registry],
+    npm.command,
+    [...npm.argsPrefix, "view", `${packageName}@${version}`, "dist", "--json", "--registry", registry],
     { encoding: "utf8", env: process.env },
   );
   if (result.status === 0) {
     return { status: "found", metadata: parseNpmDistMetadata(result.stdout) };
   }
-  const diagnostic = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const diagnostic = [result.error?.message, result.stdout, result.stderr]
+    .filter(Boolean)
+    .join("\n");
   if (isNpmNotFound(diagnostic)) {
     return { status: "missing" };
   }

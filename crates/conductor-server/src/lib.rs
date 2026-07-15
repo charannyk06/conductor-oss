@@ -19,6 +19,7 @@ use axum::Router;
 use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
 use std::fs;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
@@ -29,6 +30,9 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_TERMINAL_SESSION_SECRET";
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus) -> Result<()> {
     let config_path = config
@@ -213,19 +217,184 @@ fn ensure_terminal_token_secret(workspace_path: &Path) -> Result<()> {
         .join("terminal-session-secret");
     if let Some(parent) = secret_path.parent() {
         fs::create_dir_all(parent)?;
+        harden_terminal_secret_dir(parent)?;
     }
 
-    let secret = match fs::read_to_string(&secret_path) {
-        Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
-        _ => {
+    let secret = if secret_path.exists() {
+        harden_terminal_secret_permissions(&secret_path)?;
+        let existing = fs::read_to_string(&secret_path)?;
+        let trimmed = existing.trim();
+        if trimmed.is_empty() {
             let generated = Uuid::new_v4().to_string();
-            fs::write(&secret_path, format!("{generated}\n"))?;
+            overwrite_terminal_token_secret(&secret_path, &generated)?;
             generated
+        } else {
+            trimmed.to_string()
         }
+    } else {
+        let generated = Uuid::new_v4().to_string();
+        create_terminal_token_secret(&secret_path, &generated)?;
+        generated
     };
 
     unsafe {
         std::env::set_var(TERMINAL_TOKEN_SECRET_ENV, secret);
     }
     Ok(())
+}
+
+fn create_terminal_token_secret(secret_path: &Path, secret: &str) -> Result<()> {
+    let temp_path = secret_path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(&temp_path)?;
+    let write_result = (|| -> Result<()> {
+        file.write_all(format!("{secret}\n").as_bytes())?;
+        file.flush()?;
+        file.sync_data()?;
+        Ok(())
+    })();
+    drop(file);
+
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = fs::rename(&temp_path, secret_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+
+    harden_terminal_secret_permissions(secret_path)?;
+    Ok(())
+}
+
+fn overwrite_terminal_token_secret(secret_path: &Path, secret: &str) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(secret_path)?;
+    file.write_all(format!("{secret}\n").as_bytes())?;
+    file.flush()?;
+    file.sync_data()?;
+    harden_terminal_secret_permissions(secret_path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_terminal_secret_dir(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_terminal_secret_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_terminal_secret_permissions(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_terminal_secret_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_terminal_token_secret, TERMINAL_TOKEN_SECRET_ENV};
+    use std::fs;
+
+    struct TerminalSecretEnvScope {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TerminalSecretEnvScope {
+        fn new() -> Self {
+            let guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
+            unsafe {
+                std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
+            }
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for TerminalSecretEnvScope {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_terminal_token_secret_creates_private_secret_and_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = TerminalSecretEnvScope::new();
+        let workspace_path = std::env::temp_dir().join(format!(
+            "conductor-terminal-secret-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        ensure_terminal_token_secret(&workspace_path).unwrap();
+
+        let secret_dir = workspace_path.join(".conductor");
+        let secret_path = secret_dir.join("terminal-session-secret");
+        let secret = fs::read_to_string(&secret_path).unwrap();
+
+        assert!(!secret.trim().is_empty());
+        assert_eq!(
+            fs::metadata(&secret_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&secret_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_dir_all(workspace_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_terminal_token_secret_hardens_existing_insecure_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = TerminalSecretEnvScope::new();
+        let workspace_path = std::env::temp_dir().join(format!(
+            "conductor-terminal-secret-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let secret_dir = workspace_path.join(".conductor");
+        let secret_path = secret_dir.join("terminal-session-secret");
+        fs::create_dir_all(&secret_dir).unwrap();
+        fs::write(&secret_path, "existing-secret\n").unwrap();
+        fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        ensure_terminal_token_secret(&workspace_path).unwrap();
+
+        assert_eq!(
+            fs::metadata(&secret_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&secret_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_dir_all(workspace_path).unwrap();
+    }
 }

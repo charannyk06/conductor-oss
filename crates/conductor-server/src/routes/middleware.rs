@@ -196,6 +196,10 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return Some(AccessRole::Operator);
     }
 
+    if path.starts_with("/api/filesystem/") {
+        return Some(AccessRole::Operator);
+    }
+
     if path.starts_with("/api/access") {
         return Some(AccessRole::Admin);
     }
@@ -344,6 +348,14 @@ mod tests {
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/workspaces/branches"),
+            Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/filesystem/directory"),
+            Some(AccessRole::Operator)
+        );
+        assert_eq!(
+            required_access_role(&Method::HEAD, "/api/filesystem/directory"),
             Some(AccessRole::Operator)
         );
         assert_eq!(

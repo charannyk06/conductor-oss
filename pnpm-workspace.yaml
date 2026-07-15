@@ -1,2 +1,8 @@
 packages:
   - "packages/*"
+
+# Supply-chain controls for contributors who use pnpm. Bun remains the primary
+# package manager and enforces the matching seven-day minimum in CI.
+minimumReleaseAge: 10080
+trustPolicy: no-downgrade
+blockExoticSubdeps: true

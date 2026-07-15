@@ -28,6 +28,7 @@ pub struct ScaffoldPreferencesConfig {
     pub markdown_editor: Option<String>,
     pub markdown_editor_path: Option<String>,
     pub filesystem_browse_roots: Option<Vec<String>>,
+    pub allow_home_browse: Option<bool>,
     pub model_access: Option<ModelAccessPreferences>,
     pub notifications: Option<ScaffoldNotificationPreferences>,
 }
@@ -164,6 +165,8 @@ struct ScaffoldPreferencesRecord {
     markdown_editor_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     filesystem_browse_roots: Vec<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    allow_home_browse: bool,
     model_access: ModelAccessPreferences,
     notifications: NotificationPreferences,
 }
@@ -508,6 +511,9 @@ fn build_preferences_record(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .collect(),
+        allow_home_browse: config
+            .and_then(|value| value.allow_home_browse)
+            .unwrap_or(false),
         model_access: config
             .and_then(|value| value.model_access.clone())
             .unwrap_or_default(),

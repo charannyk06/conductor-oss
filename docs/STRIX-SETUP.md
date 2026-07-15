@@ -6,6 +6,10 @@ STRIX_LLM=openai/gpt-5.4
 LLM_API_KEY=sk-...
 ```
 
+The CI workflow fails in preflight if either secret is missing or if a manual
+`target_url` is not an `http://` or `https://` URL. It does not silently skip a
+requested scan.
+
 ### Local Run (no Docker required for source scans)
 ```bash
 # Install Strix (one-time)

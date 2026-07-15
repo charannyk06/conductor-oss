@@ -119,12 +119,26 @@ jobs:
 
           echo "Tag: $tag_ver | Package: $pkg_ver | npm-highest: $npm_highest"
 
-          base=$(node -e "
-            const vs=['$tag_ver','$pkg_ver','$npm_highest'];
-            const p=v=>v.split('.').map(Number);
-            vs.sort((a,b)=>{const pa=p(a),pb=p(b);for(let i=0;i<3;i++)if((pa[i]||0)!==(pb[i]||0))return(pa[i]||0)-(pb[i]||0);return 0});
-            console.log(vs[vs.length-1]);
-          ")
+          base=$(TAG_VERSION="$tag_ver" PACKAGE_VERSION="$pkg_ver" NPM_HIGHEST="$npm_highest" node <<'NODE'
+          const versions = [
+            process.env.TAG_VERSION,
+            process.env.PACKAGE_VERSION,
+            process.env.NPM_HIGHEST,
+          ];
+          const parse = (version) => version.split('.').map(Number);
+          versions.sort((left, right) => {
+            const leftParts = parse(left);
+            const rightParts = parse(right);
+            for (let index = 0; index < 3; index += 1) {
+              if ((leftParts[index] || 0) !== (rightParts[index] || 0)) {
+                return (leftParts[index] || 0) - (rightParts[index] || 0);
+              }
+            }
+            return 0;
+          });
+          console.log(versions.at(-1));
+          NODE
+          )
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             bump="${{ inputs.version_type }}"
@@ -137,12 +151,20 @@ jobs:
             bump=$(node scripts/release-version.mjs bump < /tmp/release-commits)
           fi
 
-          next=$(node -e "
-            const [M,m,p]='$base'.split('.').map(Number);
-            if('$bump'==='major')console.log((M+1)+'.0.0');
-            else if('$bump'==='minor')console.log(M+'.'+(m+1)+'.0');
-            else console.log(M+'.'+m+'.'+(p+1));
-          ")
+          next=$(BASE_VERSION="$base" BUMP_KIND="$bump" node <<'NODE'
+          const [major, minor, patch] = process.env.BASE_VERSION.split('.').map(Number);
+          switch (process.env.BUMP_KIND) {
+            case 'major':
+              console.log(`${major + 1}.0.0`);
+              break;
+            case 'minor':
+              console.log(`${major}.${minor + 1}.0`);
+              break;
+            default:
+              console.log(`${major}.${minor}.${patch + 1}`);
+          }
+          NODE
+          )
 
           echo "Bump: $bump | $base -> $next"
           echo "new_version=$next" >> "$GITHUB_OUTPUT"

@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
+import { execNpmCommandSync } from "./npm-exec.mjs";
+import { execTarArchiveSync } from "./release-workflow-lib.mjs";
 
 const NPM_EXECUTABLE = "npm";
 
@@ -294,10 +296,9 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
     copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
-    const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
+    const tarballName = execNpmCommandSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
       cwd: packageStageDir,
       encoding: "utf8",
-      shell: true,
     }).trim();
 
     tarballs.set(packageName, join(tarballRoot, tarballName));
@@ -408,10 +409,9 @@ export function createCliReleaseStage({
   // If that still attempts to resolve unpublished internal versions, fall back to
   // installing only external deps and unpack internal tarballs manually.
   try {
-    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
+    execNpmCommandSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
       stdio: ["ignore", "ignore", "pipe"],
-      shell: true,
     });
   } catch {
     // If shallow install fails (pre-publish), fall back to installing only external deps
@@ -428,10 +428,9 @@ export function createCliReleaseStage({
     manifest.dependencies = externalDeps;
     writeJson(join(outputDir, "package.json"), manifest);
 
-    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
+    execNpmCommandSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
-      shell: true,
     });
 
     // Restore full deps and manually unpack internal tarballs into node_modules
@@ -443,7 +442,7 @@ export function createCliReleaseStage({
         const tarPath = spec.replace("file:", "");
         const depDir = join(outputDir, "node_modules", ...depName.split("/"));
         mkdirSync(depDir, { recursive: true });
-        execFileSync("tar", ["xzf", tarPath, "--strip-components=1", "-C", depDir], {
+        execTarArchiveSync(tarPath, ["-xzf"], ["--strip-components=1", "-C", depDir], {
           stdio: "inherit",
         });
       }
@@ -492,10 +491,9 @@ export function packCliReleasePackage({
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 
-  const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
+  const tarballName = execNpmCommandSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
-    shell: true,
   }).trim();
 
   return {

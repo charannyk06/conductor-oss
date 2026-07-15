@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -9,9 +10,65 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 const STABLE_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+export function tarArchiveInvocation(
+  archivePath,
+  beforeArchiveArgs,
+  afterArchiveArgs = [],
+  platform = process.platform,
+) {
+  // A drive-letter colon can be interpreted as remote-archive syntax. Run tar
+  // from the archive directory and pass only its basename instead. This works
+  // with both GNU tar from Git Bash and Windows' bsdtar.
+  const pathApi = platform === "win32" ? win32 : posix;
+  const resolvedArchivePath = pathApi.resolve(archivePath);
+  return {
+    args: [...beforeArchiveArgs, pathApi.basename(resolvedArchivePath), ...afterArchiveArgs],
+    cwd: pathApi.dirname(resolvedArchivePath),
+  };
+}
+
+export function execTarArchiveSync(
+  archivePath,
+  beforeArchiveArgs,
+  afterArchiveArgs = [],
+  options = {},
+) {
+  const invocation = tarArchiveInvocation(archivePath, beforeArchiveArgs, afterArchiveArgs);
+  return execFileSync("tar", invocation.args, { ...options, cwd: invocation.cwd });
+}
+
+export function npmCliInvocation({
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+  npmExecPath = process.env.npm_execpath,
+  pathExists = existsSync,
+} = {}) {
+  if (platform !== "win32") {
+    return { command: "npm", argsPrefix: [] };
+  }
+
+  // npm is exposed as a .cmd shim on Windows, which cannot be executed by
+  // spawnSync without a shell. Invoke npm-cli.js with the current Node binary
+  // instead, keeping registry arguments out of shell parsing entirely.
+  const colocatedNpmCli = win32.join(
+    win32.dirname(nodeExecutable),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  const npmCli = [npmExecPath, colocatedNpmCli]
+    .filter((candidate) => typeof candidate === "string" && /(?:^|[\\/])npm-cli\.js$/i.test(candidate))
+    .find((candidate) => pathExists(candidate));
+  if (!npmCli) {
+    throw new Error(`unable to locate npm-cli.js for ${nodeExecutable}`);
+  }
+  return { command: nodeExecutable, argsPrefix: [npmCli] };
+}
 
 function compareStableVersions(left, right) {
   const leftParts = left.split(".").map(BigInt);
@@ -180,7 +237,7 @@ export function assertBundledDependencyVersionsInTarball(path, { requiredDepende
     const entry = bundledManifestEntry(dependencyName);
     let raw;
     try {
-      raw = execFileSync("tar", ["-xOf", path, entry], {
+      raw = execTarArchiveSync(path, ["-xOf"], [entry], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -199,7 +256,7 @@ export function assertBundledDependencyVersionsInTarball(path, { requiredDepende
 }
 
 function validateReleaseTarballPaths(path) {
-  const entries = execFileSync("tar", ["-tzf", path], {
+  const entries = execTarArchiveSync(path, ["-tzf"], [], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).split("\n").filter(Boolean);
@@ -282,8 +339,8 @@ export function assertCliReleaseTarballEquivalence({ publicTarball, githubTarbal
   mkdirSync(publicDir);
   mkdirSync(githubDir);
   try {
-    execFileSync("tar", ["-xzf", publicTarball, "-C", publicDir], { stdio: "pipe" });
-    execFileSync("tar", ["-xzf", githubTarball, "-C", githubDir], { stdio: "pipe" });
+    execTarArchiveSync(publicTarball, ["-xzf"], ["-C", publicDir], { stdio: "pipe" });
+    execTarArchiveSync(githubTarball, ["-xzf"], ["-C", githubDir], { stdio: "pipe" });
     const publicFiles = collectRegularFileDigests(join(publicDir, "package"));
     const githubFiles = collectRegularFileDigests(join(githubDir, "package"));
     const publicPaths = [...publicFiles.keys()].sort();
@@ -302,7 +359,7 @@ export function assertCliReleaseTarballEquivalence({ publicTarball, githubTarbal
 }
 
 export function readPackageManifestFromTarball(path) {
-  const raw = execFileSync("tar", ["-xOf", path, "package/package.json"], {
+  const raw = execTarArchiveSync(path, ["-xOf"], ["package/package.json"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -318,7 +375,7 @@ export function assertTarballFiles(path, requiredFiles) {
     return;
   }
   const entries = new Set(
-    execFileSync("tar", ["-tzf", path], {
+    execTarArchiveSync(path, ["-tzf"], [], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     })
