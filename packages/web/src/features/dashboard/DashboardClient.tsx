@@ -412,6 +412,7 @@ type PreferencesPayload = {
   markdownEditor: string;
   markdownEditorPath: string;
   filesystemBrowseRoots: string[];
+  allowHomeBrowse: boolean;
   modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
@@ -592,6 +593,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
         .map((item) => item.trim())
         .filter(Boolean)
     : [];
+  const allowHomeBrowse = payload["allowHomeBrowse"] === true;
 
   return {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
@@ -600,6 +602,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     markdownEditor,
     markdownEditorPath,
     filesystemBrowseRoots,
+    allowHomeBrowse,
     modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,

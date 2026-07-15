@@ -99,6 +99,10 @@ This is the flow the current app is built around.
 
 ## Quick start
 
+The published launcher requires Node.js `>= 20.9.0` and includes native
+backends for macOS (Apple Silicon and Intel), Linux x64, and Windows x64.
+Other platforms can run Conductor from a source build.
+
 ### Option A, point Conductor at an existing repo
 
 ```bash
@@ -260,6 +264,8 @@ The dashboard only offers agents it can discover on your machine.
 | `attachments/` | Uploaded files and generated session artifacts |
 | `~/.conductor/` | Launcher runtime state and optional bridge state |
 
+The filesystem picker defaults to the current workspace, configured project roots, and any explicit `preferences.filesystemBrowseRoots` entries. Broad home-directory browsing stays off unless an operator or admin explicitly enables `preferences.allowHomeBrowse: true`.
+
 ## Ports
 
 ### Launcher defaults
@@ -296,7 +302,7 @@ The hosted Chromium preview worker is also deployed independently. See `docs/pre
 ### Prerequisites
 - Rust stable toolchain
 - Bun `>= 1.2`
-- Node.js `>= 18`
+- Node.js `>= 20.9.0`
 - `git`
 
 ### Install

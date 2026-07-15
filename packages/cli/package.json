@@ -34,7 +34,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20.9.0"
   },
   "description": "Local-first control surface for AI coding agents, workspaces, worktrees, terminals, diffs, previews, and paired-device access.",
   "keywords": [

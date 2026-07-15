@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const PUBLISHED_NATIVE_TARGETS = "macOS arm64/x64, Linux x64, and Windows x64";
+
 export interface RustCliLaunch {
   cmd: string;
   argsPrefix: string[];
@@ -130,7 +132,9 @@ export function resolveRustCliLaunch(): RustCliLaunch {
     };
   }
 
-  throw new Error("Rust CLI was not found. Build the workspace or run from a source checkout.");
+  throw new Error(
+    `Rust CLI was not found for ${process.platform}-${process.arch}. Published binaries support ${PUBLISHED_NATIVE_TARGETS}; build the workspace or run from a source checkout on other platforms.`,
+  );
 }
 
 export function rustCliGlobalArgs(): string[] {

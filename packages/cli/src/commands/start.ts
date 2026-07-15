@@ -44,6 +44,9 @@ type CliUpdateContext = {
 };
 
 type DashboardPackageManager = "bun" | "pnpm";
+type DashboardWebMode = "auto" | "dev" | "production" | "standalone";
+type DashboardRuntimeMode = "dev" | "production" | "standalone";
+const PUBLISHED_NATIVE_TARGETS = "macOS arm64/x64, Linux x64, and Windows x64";
 
 export function quoteWindowsCliArg(value: string): string {
   let escaped = "";
@@ -693,7 +696,7 @@ function resolveBundledRustBinary(): string | null {
     }
   }
 
-  const cliDir = new URL(".", import.meta.url).pathname;
+  const cliDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     resolve(cliDir, "..", "..", "native", binaryName),
     resolve(cliDir, "..", "..", "..", "native", binaryName),
@@ -859,7 +862,7 @@ export function resolveRustBackendLaunch(
 
   return {
     launch: null,
-    reason: "No compatible bundled Rust backend was found, and this install does not have a repo-local Cargo fallback.",
+    reason: `No compatible bundled Rust backend was found for ${process.platform}-${process.arch}. Published binaries support ${PUBLISHED_NATIVE_TARGETS}; use a source build on other platforms.`,
   };
 }
 
@@ -902,7 +905,7 @@ async function killStalePortListener(port: number): Promise<void> {
   }
 }
 
-function resolveDashboardWebMode(mode: string | undefined): "auto" | "dev" | "production" | "standalone" {
+export function resolveDashboardWebMode(mode: string | undefined): DashboardWebMode {
   switch (mode?.trim().toLowerCase()) {
     case "dev":
       return "dev";
@@ -914,6 +917,39 @@ function resolveDashboardWebMode(mode: string | undefined): "auto" | "dev" | "pr
     default:
       return "auto";
   }
+}
+
+export function resolveDashboardRuntimeMode({
+  webMode,
+  isSourceCheckout,
+  hasNextBuild,
+  hasStandaloneServer,
+}: {
+  webMode: DashboardWebMode;
+  isSourceCheckout: boolean;
+  hasNextBuild: boolean;
+  hasStandaloneServer: boolean;
+}): DashboardRuntimeMode | null {
+  if (webMode === "standalone") {
+    return hasStandaloneServer ? "standalone" : null;
+  }
+
+  if (isSourceCheckout && (webMode === "dev" || webMode === "auto")) {
+    return "dev";
+  }
+
+  if (isSourceCheckout && webMode === "production" && hasNextBuild) {
+    return "production";
+  }
+
+  // Published packages intentionally ship a self-contained standalone server,
+  // not a second package-manager-driven web dependency tree. This also makes
+  // explicit dev/production overrides safe for installed launchers.
+  if (hasStandaloneServer) {
+    return "standalone";
+  }
+
+  return null;
 }
 
 export function registerStart(program: Command): void {
@@ -1115,7 +1151,7 @@ export function registerStart(program: Command): void {
           const dashSpinner = ora("Starting web dashboard").start();
 
           try {
-            const cliDir = new URL(".", import.meta.url).pathname;
+            const cliDir = dirname(fileURLToPath(import.meta.url));
             const { cpSync, readdirSync, statSync } = await import("node:fs");
 
             let webDir: string | null = null;
@@ -1146,7 +1182,6 @@ export function registerStart(program: Command): void {
             const webMode = resolveDashboardWebMode(process.env["CONDUCTOR_WEB_MODE"]);
             const isSourceCheckout = existsSync(join(webDir, "src", "app", "page.tsx"))
               && existsSync(join(webDir, "next.config.ts"));
-            const preferDevServer = webMode === "dev" || (webMode === "auto" && isSourceCheckout);
             const standaloneDir = join(webDir, ".next", "standalone");
             const hasNextBuild = existsSync(join(webDir, ".next"));
 
@@ -1178,12 +1213,31 @@ export function registerStart(program: Command): void {
             let args: string[];
             let dashboardCwd = webDir;
 
-            if (preferDevServer) {
+            const runtimeMode = resolveDashboardRuntimeMode({
+              webMode,
+              isSourceCheckout,
+              hasNextBuild,
+              hasStandaloneServer: standaloneServer !== null,
+            });
+
+            if (!runtimeMode) {
+              if (isSourceCheckout) {
+                throw new Error(`Dashboard build is missing. Run: ${buildHint}`);
+              }
+              throw new Error(
+                "Packaged dashboard bundle is incomplete: no standalone server was found. Reinstall conductor-oss.",
+              );
+            }
+
+            if (runtimeMode === "dev") {
               ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "dev", bindHost, dashboardPort));
-            } else if (webMode === "production" && hasNextBuild) {
+            } else if (runtimeMode === "production") {
               ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "start", bindHost, dashboardPort));
-            } else if (standaloneServer) {
-              const standaloneAppDir = dirname(standaloneServer);
+            } else {
+              // runtimeMode can only be standalone here, so the resolver above
+              // guarantees this path exists.
+              const resolvedStandaloneServer = standaloneServer!;
+              const standaloneAppDir = dirname(resolvedStandaloneServer);
               const standaloneStaticDir = join(standaloneAppDir, ".next", "static");
               const sourceStaticDir = join(webDir, ".next", "static");
               const standalonePublicDir = join(standaloneAppDir, "public");
@@ -1196,12 +1250,8 @@ export function registerStart(program: Command): void {
                 cpSync(sourcePublicDir, standalonePublicDir, { recursive: true });
               }
               cmd = process.execPath;
-              args = [standaloneServer];
+              args = [resolvedStandaloneServer];
               dashboardCwd = standaloneDir;
-            } else if (hasNextBuild) {
-              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "start", bindHost, dashboardPort));
-            } else {
-              ({ cmd, args } = buildDashboardPackageManagerCommand(packageManager, "dev", bindHost, dashboardPort));
             }
 
             dashboardProcess = spawn(cmd, args, {

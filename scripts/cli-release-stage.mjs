@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
+import { execNpmCommandSync } from "./npm-exec.mjs";
+import { execTarArchiveSync } from "./release-workflow-lib.mjs";
 
 const NPM_EXECUTABLE = "npm";
 
@@ -157,13 +159,14 @@ function hydrateStandaloneNodeModules(standaloneRoot) {
 
 function sanitizePublishedPackage(pkg, {
   packageName = pkg.name,
+  packageVersion = pkg.version,
   dependencies = {},
   optionalDependencies = undefined,
   publishConfig = undefined,
 } = {}) {
   const sanitized = {
     name: packageName,
-    version: pkg.version,
+    version: packageVersion,
     license: pkg.license,
     type: pkg.type,
     main: pkg.main,
@@ -226,6 +229,25 @@ function ensureWebBundle(rootDir) {
   return { standaloneDir, staticDir, publicDir };
 }
 
+function collectStandalonePlatformDependencies(standaloneRoot) {
+  const sharpManifestPath = join(standaloneRoot, "node_modules", "sharp", "package.json");
+  if (!existsSync(sharpManifestPath)) {
+    throw new Error("The standalone dashboard is missing its traced sharp runtime.");
+  }
+
+  const sharpManifest = readJson(sharpManifestPath);
+  if (typeof sharpManifest.version !== "string" || sharpManifest.version.length === 0) {
+    throw new Error("The standalone dashboard has an invalid sharp package identity.");
+  }
+
+  // The Linux-built standalone already carries all traced JavaScript. Publishing
+  // the exact sharp version as an optional root dependency lets npm select only
+  // the target host's @img binary packages on macOS, Linux, or Windows. Do not
+  // promote the standalone tree's full optional metadata: production does not
+  // need SWC, and doing so would create a large, unstable public dependency API.
+  return { sharp: sharpManifest.version };
+}
+
 function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagingRoot }) {
   const cliPackage = readJson(resolve(rootDir, "packages", "cli", "package.json"));
   const workspacePackages = createWorkspacePackageMap(rootDir);
@@ -263,14 +285,20 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
       }
     }
 
-    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, { dependencies });
+    // Private workspace packages keep their independent development versions in
+    // source. Once bundled into the public CLI, however, npm validates them
+    // against the release-scoped dependency declared by conductor-oss. Give the
+    // bundled artifact the same immutable release identity as its parent.
+    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, {
+      packageVersion: cliVersion,
+      dependencies,
+    });
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
     copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
-    const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
+    const tarballName = execNpmCommandSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
       cwd: packageStageDir,
       encoding: "utf8",
-      shell: true,
     }).trim();
 
     tarballs.set(packageName, join(tarballRoot, tarballName));
@@ -287,7 +315,6 @@ export function createCliReleaseStage({
 } = {}) {
   const resolvedRootDir = resolve(rootDir);
   const cliPackage = readJson(resolve(resolvedRootDir, "packages", "cli", "package.json"));
-  const webPackage = readJson(resolve(resolvedRootDir, "packages", "web", "package.json"));
   const webBundle = ensureWebBundle(resolvedRootDir);
   const packageName = publishedName ?? cliPackage.name;
   const publishConfig = publishRegistry ? { registry: publishRegistry } : undefined;
@@ -335,6 +362,9 @@ export function createCliReleaseStage({
     private: true,
     type: "module",
   });
+  const standalonePlatformDependencies = collectStandalonePlatformDependencies(
+    join(webOutputDir, ".next", "standalone"),
+  );
 
   const stagedDependencies = {};
   for (const [dependencyName, specifier] of Object.entries(cliPackage.dependencies ?? {})) {
@@ -345,15 +375,22 @@ export function createCliReleaseStage({
   for (const [dependencyName, specifier] of Object.entries(externalDependencies)) {
     addDependency(stagedDependencies, dependencyName, specifier, "internal workspace package");
   }
-  for (const [dependencyName, specifier] of Object.entries(webPackage.dependencies ?? {})) {
-    if (!dependencyName.startsWith("@conductor-oss/")) {
-      addDependency(stagedDependencies, dependencyName, specifier, "@conductor-oss/web");
-    }
-  }
+  // The production web server and its complete runtime dependency tree are
+  // already traced and hydrated inside web/.next/standalone. Do not install a
+  // second root-level copy: it is never executed and would bypass the locked
+  // security overrides used to create the standalone bundle.
 
   const publishedOptionalDependencies = Object.fromEntries(
     CLI_NATIVE_TARGETS.map((target) => [target.packageName, cliPackage.version]),
   );
+  for (const [dependencyName, specifier] of Object.entries(standalonePlatformDependencies)) {
+    addDependency(
+      publishedOptionalDependencies,
+      dependencyName,
+      specifier,
+      "standalone optional runtime dependency",
+    );
+  }
 
   const stagedManifest = sanitizePublishedPackage(cliPackage, {
     packageName,
@@ -372,10 +409,9 @@ export function createCliReleaseStage({
   // If that still attempts to resolve unpublished internal versions, fall back to
   // installing only external deps and unpack internal tarballs manually.
   try {
-    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
+    execNpmCommandSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
       stdio: ["ignore", "ignore", "pipe"],
-      shell: true,
     });
   } catch {
     // If shallow install fails (pre-publish), fall back to installing only external deps
@@ -392,10 +428,9 @@ export function createCliReleaseStage({
     manifest.dependencies = externalDeps;
     writeJson(join(outputDir, "package.json"), manifest);
 
-    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
+    execNpmCommandSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
-      shell: true,
     });
 
     // Restore full deps and manually unpack internal tarballs into node_modules
@@ -407,7 +442,7 @@ export function createCliReleaseStage({
         const tarPath = spec.replace("file:", "");
         const depDir = join(outputDir, "node_modules", ...depName.split("/"));
         mkdirSync(depDir, { recursive: true });
-        execFileSync("tar", ["xzf", tarPath, "--strip-components=1", "-C", depDir], {
+        execTarArchiveSync(tarPath, ["-xzf"], ["--strip-components=1", "-C", depDir], {
           stdio: "inherit",
         });
       }
@@ -422,11 +457,6 @@ export function createCliReleaseStage({
   }
   for (const [dependencyName, specifier] of Object.entries(externalDependencies)) {
     addDependency(publishedDependencies, dependencyName, specifier, "internal workspace package");
-  }
-  for (const [dependencyName, specifier] of Object.entries(webPackage.dependencies ?? {})) {
-    if (!dependencyName.startsWith("@conductor-oss/")) {
-      addDependency(publishedDependencies, dependencyName, specifier, "@conductor-oss/web");
-    }
   }
 
   const publishedManifest = sanitizePublishedPackage(cliPackage, {
@@ -461,10 +491,9 @@ export function packCliReleasePackage({
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 
-  const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
+  const tarballName = execNpmCommandSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
-    shell: true,
   }).trim();
 
   return {

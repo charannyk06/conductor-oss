@@ -136,10 +136,18 @@ pub(crate) fn allowed_browse_roots(
     config: &ConductorConfig,
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = resolve_user_home_dir() {
-        roots.push(home);
+    if config.preferences.allow_home_browse {
+        if let Some(home) = resolve_user_home_dir() {
+            roots.push(home);
+        }
     }
     roots.push(workspace_path.to_path_buf());
+    roots.extend(
+        config
+            .projects
+            .values()
+            .map(|project| expand_path(&project.path, workspace_path)),
+    );
     roots.extend(
         config
             .preferences
@@ -387,6 +395,68 @@ mod tests {
         assert!(!roots
             .iter()
             .any(|entry| entry == std::path::Path::new("/opt")));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_browse_roots_do_not_include_home_directory() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        let roots = allowed_browse_roots(&workspace_path, &ConductorConfig::default());
+
+        if let Some(home) = super::resolve_user_home_dir() {
+            let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
+            assert!(!roots.iter().any(|entry| entry == &canonical_home));
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn opt_in_home_browse_adds_home_directory_root() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&workspace_path).unwrap();
+
+        let mut config = ConductorConfig::default();
+        config.preferences.allow_home_browse = true;
+        let roots = allowed_browse_roots(&workspace_path, &config);
+
+        if let Some(home) = super::resolve_user_home_dir() {
+            let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
+            assert!(roots.iter().any(|entry| entry == &canonical_home));
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_browse_roots_include_explicit_project_paths() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        let project_path = root.join("projects").join("demo");
+        fs::create_dir_all(&workspace_path).unwrap();
+        fs::create_dir_all(&project_path).unwrap();
+
+        let mut config = ConductorConfig::default();
+        config.projects.insert(
+            "demo".to_string(),
+            conductor_core::config::ProjectConfig {
+                path: project_path.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+        );
+
+        let roots = allowed_browse_roots(&workspace_path, &config);
+        let canonical_project = std::fs::canonicalize(&project_path).unwrap();
+
+        assert!(roots.iter().any(|entry| entry == &canonical_project));
 
         fs::remove_dir_all(&root).unwrap();
     }

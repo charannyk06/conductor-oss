@@ -9,7 +9,7 @@
     "build": "bun run --cwd ../core build && next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "find src -name '*.test.ts' -print0 | xargs -0 tsx --test",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "clean": "rm -rf .next"
   },
   "dependencies": {

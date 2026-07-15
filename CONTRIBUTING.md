@@ -16,7 +16,7 @@ cargo build --workspace
 
 - Rust toolchain (stable)
 - Bun >= 1.2
-- Node.js >= 18
+- Node.js >= 20.9.0
 - git
 
 ### Running locally
