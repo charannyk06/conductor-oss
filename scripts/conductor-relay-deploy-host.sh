@@ -423,7 +423,11 @@ if [ "$relay_jwt_secret_count" -ne 1 ] \
 fi
 relay_jwt_secret=$(sed -n 's/^RELAY_JWT_SECRET=//p' <<< "$current_env")
 relay_allowed_origins=$(sed -n 's/^RELAY_ALLOWED_ORIGINS=//p' <<< "$current_env")
-relay_allowed_origins="${relay_allowed_origins:-https://app.conductross.com}"
+hosted_relay_origins="https://app.conductross.com,https://preview.conductross.com"
+relay_allowed_origins="${relay_allowed_origins:-$hosted_relay_origins}"
+if [ "$relay_allowed_origins" = "https://app.conductross.com" ]; then
+  relay_allowed_origins="$hosted_relay_origins"
+fi
 relay_state_file=$(sed -n 's/^RELAY_STATE_FILE=//p' <<< "$current_env")
 unset current_env
 state_mount_count=$(run_docker inspect "$container_name" \

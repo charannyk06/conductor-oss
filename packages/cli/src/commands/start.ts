@@ -866,7 +866,7 @@ export function resolveRustBackendLaunch(
   };
 }
 
-async function waitForHttpService(url: string, timeoutMs = 15_000): Promise<boolean> {
+async function waitForHttpService(url: string, timeoutMs = 45_000): Promise<boolean> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     try {

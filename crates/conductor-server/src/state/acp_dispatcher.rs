@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::Utc;
 use conductor_core::config::ProjectConfig;
 use conductor_core::types::AgentKind;
 use conductor_executors::agents::build_runtime_env;
@@ -14,6 +14,17 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
+use super::acp_heartbeat::{
+    heartbeat_can_prompt_live_runtime, heartbeat_due_eligible, heartbeat_times,
+    should_sync_dispatcher_session_memory, touch_acp_dispatcher_heartbeat, ACP_HEARTBEAT_INTERVAL,
+    ACP_WATCHDOG_INTERVAL,
+};
+use super::acp_memory::{
+    clip_text, conversation_note, extract_task_refs, render_project_memory_markdown,
+    render_session_memory_markdown, should_promote_to_long_term_memory, AcpDispatcherArtifacts,
+    AcpMemoryNote, AcpProjectMemoryState, AcpSessionMemoryState, ACP_LONG_TERM_LIMIT,
+    ACP_MAX_NOTE_CHARS, ACP_MEMORY_VERSION, ACP_RECENT_BOARD_ACTIVITY_LIMIT, ACP_SHORT_TERM_LIMIT,
+};
 use super::helpers::{
     apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
     resolve_board_file, runtime_tool_metadata, sanitize_terminal_text,
@@ -34,14 +45,6 @@ use conductor_core::types::DEFAULT_SESSION_HISTORY_LIMIT;
 
 const ACP_SESSION_KIND: &str = "project_dispatcher";
 const ACP_MODE_DISPATCHER: &str = "dispatcher";
-const ACP_MEMORY_VERSION: u8 = 1;
-const ACP_HEARTBEAT_INTERVAL: ChronoDuration = ChronoDuration::minutes(15);
-const ACP_SESSION_MEMORY_SYNC_INTERVAL: ChronoDuration = ChronoDuration::seconds(5);
-const ACP_SHORT_TERM_LIMIT: usize = 8;
-const ACP_LONG_TERM_LIMIT: usize = 24;
-const ACP_RECENT_BOARD_ACTIVITY_LIMIT: usize = 8;
-const ACP_MAX_NOTE_CHARS: usize = 320;
-const ACP_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
@@ -472,55 +475,6 @@ pub(crate) struct DispatcherRuntimeHandle {
     kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct AcpMemoryNote {
-    pub timestamp: String,
-    pub label: String,
-    pub text: String,
-    #[serde(default)]
-    pub attachments: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct AcpProjectMemoryState {
-    pub version: u8,
-    pub project_id: String,
-    pub repo_path: String,
-    pub board_path: String,
-    pub default_branch: String,
-    pub implementation_agents: Vec<String>,
-    #[serde(default)]
-    pub durable_notes: Vec<AcpMemoryNote>,
-    #[serde(default)]
-    pub recent_task_refs: Vec<String>,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct AcpSessionMemoryState {
-    pub version: u8,
-    pub session_id: String,
-    pub project_id: String,
-    pub heartbeat_state: String,
-    pub last_heartbeat_at: String,
-    pub next_heartbeat_at: String,
-    #[serde(default)]
-    pub active_skills: Vec<String>,
-    #[serde(default)]
-    pub recent_conversation: Vec<AcpMemoryNote>,
-    #[serde(default)]
-    pub recent_board_activity: Vec<String>,
-    pub long_term_memory_path: String,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct AcpDispatcherArtifacts {
-    pub project_memory_display: String,
-    pub session_memory_display: String,
-    pub board_display: String,
-}
-
 pub(crate) fn is_acp_dispatcher_thread(session: &SessionRecord) -> bool {
     session.metadata.get("sessionKind").map(String::as_str) == Some(ACP_SESSION_KIND)
 }
@@ -530,279 +484,6 @@ fn display_path(workspace_root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-fn clip_text(value: &str, max_chars: usize) -> String {
-    let trimmed = value.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-    let clipped = trimmed
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
-    format!("{clipped}...")
-}
-
-fn parse_timestamp(value: Option<&String>) -> Option<DateTime<Utc>> {
-    value
-        .map(String::as_str)
-        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-        .map(|parsed| parsed.with_timezone(&Utc))
-}
-
-fn heartbeat_times(session: &SessionRecord) -> (DateTime<Utc>, DateTime<Utc>, String) {
-    let now = Utc::now();
-    let last = parse_timestamp(session.metadata.get("acpLastHeartbeatAt"))
-        .or_else(|| {
-            chrono::DateTime::parse_from_rfc3339(&session.last_activity_at)
-                .ok()
-                .map(|parsed| parsed.with_timezone(&Utc))
-        })
-        .unwrap_or(now);
-    let next = parse_timestamp(session.metadata.get("acpNextHeartbeatAt"))
-        .unwrap_or_else(|| last + ACP_HEARTBEAT_INTERVAL);
-    let state = session
-        .metadata
-        .get("acpHeartbeatState")
-        .cloned()
-        .unwrap_or_else(|| {
-            if now >= next {
-                "due".to_string()
-            } else {
-                "active".to_string()
-            }
-        });
-    (last, next, state)
-}
-
-fn touch_acp_dispatcher_heartbeat(session: &mut SessionRecord) {
-    if !is_acp_dispatcher_thread(session) {
-        return;
-    }
-    let now = Utc::now();
-    session
-        .metadata
-        .insert("acpHeartbeatState".to_string(), "active".to_string());
-    session
-        .metadata
-        .insert("acpLastHeartbeatAt".to_string(), now.to_rfc3339());
-    session.metadata.insert(
-        "acpNextHeartbeatAt".to_string(),
-        (now + ACP_HEARTBEAT_INTERVAL).to_rfc3339(),
-    );
-}
-
-fn should_sync_dispatcher_session_memory(session: &mut SessionRecord, force: bool) -> bool {
-    if !is_acp_dispatcher_thread(session) {
-        return false;
-    }
-
-    let now = Utc::now();
-    let should_sync = force
-        || parse_timestamp(
-            session
-                .metadata
-                .get(ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY),
-        )
-        .map(|last| now.signed_duration_since(last) >= ACP_SESSION_MEMORY_SYNC_INTERVAL)
-        .unwrap_or(true);
-
-    if should_sync {
-        session.metadata.insert(
-            ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY.to_string(),
-            now.to_rfc3339(),
-        );
-    }
-
-    should_sync
-}
-
-fn heartbeat_due_eligible(session: &SessionRecord) -> bool {
-    matches!(
-        session.status,
-        SessionStatus::Idle | SessionStatus::NeedsInput
-    )
-}
-
-fn heartbeat_can_prompt_live_runtime(session: &SessionRecord) -> bool {
-    matches!(
-        session.status,
-        SessionStatus::Idle | SessionStatus::NeedsInput
-    )
-}
-
-fn conversation_note(entry: &ConversationEntry) -> Option<AcpMemoryNote> {
-    let label = match entry.kind.as_str() {
-        "user_message" => "User",
-        "assistant_message" => "Assistant",
-        "system_message" if entry.source == "acp_heartbeat" => "Heartbeat",
-        _ => return None,
-    };
-    let text = clip_text(&entry.text, ACP_MAX_NOTE_CHARS);
-    if text.is_empty() {
-        return None;
-    }
-    Some(AcpMemoryNote {
-        timestamp: entry.created_at.clone(),
-        label: label.to_string(),
-        text,
-        attachments: entry.attachments.clone(),
-    })
-}
-
-fn extract_task_refs(value: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    let mut current = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' {
-            current.push(ch);
-            continue;
-        }
-        if is_task_ref_candidate(&current) {
-            refs.push(current.clone());
-        }
-        current.clear();
-    }
-    if is_task_ref_candidate(&current) {
-        refs.push(current);
-    }
-    refs
-}
-
-fn is_task_ref_candidate(value: &str) -> bool {
-    let Some((prefix, suffix)) = value.split_once('-') else {
-        return false;
-    };
-    !prefix.is_empty()
-        && prefix.chars().all(|ch| ch.is_ascii_uppercase())
-        && !suffix.is_empty()
-        && suffix.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn should_promote_to_long_term_memory(message: &str) -> bool {
-    let trimmed = message.trim();
-    if trimmed.len() < 40 {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-
-    if lower.starts_with("remember:")
-        || lower.starts_with("directive:")
-        || lower.starts_with("note:")
-        || lower.starts_with("persist:")
-        || lower.starts_with("remember that ")
-    {
-        return true;
-    }
-
-    if trimmed.chars().count() < 120 {
-        return false;
-    }
-
-    const NEEDLES: &[&str] = &[
-        "always ",
-        "never ",
-        "must ",
-        "should not",
-        " do not ",
-        "prefer ",
-        "default to",
-        "architecture",
-        "constraint",
-        "non-negotiable",
-        "phase ",
-        "milestone",
-        "heartbeat",
-    ];
-    NEEDLES.iter().any(|needle| lower.contains(needle))
-}
-
-fn render_project_memory_markdown(memory: &AcpProjectMemoryState) -> String {
-    let mut lines = vec![
-        "# ACP Project Memory".to_string(),
-        String::new(),
-        "## Project Facts".to_string(),
-        format!("- Project: {}", memory.project_id),
-        format!("- Repo path: {}", memory.repo_path),
-        format!("- Board path: {}", memory.board_path),
-        format!("- Default branch: {}", memory.default_branch),
-        format!(
-            "- Implementation agents: {}",
-            memory.implementation_agents.join(", ")
-        ),
-        String::new(),
-        "## Durable Guidance".to_string(),
-    ];
-    if memory.durable_notes.is_empty() {
-        lines.push("- No durable guidance captured yet.".to_string());
-    } else {
-        for note in &memory.durable_notes {
-            lines.push(format!(
-                "- [{}] {}: {}",
-                note.timestamp, note.label, note.text
-            ));
-        }
-    }
-    lines.push(String::new());
-    lines.push("## Recent Task References".to_string());
-    if memory.recent_task_refs.is_empty() {
-        lines.push("- None captured yet.".to_string());
-    } else {
-        for task_ref in &memory.recent_task_refs {
-            lines.push(format!("- {task_ref}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push(format!("Updated: {}", memory.updated_at));
-    lines.join("\n")
-}
-
-fn render_session_memory_markdown(memory: &AcpSessionMemoryState) -> String {
-    let mut lines = vec![
-        "# ACP Session State".to_string(),
-        String::new(),
-        "## Heartbeat".to_string(),
-        format!("- State: {}", memory.heartbeat_state),
-        format!("- Last heartbeat: {}", memory.last_heartbeat_at),
-        format!("- Next heartbeat due: {}", memory.next_heartbeat_at),
-        String::new(),
-        "## Active Skills".to_string(),
-    ];
-    if memory.active_skills.is_empty() {
-        lines.push("- No active skills registered for this session.".to_string());
-    } else {
-        for skill in &memory.active_skills {
-            lines.push(format!("- {skill}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push("## Short-Term Memory".to_string());
-    if memory.recent_conversation.is_empty() {
-        lines.push("- No recent conversation context captured yet.".to_string());
-    } else {
-        for note in &memory.recent_conversation {
-            lines.push(format!(
-                "- [{}] {}: {}",
-                note.timestamp, note.label, note.text
-            ));
-        }
-    }
-    lines.push(String::new());
-    lines.push("## Recent Board Activity".to_string());
-    if memory.recent_board_activity.is_empty() {
-        lines.push("- No recent board activity recorded yet.".to_string());
-    } else {
-        for item in &memory.recent_board_activity {
-            lines.push(format!("- {item}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push("## Long-Term Memory".to_string());
-    lines.push(format!("- {}", memory.long_term_memory_path));
-    lines.push(String::new());
-    lines.push(format!("Updated: {}", memory.updated_at));
-    lines.join("\n")
 }
 
 async fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

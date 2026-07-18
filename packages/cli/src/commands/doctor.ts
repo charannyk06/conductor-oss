@@ -6,11 +6,50 @@ import {
   type SessionHealthMetric,
   type SessionHealthResponse,
 } from "../backend.js";
+import { workspaceIdForPath } from "../workspaceIdentity.js";
 
 interface DoctorOptions {
   workspace?: string;
   json?: boolean;
   fixConfig?: boolean;
+}
+
+export interface DoctorWorkspaceCheck {
+  requestedPath: string | null;
+  expectedId: string | null;
+  backendId: string | null;
+  status: "not-requested" | "match" | "mismatch" | "unsupported";
+}
+
+export function buildDoctorWorkspaceCheck(
+  requestedPath: string | null,
+  backendWorkspaceId: string | null | undefined,
+): DoctorWorkspaceCheck {
+  if (!requestedPath) {
+    return {
+      requestedPath: null,
+      expectedId: null,
+      backendId: backendWorkspaceId ?? null,
+      status: "not-requested",
+    };
+  }
+
+  const expectedId = workspaceIdForPath(requestedPath);
+  if (!backendWorkspaceId) {
+    return {
+      requestedPath,
+      expectedId,
+      backendId: null,
+      status: "unsupported",
+    };
+  }
+
+  return {
+    requestedPath,
+    expectedId,
+    backendId: backendWorkspaceId,
+    status: expectedId === backendWorkspaceId ? "match" : "mismatch",
+  };
 }
 
 function formatDuration(seconds: number): string {
@@ -53,7 +92,7 @@ export function registerDoctor(program: Command): void {
   program
     .command("doctor")
     .description("Diagnose Rust backend health and session runtime issues")
-    .option("-w, --workspace <path>", "Workspace path (reported for context only)")
+    .option("-w, --workspace <path>", "Expected workspace path; backend mismatches fail")
     .option("--json", "Output JSON report")
     .option("--fix-config", "Deprecated. Config sync now happens through the Rust backend")
     .action(async (opts: DoctorOptions) => {
@@ -65,6 +104,21 @@ export function registerDoctor(program: Command): void {
 
         const unhealthyMetrics = sessionHealth.metrics.filter((metric) => metric.health !== "healthy");
         const hints: string[] = [];
+        const requestedWorkspace = opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"] ?? null;
+        const workspaceCheck = buildDoctorWorkspaceCheck(
+          requestedWorkspace,
+          health.workspace_id,
+        );
+
+        if (workspaceCheck.status === "mismatch") {
+          hints.push(
+            `Backend workspace mismatch: requested ${workspaceCheck.expectedId}, connected to ${workspaceCheck.backendId}. Start the backend for the requested workspace or set CONDUCTOR_BACKEND_URL explicitly.`,
+          );
+        } else if (workspaceCheck.status === "unsupported") {
+          hints.push(
+            "The backend does not report workspace identity, so this doctor run cannot verify that it belongs to the requested workspace. Update and restart Conductor.",
+          );
+        }
 
         if (health.queue_depth > 0) {
           hints.push(`${health.queue_depth} session${health.queue_depth !== 1 ? "s are" : " is"} queued waiting for launch capacity.`);
@@ -86,11 +140,16 @@ export function registerDoctor(program: Command): void {
           backend: health,
           sessions: sessionHealth,
           hints,
-          workspace: opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"] ?? null,
+          workspace: requestedWorkspace,
+          workspaceCheck,
         };
+
+        const workspaceValidationFailed =
+          workspaceCheck.status === "mismatch" || workspaceCheck.status === "unsupported";
 
         if (opts.json) {
           console.log(JSON.stringify(report, null, 2));
+          if (workspaceValidationFailed) process.exitCode = 1;
           return;
         }
 
@@ -103,6 +162,10 @@ export function registerDoctor(program: Command): void {
         console.log(chalk.bold("Backend Health"));
         console.log(`  Status:      ${health.status === "ok" ? chalk.green(health.status) : chalk.red(health.status)}`);
         console.log(`  Version:     ${chalk.cyan(health.version)}`);
+        console.log(`  Workspace:   ${chalk.dim(health.workspace_id ?? "unknown")}`);
+        if (typeof health.project_count === "number") {
+          console.log(`  Projects:    ${chalk.dim(String(health.project_count))}`);
+        }
         console.log(`  Uptime:      ${chalk.dim(formatDuration(health.uptime_secs))}`);
         console.log(`  Executors:   ${chalk.dim(String(health.executors))}`);
         console.log(`  Subscribers: ${chalk.dim(String(health.event_subscribers))}`);
@@ -136,6 +199,7 @@ export function registerDoctor(program: Command): void {
         for (const hint of hints) {
           console.log(`  ${chalk.yellow("-")} ${hint}`);
         }
+        if (workspaceValidationFailed) process.exitCode = 1;
       } catch (err) {
         console.error(chalk.red(String(err)));
         process.exit(1);

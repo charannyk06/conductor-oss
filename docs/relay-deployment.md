@@ -33,7 +33,7 @@ Create the `relay-production` GitHub environment, restrict its deployment branch
 - `RELAY_HEALTHCHECK_URL`
   - Required health endpoint, for example `https://relay.conductross.com/health`
 
-The relay host must also provide a `RELAY_JWT_SECRET` containing at least 32 bytes, an exact-origin `RELAY_ALLOWED_ORIGINS` list, and persist `/var/lib/conductor-relay` across restarts. Generate a new signing secret with `openssl rand -hex 32` and configure the same value on the relay and dashboard without committing it. The origin list defaults to `https://app.conductross.com`; self-hosted dashboards must add their own HTTP(S) origin explicitly. A missing or weak authentication secret, invalid origin policy, or unavailable state path makes startup fail or `/health` return `503` and `ready: false`.
+The relay host must also provide a `RELAY_JWT_SECRET` containing at least 32 bytes, an exact-origin `RELAY_ALLOWED_ORIGINS` list, and persist `/var/lib/conductor-relay` across restarts. Generate a new signing secret with `openssl rand -hex 32` and configure the same value on the relay and dashboard without committing it. The origin list defaults to the hosted dashboards at `https://app.conductross.com` and `https://preview.conductross.com`; self-hosted dashboards must add their own HTTP(S) origin explicitly. A missing or weak authentication secret, invalid origin policy, or unavailable state path makes startup fail or `/health` return `503` and `ready: false`.
 
 When a reverse proxy supplies `X-Forwarded-For`, set `RELAY_TRUSTED_PROXIES` to only the IP address or CIDR of the actual proxy hop. The relay ignores forwarding headers from every other peer. Leaving this value empty is secure, but all proxied device claims then share the proxy's rate-limit bucket. The production forced command derives the current Caddy container IP from the shared Docker network on each rollout instead of trusting an entire public or host network.
 
@@ -102,7 +102,7 @@ RELAY_NETWORK_ALIAS=conductor-relay \
 RELAY_PORT= \
 RELAY_DETACH=1 \
 RELAY_JWT_SECRET="$RELAY_JWT_SECRET" \
-RELAY_ALLOWED_ORIGINS=https://app.conductross.com \
+RELAY_ALLOWED_ORIGINS=https://app.conductross.com,https://preview.conductross.com \
 RELAY_TRUSTED_PROXIES='<exact proxy IP or private proxy CIDR>' \
 RELAY_STATE_VOLUME=conductor-relay-state \
 RELAY_HEALTHCHECK_URL=https://relay.conductross.com/health \

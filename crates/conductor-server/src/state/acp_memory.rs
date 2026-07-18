@@ -3,13 +3,8 @@
 //! Handles project memory (long-term directives, task refs) and session memory
 //! (heartbeat state, recent conversation, board activity).
 
-#![allow(dead_code)]
-
-use chrono::Duration as ChronoDuration;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
-use super::acp_dispatcher::ACP_ACTIVE_SKILLS_METADATA_KEY;
 use super::types::ConversationEntry;
 
 pub(crate) const ACP_MEMORY_VERSION: u8 = 1;
@@ -17,7 +12,6 @@ pub(crate) const ACP_SHORT_TERM_LIMIT: usize = 8;
 pub(crate) const ACP_LONG_TERM_LIMIT: usize = 24;
 pub(crate) const ACP_RECENT_BOARD_ACTIVITY_LIMIT: usize = 8;
 pub(crate) const ACP_MAX_NOTE_CHARS: usize = 320;
-pub(crate) const ACP_HEARTBEAT_INTERVAL: ChronoDuration = ChronoDuration::minutes(15);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct AcpMemoryNote {
@@ -251,31 +245,4 @@ pub(crate) fn render_session_memory_markdown(memory: &AcpSessionMemoryState) -> 
     lines.push(String::new());
     lines.push(format!("Updated: {}", memory.updated_at));
     lines.join("\n")
-}
-
-pub(crate) fn update_active_skills_metadata(
-    session: &mut super::SessionRecord,
-    active_skills: &[String],
-) {
-    let mut seen = HashSet::new();
-    let sanitized = active_skills
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert((*value).to_string()))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-
-    if sanitized.is_empty() {
-        session.metadata.remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
-        return;
-    }
-
-    if let Ok(serialized) = serde_json::to_string(&sanitized) {
-        session
-            .metadata
-            .insert(ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(), serialized);
-    } else {
-        session.metadata.remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
-    }
 }
