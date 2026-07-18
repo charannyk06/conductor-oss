@@ -928,6 +928,12 @@ impl AppState {
         drop(sessions);
         self.persist_session(&updated).await?;
         self.publish_snapshot().await;
+        tracing::info!(
+            event = "session_launch_stage",
+            session_id = %session_id,
+            stage = %summary,
+            "Agent launch advanced to the next stage"
+        );
         Ok(())
     }
 
@@ -1093,6 +1099,19 @@ impl AppState {
         let is_orchestration_session =
             is_orchestration_session_kind(request.session_kind.as_deref());
         let is_acp_dispatcher = is_acp_dispatcher_session_kind(request.session_kind.as_deref());
+        tracing::info!(
+            event = "session_launch_start",
+            session_id = %session_id,
+            project_id = %request.project_id,
+            agent = %project_agent,
+            source = %request.source,
+            worktree_requested = request.use_worktree.unwrap_or(true),
+            orchestration_session = is_orchestration_session,
+            acp_dispatcher = is_acp_dispatcher,
+            has_prompt = !request.prompt.trim().is_empty(),
+            attachment_count = request.attachments.len(),
+            "Starting the selected agent launch"
+        );
         let mut session_prompt = request.prompt.clone();
         let mut session_attachments = request.attachments.clone();
         if is_acp_dispatcher {
@@ -1214,6 +1233,13 @@ impl AppState {
         if !workspace_path.uses_worktree && request.branch.is_none() {
             branch = None;
         }
+        tracing::info!(
+            event = "session_workspace_ready",
+            session_id = %session_id,
+            project_id = %request.project_id,
+            uses_worktree = workspace_path.uses_worktree,
+            "Agent workspace is ready"
+        );
         let dev_server = match dev_server_result {
             Ok(dev_server) => dev_server,
             Err(err) => {
@@ -1300,6 +1326,15 @@ impl AppState {
             && !executor.accepts_prompt_on_launch_when_interactive()
             && !prompt.trim().is_empty();
 
+        let _ = self
+            .update_launch_stage(&session_id, "Starting agent runtime")
+            .await;
+        self.emit_terminal_text(
+            &session_id,
+            format_launch_progress("Starting agent runtime..."),
+        )
+        .await;
+
         let runtime_launch = match self
             .spawn_with_runtime(
                 &project,
@@ -1344,6 +1379,17 @@ impl AppState {
         let streams_terminal_bytes = runtime_launch.streams_terminal_bytes;
         let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
             runtime_launch.handle.into_parts();
+        tracing::info!(
+            event = "session_runtime_spawned",
+            session_id = %session_id,
+            project_id = %request.project_id,
+            agent = %project_agent,
+            pid,
+            streams_terminal_bytes,
+            has_terminal_stream = terminal_rx.is_some(),
+            has_resize_channel = resize_tx.is_some(),
+            "Agent process started and exposed its runtime channels"
+        );
         if self
             .get_session(&session_id)
             .await
@@ -1580,6 +1626,14 @@ impl AppState {
                 .expect("runtime kill channel should exist before terminal attachment"),
         )
         .await;
+        tracing::info!(
+            event = "session_terminal_attached",
+            session_id = %session_id,
+            project_id = %request.project_id,
+            agent = %project_agent,
+            pid,
+            "Agent runtime is attached to the terminal host"
+        );
         self.start_output_consumer(
             session_id.clone(),
             executor,

@@ -37,6 +37,17 @@ test("embedded terminal schedules a geometry burst so desktop panes do not stay 
   assert.match(source, /clearGeometryBurst\?\.\(\);\n\s*clearReconnectTimer\(\);/);
 });
 
+test("embedded terminal handshakes before resize and deduplicates settled geometry", () => {
+  const source = readFileSync(new URL("./IframeTerminalPage.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /ws\.send\(encodeTtydHandshakeFrame\(cols, rows\)\);/);
+  assert.match(source, /lastSentGeometryRef\.current = \{ cols, rows \};/);
+  assert.match(
+    source,
+    /if \(previous\?\.cols === geometry\.cols && previous\.rows === geometry\.rows\) \{\n\s*return;/,
+  );
+});
+
 test("embedded terminal route avoids server-importing browser-only xterm values", () => {
   const pageSource = readFileSync(new URL("../../app/embed/terminal/[id]/page.tsx", import.meta.url), "utf8");
   const terminalSource = readFileSync(new URL("./IframeTerminalPage.tsx", import.meta.url), "utf8");

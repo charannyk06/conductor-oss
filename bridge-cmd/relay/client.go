@@ -629,14 +629,38 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 				go func(terminalID string, sessionID string) {
 					defer activeTerminals.Delete(terminalID)
-					if err := proxyTerminalSession(
+					startedAt := time.Now()
+					fmt.Fprintf(
+						opts.stderr,
+						"terminal proxy lifecycle event=start terminal_id=%s session_id=%s\n",
+						terminalID,
+						sessionID,
+					)
+					err := proxyTerminalSession(
 						ctx,
 						opts.relayURL,
 						opts.refreshToken,
 						terminalID,
 						sessionID,
-					); err != nil && ctx.Err() == nil {
-						fmt.Fprintf(opts.stderr, "terminal proxy %s ended: %v\n", terminalID, err)
+						opts.stderr,
+					)
+					if err != nil && ctx.Err() == nil {
+						fmt.Fprintf(
+							opts.stderr,
+							"terminal proxy lifecycle event=end terminal_id=%s session_id=%s duration_ms=%d outcome=error error=%v\n",
+							terminalID,
+							sessionID,
+							time.Since(startedAt).Milliseconds(),
+							err,
+						)
+					} else {
+						fmt.Fprintf(
+							opts.stderr,
+							"terminal proxy lifecycle event=end terminal_id=%s session_id=%s duration_ms=%d outcome=closed\n",
+							terminalID,
+							sessionID,
+							time.Since(startedAt).Milliseconds(),
+						)
 					}
 				}(terminalID, sessionID)
 
@@ -864,7 +888,12 @@ func shouldRetryTerminalAttach(err error) bool {
 	return false
 }
 
-func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.Conn, backendTerminalProtocol, error) {
+func connectBackendTerminal(
+	ctx context.Context,
+	sessionID string,
+	terminalID string,
+	stderr io.Writer,
+) (*websocket.Conn, backendTerminalProtocol, error) {
 	var lastErr error
 	backoff := 250 * time.Millisecond
 
@@ -873,17 +902,43 @@ func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.C
 			return nil, "", ctx.Err()
 		}
 
+		fmt.Fprintf(
+			stderr,
+			"terminal proxy lifecycle event=backend_attach_attempt terminal_id=%s session_id=%s attempt=%d max_attempts=%d\n",
+			terminalID,
+			sessionID,
+			attempt+1,
+			terminalAttachMaxAttempts,
+		)
 		backendEndpoint, protocol, err := fetchSessionTerminalWSURL(sessionID)
 		if err == nil {
 			conn, _, dialErr := websocket.DefaultDialer.DialContext(ctx, backendEndpoint, nil)
 			if dialErr == nil {
+				fmt.Fprintf(
+					stderr,
+					"terminal proxy lifecycle event=backend_attached terminal_id=%s session_id=%s attempt=%d protocol=%s\n",
+					terminalID,
+					sessionID,
+					attempt+1,
+					protocol,
+				)
 				return conn, protocol, nil
 			}
 			err = &terminalAttachError{err: fmt.Errorf("connect backend terminal socket: %w", dialErr)}
 		}
 
 		lastErr = err
-		if !shouldRetryTerminalAttach(err) || attempt == terminalAttachMaxAttempts-1 {
+		willRetry := shouldRetryTerminalAttach(err) && attempt < terminalAttachMaxAttempts-1
+		fmt.Fprintf(
+			stderr,
+			"terminal proxy lifecycle event=backend_attach_failed terminal_id=%s session_id=%s attempt=%d retry=%t error=%v\n",
+			terminalID,
+			sessionID,
+			attempt+1,
+			willRetry,
+			err,
+		)
+		if !willRetry {
 			break
 		}
 
@@ -932,6 +987,18 @@ func parseRelayResizeMessage(payload []byte) (int, int, error) {
 	return resize.Columns, resize.Rows, nil
 }
 
+func terminalWebSocketReadError(peer string, err error) error {
+	if websocket.IsCloseError(
+		err,
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseNoStatusReceived,
+	) {
+		return io.EOF
+	}
+	return fmt.Errorf("%s read: %w", peer, err)
+}
+
 func proxyTTYDTerminalSession(ctx context.Context, backendConn *websocket.Conn, relayConn *websocket.Conn) error {
 	errCh := make(chan error, 2)
 
@@ -940,7 +1007,7 @@ func proxyTTYDTerminalSession(ctx context.Context, backendConn *websocket.Conn, 
 			for {
 				msgType, data, err := src.ReadMessage()
 				if err != nil {
-					errCh <- fmt.Errorf("%s read: %w", srcName, err)
+					errCh <- terminalWebSocketReadError(srcName, err)
 					return
 				}
 				switch msgType {
@@ -982,7 +1049,7 @@ func proxyNativeTerminalSession(ctx context.Context, backendConn *websocket.Conn
 		for {
 			msgType, data, err := relayConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("relay terminal read: %w", err)
+				errCh <- terminalWebSocketReadError("relay terminal", err)
 				return
 			}
 			switch msgType {
@@ -1072,7 +1139,7 @@ func proxyNativeTerminalSession(ctx context.Context, backendConn *websocket.Conn
 		for {
 			msgType, data, err := backendConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("backend terminal read: %w", err)
+				errCh <- terminalWebSocketReadError("backend terminal", err)
 				return
 			}
 			switch msgType {
@@ -1114,8 +1181,9 @@ func proxyTerminalSession(
 	refreshToken string,
 	terminalID string,
 	sessionID string,
+	stderr io.Writer,
 ) error {
-	backendConn, protocol, err := connectBackendTerminal(ctx, sessionID)
+	backendConn, protocol, err := connectBackendTerminal(ctx, sessionID, terminalID, stderr)
 	if err != nil {
 		return err
 	}
@@ -1133,6 +1201,13 @@ func proxyTerminalSession(
 	}
 	defer relayConn.Close()
 	relayConn.SetReadLimit(maxBridgeWebSocketMessageBytes)
+	fmt.Fprintf(
+		stderr,
+		"terminal proxy lifecycle event=relay_attached terminal_id=%s session_id=%s protocol=%s\n",
+		terminalID,
+		sessionID,
+		protocol,
+	)
 
 	if protocol == backendTerminalProtocolTTYD {
 		return proxyTTYDTerminalSession(ctx, backendConn, relayConn)

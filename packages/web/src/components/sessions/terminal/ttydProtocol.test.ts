@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  encodeTtydHandshakeFrame,
   encodeTtydInputFrame,
   encodeTtydResizeFrame,
   TTYD_CLIENT_COMMAND,
@@ -19,6 +20,15 @@ test("ttyd command directions preserve the shared byte contract", () => {
     resize: 0x31,
     pause: 0x32,
     resume: 0x33,
+  });
+});
+
+test("ttyd handshake is an unprefixed JSON frame", () => {
+  const handshake = encodeTtydHandshakeFrame(120, 40);
+  assert.equal(handshake[0], "{".charCodeAt(0));
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(handshake)), {
+    columns: 120,
+    rows: 40,
   });
 });
 

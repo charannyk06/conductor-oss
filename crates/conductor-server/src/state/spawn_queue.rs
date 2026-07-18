@@ -126,6 +126,25 @@ impl AppState {
         });
 
         self.replace_session(record.clone()).await?;
+        tracing::info!(
+            event = "session_launch_queued",
+            session_id = %record.id,
+            project_id = %record.project_id,
+            agent = %record.agent,
+            source = %record
+                .metadata
+                .get(QUEUED_SOURCE_METADATA_KEY)
+                .map(String::as_str)
+                .unwrap_or("unknown"),
+            has_prompt = !record.prompt.trim().is_empty(),
+            attachment_count = record
+                .conversation
+                .first()
+                .map(|entry| entry.attachments.len())
+                .unwrap_or_default(),
+            kick_supervisor,
+            "Session launch entered the manager queue"
+        );
         if kick_supervisor {
             self.kick_spawn_supervisor().await;
         }
@@ -153,11 +172,29 @@ impl AppState {
                 continue;
             }
 
+            tracing::info!(
+                event = "session_launch_decision",
+                decision = "launch",
+                session_id = %session_id,
+                project_id = %request.project_id,
+                agent = request.agent.as_deref().unwrap_or("project-default"),
+                "Launch manager committed the queued session"
+            );
+
             match self
                 .spawn_session_now(request.clone(), Some(session_id.clone()))
                 .await
             {
-                Ok(_) => {}
+                Ok(record) => {
+                    tracing::info!(
+                        event = "session_launch_complete",
+                        session_id = %record.id,
+                        project_id = %record.project_id,
+                        agent = %record.agent,
+                        pid = record.pid,
+                        "Launch manager attached the agent runtime"
+                    );
+                }
                 Err(err) => {
                     tracing::warn!(session_id, error = %err, "Queued session launch failed");
                     self.record_error(
@@ -227,7 +264,9 @@ impl AppState {
         let queued_count = queued_ids.len();
         let (global_active, per_project_active) = self.launch_capacity_snapshot().await;
         if global_active >= MAX_GLOBAL_CONCURRENT_LAUNCHES {
-            tracing::debug!(
+            tracing::info!(
+                event = "session_launch_decision",
+                decision = "blocked_global_capacity",
                 queued_count,
                 global_active,
                 global_limit = MAX_GLOBAL_CONCURRENT_LAUNCHES,
@@ -250,7 +289,9 @@ impl AppState {
 
             // Dedup only exact launch duplicates. Different agents should not block each other.
             if active_launch_fingerprints.contains(&launch_fingerprint) {
-                tracing::debug!(
+                tracing::info!(
+                    event = "session_launch_decision",
+                    decision = "skip_exact_duplicate",
                     session_id,
                     project_id = session.project_id,
                     agent = session.agent,
@@ -265,7 +306,9 @@ impl AppState {
                 .copied()
                 .unwrap_or_default();
             if project_active >= MAX_PROJECT_CONCURRENT_LAUNCHES {
-                tracing::debug!(
+                tracing::info!(
+                    event = "session_launch_decision",
+                    decision = "blocked_project_capacity",
                     session_id,
                     project_id = session.project_id,
                     project_active,
@@ -277,6 +320,13 @@ impl AppState {
 
             let Some(raw_request) = session.metadata.get(SPAWN_REQUEST_METADATA_KEY).cloned()
             else {
+                tracing::warn!(
+                    event = "session_launch_decision",
+                    decision = "invalid_queue_record",
+                    session_id,
+                    project_id = session.project_id,
+                    "Queued session is missing its spawn request"
+                );
                 let _ = self
                     .mark_queued_session_failed(
                         &session_id,
@@ -288,15 +338,28 @@ impl AppState {
 
             match serde_json::from_str::<SpawnRequest>(&raw_request) {
                 Ok(request) => {
-                    tracing::debug!(
+                    tracing::info!(
+                        event = "session_launch_decision",
+                        decision = "selected",
                         session_id,
                         project_id = session.project_id,
                         agent = session.agent,
+                        queued_count,
+                        global_active,
+                        project_active,
                         "Spawn queue selected a queued session for launch"
                     );
                     return Some((session_id, request));
                 }
                 Err(err) => {
+                    tracing::warn!(
+                        event = "session_launch_decision",
+                        decision = "invalid_spawn_request",
+                        session_id,
+                        project_id = session.project_id,
+                        error = %err,
+                        "Queued session spawn request could not be decoded"
+                    );
                     let _ = self
                         .mark_queued_session_failed(
                             &session_id,
@@ -307,7 +370,9 @@ impl AppState {
             }
         }
 
-        tracing::debug!(
+        tracing::info!(
+            event = "session_launch_decision",
+            decision = "none_eligible",
             queued_count,
             global_active,
             "Spawn queue found queued sessions but none were eligible to launch"

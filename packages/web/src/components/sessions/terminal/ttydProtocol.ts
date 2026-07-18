@@ -11,6 +11,10 @@ export const TTYD_CLIENT_COMMAND = Object.freeze({
   resume: "3".charCodeAt(0),
 });
 
+export function encodeTtydHandshakeFrame(cols: number, rows: number): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
+}
+
 export function encodeTtydResizeFrame(cols: number, rows: number): Uint8Array<ArrayBuffer> {
   const payload = new TextEncoder().encode(JSON.stringify({ columns: cols, rows }));
   const frame = new Uint8Array(payload.length + 1);
