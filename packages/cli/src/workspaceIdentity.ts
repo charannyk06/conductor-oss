@@ -12,6 +12,12 @@ function expandHome(value: string): string {
   return trimmed;
 }
 
+export function normalizeWorkspaceIdentityPath(value: string): string {
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice(4);
+  return value;
+}
+
 export function resolveWorkspaceConfigPath(workspaceOrConfigPath: string): string {
   const candidate = resolve(expandHome(workspaceOrConfigPath));
   return basename(candidate) === "conductor.yaml"
@@ -26,7 +32,7 @@ export function workspaceIdForPath(workspaceOrConfigPath: string): string {
 
 export function workspaceIdForDirectory(workspacePath: string): string {
   return createHash("sha256")
-    .update(realpathSync(resolve(expandHome(workspacePath))))
+    .update(normalizeWorkspaceIdentityPath(realpathSync(resolve(expandHome(workspacePath)))))
     .digest("hex")
     .slice(0, 12);
 }

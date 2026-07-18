@@ -67,8 +67,9 @@ for dashboard_origin in "$app_origin" "$preview_origin"; do
     -H "Origin: $dashboard_origin" \
     "$relay_origin/health"
   allowed_origin=$(tr -d '\r' < "$headers" \
-    | sed -n 's/^access-control-allow-origin: //Ip' \
-    | tail -n 1)
+    | awk 'tolower($0) ~ /^access-control-allow-origin:[[:space:]]*/ {
+        sub(/^[^:]*:[[:space:]]*/, ""); value = $0
+      } END { print value }')
   if [ "$allowed_origin" != "$dashboard_origin" ]; then
     echo "Relay did not allow hosted dashboard origin $dashboard_origin" >&2
     exit 1

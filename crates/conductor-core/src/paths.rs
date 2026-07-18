@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+#[cfg(any(windows, test))]
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,12 +10,28 @@ pub const CONDUCTOR_DATA_DIR: &str = "~/.conductor";
 pub fn generate_workspace_hash(workspace_path: &Path) -> Result<String> {
     let resolved = fs::canonicalize(workspace_path)
         .with_context(|| format!("failed to canonicalize {}", workspace_path.display()))?;
-    let digest = sha256(resolved.to_string_lossy().as_bytes());
+    let resolved_text = resolved.to_string_lossy();
+    #[cfg(windows)]
+    let identity_text = normalize_windows_extended_path(&resolved_text);
+    #[cfg(not(windows))]
+    let identity_text = resolved_text;
+    let digest = sha256(identity_text.as_bytes());
     let hex = digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(hex[..12].to_string())
+}
+
+#[cfg(any(windows, test))]
+fn normalize_windows_extended_path(value: &str) -> Cow<'_, str> {
+    if let Some(suffix) = value.strip_prefix(r"\\?\UNC\") {
+        return Cow::Owned(format!(r"\\{suffix}"));
+    }
+    if let Some(suffix) = value.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(suffix);
+    }
+    Cow::Borrowed(value)
 }
 
 pub fn generate_config_hash(config_path: &Path) -> Result<String> {
@@ -444,6 +462,22 @@ mod tests {
         assert_eq!(
             generate_workspace_hash(temp_dir.path()).unwrap(),
             generate_config_hash(&config_path).unwrap(),
+        );
+    }
+
+    #[test]
+    fn windows_extended_paths_normalize_to_node_realpath_form() {
+        assert_eq!(
+            normalize_windows_extended_path(r"\\?\C:\Users\dev\workspace"),
+            r"C:\Users\dev\workspace"
+        );
+        assert_eq!(
+            normalize_windows_extended_path(r"\\?\UNC\server\share\workspace"),
+            r"\\server\share\workspace"
+        );
+        assert_eq!(
+            normalize_windows_extended_path(r"C:\Users\dev\workspace"),
+            r"C:\Users\dev\workspace"
         );
     }
 

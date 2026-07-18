@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import {
+  normalizeWorkspaceIdentityPath,
   resolveWorkspaceConfigPath,
   workspaceIdForDirectory,
   workspaceIdForPath,
@@ -28,4 +29,15 @@ test("workspace identity matches the backend config-directory hash contract", ()
   assert.equal(workspaceIdForPath(workspace), expected);
   assert.equal(workspaceIdForPath(configPath), expected);
   assert.equal(workspaceIdForDirectory(workspace), expected);
+});
+
+test("workspace identity normalizes Windows extended paths", () => {
+  assert.equal(
+    normalizeWorkspaceIdentityPath("\\\\?\\C:\\Users\\dev\\workspace"),
+    "C:\\Users\\dev\\workspace",
+  );
+  assert.equal(
+    normalizeWorkspaceIdentityPath("\\\\?\\UNC\\server\\share\\workspace"),
+    "\\\\server\\share\\workspace",
+  );
 });
