@@ -716,7 +716,7 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 const RELAY_STATE_FILE_ENV: &str = "RELAY_STATE_FILE";
 const RELAY_ALLOWED_ORIGINS_ENV: &str = "RELAY_ALLOWED_ORIGINS";
 const RELAY_TRUSTED_PROXIES_ENV: &str = "RELAY_TRUSTED_PROXIES";
-const DEFAULT_ALLOWED_ORIGINS: &str = "https://app.conductross.com";
+const DEFAULT_ALLOWED_ORIGINS: &str = "https://app.conductross.com,https://preview.conductross.com";
 const CONDUCTOR_BUILD_SHA_ENV: &str = "CONDUCTOR_BUILD_SHA";
 const DEFAULT_JWT_SECRET_ENV: &str = "RELAY_JWT_SECRET";
 const MIN_RELAY_JWT_SECRET_BYTES: usize = 32;
@@ -6834,7 +6834,10 @@ mod tests {
         let defaults = parse_allowed_origins(None).expect("production default origin");
         assert_eq!(
             defaults,
-            vec![HeaderValue::from_static("https://app.conductross.com")]
+            vec![
+                HeaderValue::from_static("https://app.conductross.com"),
+                HeaderValue::from_static("https://preview.conductross.com"),
+            ]
         );
 
         let configured = parse_allowed_origins(Some(

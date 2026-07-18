@@ -15,6 +15,8 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let workspace_id = conductor_core::paths::generate_workspace_hash(&state.workspace_path).ok();
+    let project_count = state.config.read().await.projects.len();
     let executors = state.executors.read().await;
     let live_session_ids = state
         .attached_terminal_session_ids()
@@ -49,6 +51,8 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
         Json(json!({
             "status": "ok",
             "version": conductor_core::BUILD_VERSION,
+            "workspace_id": workspace_id,
+            "project_count": project_count,
             "uptime_secs": (chrono::Utc::now() - state.started_at).num_seconds().max(0),
             "executors": executors.len(),
             "event_subscribers": state.event_snapshots.receiver_count(),

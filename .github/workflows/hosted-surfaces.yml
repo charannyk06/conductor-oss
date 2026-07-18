@@ -1,0 +1,25 @@
+name: Hosted Surfaces
+
+on:
+  schedule:
+    - cron: "17 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-surfaces
+  cancel-in-progress: true
+
+jobs:
+  production-contract:
+    name: Production contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify hosted dashboard and relay alignment
+        run: bash scripts/check-hosted-surfaces.sh

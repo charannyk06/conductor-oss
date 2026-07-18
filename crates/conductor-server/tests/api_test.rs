@@ -3,11 +3,40 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{TestExecutor, TestHarness};
+use conductor_core::paths::generate_workspace_hash;
 use conductor_core::types::AgentKind;
 use conductor_server::state::SessionRecord;
 use serde_json::json;
 use std::sync::Arc;
 use tower::util::ServiceExt;
+
+#[tokio::test]
+async fn health_reports_non_sensitive_workspace_identity() {
+    let harness = TestHarness::new("conductor-api-health-identity", "direct").await;
+    let expected_workspace_id = generate_workspace_hash(&harness.state.workspace_path).unwrap();
+    let workspace_path = harness.state.workspace_path.to_string_lossy().to_string();
+
+    let response = harness
+        .app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["workspace_id"], expected_workspace_id);
+    assert_eq!(payload["project_count"], 1);
+    assert!(!String::from_utf8_lossy(&body).contains(&workspace_path));
+}
 
 #[tokio::test]
 async fn smoke_all_route_modules() {

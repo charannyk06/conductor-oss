@@ -54,6 +54,8 @@ export interface SessionResponse {
 export interface HealthResponse {
   status: string;
   version: string;
+  workspace_id?: string | null;
+  project_count?: number;
   uptime_secs: number;
   executors: number;
   event_subscribers: number;
@@ -164,8 +166,8 @@ async function resolveBackendBaseUrl(): Promise<string> {
   const candidates = [
     process.env["CONDUCTOR_DEV_BACKEND_PORT"]?.trim(),
     process.env["CONDUCTOR_PROD_BACKEND_PORT"]?.trim(),
-    "4749",
     "4748",
+    "4749",
   ]
     .filter(
       (value, index, values): value is string =>
