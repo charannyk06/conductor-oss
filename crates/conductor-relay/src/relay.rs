@@ -502,7 +502,7 @@ struct ProxiedPreviewResponse {
 /// Maximum number of output chunks buffered while the browser peer is paused.
 const TERMINAL_PAUSE_BUFFER_CAPACITY: usize = 256;
 /// Maximum aggregate bytes buffered while a browser terminal is paused.
-const TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY: usize = 2 * 1024 * 1024;
+const TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY: usize = MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES;
 /// Browser input/handshake frames held while the paired bridge proxy catches up.
 const TERMINAL_PENDING_BROWSER_FRAME_CAPACITY: usize = 256;
 const TERMINAL_PENDING_BROWSER_FRAME_BYTE_CAPACITY: usize = 2 * 1024 * 1024;
@@ -518,6 +518,10 @@ const GLOBAL_WS_QUEUE_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 const USER_WS_QUEUE_BYTE_CAPACITY: usize = 32 * 1024 * 1024;
 const CHANNEL_WS_QUEUE_BYTE_CAPACITY: usize = 16 * 1024 * 1024;
 const MAX_WS_MESSAGE_BYTES: usize = 1024 * 1024;
+/// The backend retains up to 2 MiB of terminal history and replays it as one ttyd output
+/// message. Account for the ttyd command byte while keeping every other relay WebSocket at the
+/// tighter general-purpose limit above.
+const MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES: usize = 2 * 1024 * 1024 + 1;
 /// ttyd protocol command bytes (first byte of binary WebSocket message).
 const TTYD_CMD_RESIZE: u8 = b'1';
 const TTYD_CMD_PAUSE: u8 = b'2';
@@ -1744,8 +1748,8 @@ async fn bridge_terminal_ws(
         .await
     {
         Ok(()) => ws
-            .max_message_size(MAX_WS_MESSAGE_BYTES)
-            .max_frame_size(MAX_WS_MESSAGE_BYTES)
+            .max_message_size(MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES)
+            .max_frame_size(MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES)
             .on_upgrade(move |socket| async move {
                 if let Err(err) =
                     handle_terminal_connection(state, terminal_id, TerminalPeerKind::Bridge, socket)
@@ -2717,7 +2721,21 @@ impl RelayState {
         let Some(current_sender) = current_sender else {
             return false;
         };
-        if websocket_message_size(message) > MAX_WS_MESSAGE_BYTES {
+        let message_bytes = websocket_message_size(message);
+        let message_limit = match peer_kind {
+            TerminalPeerKind::Browser => MAX_WS_MESSAGE_BYTES,
+            TerminalPeerKind::Bridge => MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES,
+        };
+        if message_bytes > message_limit {
+            warn!(
+                event = "relay_terminal_message",
+                action = "rejected_oversized",
+                %terminal_id,
+                ?peer_kind,
+                message_bytes,
+                message_limit,
+                "relay terminal message exceeded its directional byte limit"
+            );
             let _ = current_sender.try_send(Message::Close(Some(CloseFrame {
                 code: 1009,
                 reason: "Relay WebSocket message exceeded the byte limit.".into(),
@@ -6358,6 +6376,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_bridge_output_accepts_backend_snapshot_above_control_limit() {
+        let state = RelayState::default();
+        state.inner.lock().await.terminal_sessions.insert(
+            "terminal-1".to_string(),
+            detached_terminal("terminal-1", "session-1", "device-1", "owner-a"),
+        );
+        let (browser_tx, mut browser_rx) = test_message_channel(TERMINAL_WS_QUEUE_CAPACITY);
+        state
+            .register_terminal_connection("terminal-1", TerminalPeerKind::Browser, browser_tx)
+            .await
+            .expect("browser connection");
+        let (bridge_tx, _bridge_rx) = test_message_channel(TERMINAL_WS_QUEUE_CAPACITY);
+        let bridge_connection_id = state
+            .register_terminal_connection("terminal-1", TerminalPeerKind::Bridge, bridge_tx)
+            .await
+            .expect("bridge connection");
+
+        // This is the exact retained-screen frame size observed in production. It is larger than
+        // the general relay limit but remains below the backend's bounded 2 MiB snapshot ceiling.
+        let snapshot_bytes = MAX_WS_MESSAGE_BYTES + 4096;
+        let output = Message::Binary(vec![b'0'; snapshot_bytes].into());
+        assert!(
+            state
+                .forward_terminal_message(
+                    "terminal-1",
+                    TerminalPeerKind::Bridge,
+                    bridge_connection_id,
+                    &output,
+                )
+                .await
+        );
+        let forwarded = browser_rx
+            .recv()
+            .await
+            .expect("snapshot should be forwarded");
+        assert_eq!(websocket_message_size(&forwarded), snapshot_bytes);
+    }
+
+    #[tokio::test]
+    async fn terminal_browser_input_keeps_the_general_message_limit() {
+        let state = RelayState::default();
+        state.inner.lock().await.terminal_sessions.insert(
+            "terminal-1".to_string(),
+            detached_terminal("terminal-1", "session-1", "device-1", "owner-a"),
+        );
+        let (browser_tx, mut browser_rx) = test_message_channel(TERMINAL_WS_QUEUE_CAPACITY);
+        let browser_connection_id = state
+            .register_terminal_connection("terminal-1", TerminalPeerKind::Browser, browser_tx)
+            .await
+            .expect("browser connection");
+        let oversized_input = Message::Binary(vec![b'0'; MAX_WS_MESSAGE_BYTES + 1].into());
+
+        assert!(
+            !state
+                .forward_terminal_message(
+                    "terminal-1",
+                    TerminalPeerKind::Browser,
+                    browser_connection_id,
+                    &oversized_input,
+                )
+                .await
+        );
+        assert!(matches!(browser_rx.recv().await, Some(Message::Close(_))));
+    }
+
+    #[tokio::test]
     async fn device_channel_registration_rejects_a_different_owner() {
         let state = RelayState::default();
         {
@@ -6598,6 +6682,30 @@ mod tests {
             .await
             .terminal_sessions
             .insert("terminal-1".to_string(), terminal);
+
+        let retained_snapshot =
+            Message::Binary(vec![0_u8; MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES].into());
+        assert!(
+            state
+                .forward_terminal_message(
+                    "terminal-1",
+                    TerminalPeerKind::Bridge,
+                    7,
+                    &retained_snapshot,
+                )
+                .await
+        );
+        assert_eq!(
+            state
+                .inner
+                .lock()
+                .await
+                .terminal_sessions
+                .get("terminal-1")
+                .expect("terminal remains active")
+                .pause_buffer_bytes,
+            MAX_TERMINAL_BRIDGE_WS_MESSAGE_BYTES
+        );
 
         let chunk = Message::Binary(vec![0_u8; 700 * 1024].into());
         for _ in 0..4 {
