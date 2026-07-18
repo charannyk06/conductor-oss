@@ -131,6 +131,9 @@ struct TerminalSessionRecord {
     /// Buffered output chunks received while the browser was paused, replayed on resume.
     pause_buffer: Vec<Message>,
     pause_buffer_bytes: usize,
+    /// Browser-to-bridge frames received before the bridge proxy attaches.
+    pending_browser_frames: Vec<Message>,
+    pending_browser_frame_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -419,25 +422,54 @@ impl TerminalSessionRecord {
         }
     }
 
-    fn buffer_terminal_message(&mut self, message: Message) -> bool {
+    fn buffer_paused_output(&mut self, message: Message) -> bool {
+        buffer_terminal_message(
+            &mut self.pause_buffer,
+            &mut self.pause_buffer_bytes,
+            TERMINAL_PAUSE_BUFFER_CAPACITY,
+            TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY,
+            message,
+        )
+    }
+
+    fn buffer_pending_browser_frame(&mut self, message: Message) -> bool {
         let message_bytes = websocket_message_size(&message);
-        if message_bytes > TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY {
+        if self.pending_browser_frames.len() >= TERMINAL_PENDING_BROWSER_FRAME_CAPACITY
+            || self
+                .pending_browser_frame_bytes
+                .saturating_add(message_bytes)
+                > TERMINAL_PENDING_BROWSER_FRAME_BYTE_CAPACITY
+        {
             return false;
         }
-        while !self.pause_buffer.is_empty()
-            && (self.pause_buffer.len() >= TERMINAL_PAUSE_BUFFER_CAPACITY
-                || self.pause_buffer_bytes.saturating_add(message_bytes)
-                    > TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY)
-        {
-            let removed = self.pause_buffer.remove(0);
-            self.pause_buffer_bytes = self
-                .pause_buffer_bytes
-                .saturating_sub(websocket_message_size(&removed));
-        }
-        self.pause_buffer_bytes = self.pause_buffer_bytes.saturating_add(message_bytes);
-        self.pause_buffer.push(message);
+        self.pending_browser_frame_bytes = self
+            .pending_browser_frame_bytes
+            .saturating_add(message_bytes);
+        self.pending_browser_frames.push(message);
         true
     }
+}
+
+fn buffer_terminal_message(
+    buffer: &mut Vec<Message>,
+    buffer_bytes: &mut usize,
+    capacity: usize,
+    byte_capacity: usize,
+    message: Message,
+) -> bool {
+    let message_bytes = websocket_message_size(&message);
+    if message_bytes > byte_capacity {
+        return false;
+    }
+    while !buffer.is_empty()
+        && (buffer.len() >= capacity || buffer_bytes.saturating_add(message_bytes) > byte_capacity)
+    {
+        let removed = buffer.remove(0);
+        *buffer_bytes = buffer_bytes.saturating_sub(websocket_message_size(&removed));
+    }
+    *buffer_bytes = buffer_bytes.saturating_add(message_bytes);
+    buffer.push(message);
+    true
 }
 
 #[derive(Debug)]
@@ -471,6 +503,9 @@ struct ProxiedPreviewResponse {
 const TERMINAL_PAUSE_BUFFER_CAPACITY: usize = 256;
 /// Maximum aggregate bytes buffered while a browser terminal is paused.
 const TERMINAL_PAUSE_BUFFER_BYTE_CAPACITY: usize = 2 * 1024 * 1024;
+/// Browser input/handshake frames held while the paired bridge proxy catches up.
+const TERMINAL_PENDING_BROWSER_FRAME_CAPACITY: usize = 256;
+const TERMINAL_PENDING_BROWSER_FRAME_BYTE_CAPACITY: usize = 2 * 1024 * 1024;
 /// Per-connection outbound queue bounds. A slow peer may drop traffic, but cannot grow memory
 /// without limit.
 const CONTROL_WS_QUEUE_CAPACITY: usize = 128;
@@ -2282,6 +2317,8 @@ impl RelayState {
                         browser_paused: false,
                         pause_buffer: Vec::new(),
                         pause_buffer_bytes: 0,
+                        pending_browser_frames: Vec::new(),
+                        pending_browser_frame_bytes: 0,
                     },
                 );
 
@@ -2487,6 +2524,8 @@ impl RelayState {
             let (replaced, pending_browser_messages) = match peer_kind {
                 TerminalPeerKind::Browser => {
                     session.browser_disconnected_at = None;
+                    session.pending_browser_frames.clear();
+                    session.pending_browser_frame_bytes = 0;
                     (
                         session.browser.replace(record).map(|record| record.tx),
                         Vec::new(),
@@ -2498,12 +2537,8 @@ impl RelayState {
                     // The browser is intentionally allowed to connect while the bridge
                     // catches up. Preserve its ttyd handshake/input until the bridge
                     // socket exists so the first readiness frame cannot be lost.
-                    let pending = if session.browser_paused {
-                        Vec::new()
-                    } else {
-                        session.pause_buffer_bytes = 0;
-                        std::mem::take(&mut session.pause_buffer)
-                    };
+                    session.pending_browser_frame_bytes = 0;
+                    let pending = std::mem::take(&mut session.pending_browser_frames);
                     (replaced, pending)
                 }
             };
@@ -2515,18 +2550,39 @@ impl RelayState {
         }
         if !pending_browser_messages.is_empty() {
             let pending_count = pending_browser_messages.len();
+            let mut replayed_count = 0_usize;
+            let mut replay_failure = None;
             for message in pending_browser_messages {
-                if pending_tx.try_send(message).is_err() {
-                    warn!(
-                        event = "relay_terminal_connection",
-                        action = "pending_browser_replay_failed",
-                        %terminal_id,
-                        connection_id,
-                        pending_count,
-                        "failed to replay browser terminal frames after bridge attach"
-                    );
-                    break;
+                match pending_tx.try_send(message) {
+                    Ok(()) => replayed_count = replayed_count.saturating_add(1),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        replay_failure = Some("queue_full");
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        replay_failure = Some("queue_closed");
+                        break;
+                    }
                 }
+            }
+            if let Some(reason) = replay_failure {
+                warn!(
+                    event = "relay_terminal_connection",
+                    action = "pending_browser_replay_failed",
+                    %terminal_id,
+                    connection_id,
+                    pending_count,
+                    replayed_count,
+                    reason,
+                    "failed to replay browser terminal frames after bridge attach"
+                );
+                self.unregister_terminal_connection(
+                    terminal_id,
+                    TerminalPeerKind::Bridge,
+                    connection_id,
+                )
+                .await;
+                anyhow::bail!("failed to replay pending browser terminal frames: {reason}");
             }
             info!(
                 event = "relay_terminal_connection",
@@ -2534,6 +2590,7 @@ impl RelayState {
                 %terminal_id,
                 connection_id,
                 pending_count,
+                replayed_count,
                 "replayed browser terminal frames after bridge attach"
             );
         }
@@ -2740,15 +2797,16 @@ impl RelayState {
                             }
                             let bridge_tx = session.bridge.as_ref().map(|record| record.tx.clone());
                             let buffered = if bridge_tx.is_none() {
-                                clone_websocket_message(message)
-                                    .is_some_and(|cloned| session.buffer_terminal_message(cloned))
+                                clone_websocket_message(message).is_some_and(|cloned| {
+                                    session.buffer_pending_browser_frame(cloned)
+                                })
                             } else {
                                 false
                             };
                             (bridge_tx, buffered)
                         };
-                        if buffered {
-                            return true;
+                        if bridge_tx.is_none() {
+                            return buffered;
                         }
                         if let (Some(tx), Some(cloned)) =
                             (bridge_tx, clone_websocket_message(message))
@@ -2799,7 +2857,7 @@ impl RelayState {
             }
             if session.browser_paused {
                 if let Some(cloned) = clone_websocket_message(message) {
-                    let _ = session.buffer_terminal_message(cloned);
+                    let _ = session.buffer_paused_output(cloned);
                 }
                 return true;
             }
@@ -2828,7 +2886,7 @@ impl RelayState {
                 return false;
             }
             if let Some(cloned) = clone_websocket_message(message) {
-                return session.buffer_terminal_message(cloned);
+                return session.buffer_pending_browser_frame(cloned);
             }
         }
 
@@ -5055,6 +5113,8 @@ mod tests {
             browser_paused: false,
             pause_buffer: Vec::new(),
             pause_buffer_bytes: 0,
+            pending_browser_frames: Vec::new(),
+            pending_browser_frame_bytes: 0,
         }
     }
 
@@ -5546,7 +5606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_handshake_is_replayed_when_bridge_attaches_late() {
+    async fn browser_handshake_survives_pause_before_bridge_attaches() {
         let state = RelayState::default();
         state.inner.lock().await.terminal_sessions.insert(
             "terminal-1".to_string(),
@@ -5570,6 +5630,18 @@ mod tests {
                 .await,
             "browser handshake should be retained while the bridge catches up"
         );
+        let pause = Message::Binary(vec![TTYD_CMD_PAUSE].into());
+        assert!(
+            state
+                .forward_terminal_message(
+                    "terminal-1",
+                    TerminalPeerKind::Browser,
+                    browser_connection_id,
+                    &pause,
+                )
+                .await,
+            "pause should not erase browser-to-bridge frames"
+        );
 
         let (bridge_tx, mut bridge_rx) = test_message_channel(TERMINAL_WS_QUEUE_CAPACITY);
         state
@@ -5582,6 +5654,72 @@ mod tests {
             Some(handshake),
             "the ttyd readiness handshake must reach the late bridge connection"
         );
+    }
+
+    #[test]
+    fn pending_browser_frame_overflow_preserves_the_initial_handshake() {
+        let mut session = detached_terminal("terminal-1", "session-1", "device-1", "owner-a");
+        let handshake = Message::Binary(br#"{"columns":120,"rows":40}"#.to_vec().into());
+        assert!(session.buffer_pending_browser_frame(handshake.clone()));
+        for _ in 1..TERMINAL_PENDING_BROWSER_FRAME_CAPACITY {
+            assert!(session.buffer_pending_browser_frame(Message::Binary(vec![b'0'].into())));
+        }
+
+        assert!(!session.buffer_pending_browser_frame(Message::Binary(vec![b'0'].into())));
+        assert_eq!(session.pending_browser_frames.first(), Some(&handshake));
+        assert_eq!(
+            session.pending_browser_frames.len(),
+            TERMINAL_PENDING_BROWSER_FRAME_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_pending_browser_replay_rolls_back_bridge_registration() {
+        let state = RelayState::default();
+        state.inner.lock().await.terminal_sessions.insert(
+            "terminal-1".to_string(),
+            detached_terminal("terminal-1", "session-1", "device-1", "owner-a"),
+        );
+
+        let (browser_tx, mut browser_rx) = test_message_channel(TERMINAL_WS_QUEUE_CAPACITY);
+        let browser_connection_id = state
+            .register_terminal_connection("terminal-1", TerminalPeerKind::Browser, browser_tx)
+            .await
+            .expect("browser connection");
+        let handshake = Message::Binary(br#"{"columns":120,"rows":40}"#.to_vec().into());
+        assert!(
+            state
+                .forward_terminal_message(
+                    "terminal-1",
+                    TerminalPeerKind::Browser,
+                    browser_connection_id,
+                    &handshake,
+                )
+                .await
+        );
+
+        let (bridge_tx, mut bridge_rx) = test_message_channel(1);
+        bridge_tx
+            .try_send(Message::Ping(Vec::new().into()))
+            .expect("bridge queue should be full before replay");
+        let err = state
+            .register_terminal_connection("terminal-1", TerminalPeerKind::Bridge, bridge_tx)
+            .await
+            .expect_err("partial pending-frame replay must reject the bridge connection");
+        assert!(err
+            .to_string()
+            .contains("failed to replay pending browser terminal frames"));
+
+        assert!(matches!(browser_rx.recv().await, Some(Message::Close(_))));
+        assert!(matches!(bridge_rx.recv().await, Some(Message::Ping(_))));
+        let inner = state.inner.lock().await;
+        let session = inner
+            .terminal_sessions
+            .get("terminal-1")
+            .expect("browser-owned relay terminal should remain reconnectable");
+        assert!(session.bridge.is_none());
+        assert!(session.pending_browser_frames.is_empty());
+        assert_eq!(session.pending_browser_frame_bytes, 0);
     }
 
     #[tokio::test]
@@ -5631,6 +5769,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
@@ -5714,6 +5854,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
@@ -5786,6 +5928,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
@@ -5860,6 +6004,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
@@ -5925,6 +6071,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
@@ -6134,6 +6282,8 @@ mod tests {
                     browser_paused: false,
                     pause_buffer: Vec::new(),
                     pause_buffer_bytes: 0,
+                    pending_browser_frames: Vec::new(),
+                    pending_browser_frame_bytes: 0,
                 },
             );
         }
