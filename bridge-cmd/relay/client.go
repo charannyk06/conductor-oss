@@ -987,6 +987,18 @@ func parseRelayResizeMessage(payload []byte) (int, int, error) {
 	return resize.Columns, resize.Rows, nil
 }
 
+func terminalWebSocketReadError(peer string, err error) error {
+	if websocket.IsCloseError(
+		err,
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseNoStatusReceived,
+	) {
+		return io.EOF
+	}
+	return fmt.Errorf("%s read: %w", peer, err)
+}
+
 func proxyTTYDTerminalSession(ctx context.Context, backendConn *websocket.Conn, relayConn *websocket.Conn) error {
 	errCh := make(chan error, 2)
 
@@ -995,7 +1007,7 @@ func proxyTTYDTerminalSession(ctx context.Context, backendConn *websocket.Conn, 
 			for {
 				msgType, data, err := src.ReadMessage()
 				if err != nil {
-					errCh <- fmt.Errorf("%s read: %w", srcName, err)
+					errCh <- terminalWebSocketReadError(srcName, err)
 					return
 				}
 				switch msgType {
@@ -1037,7 +1049,7 @@ func proxyNativeTerminalSession(ctx context.Context, backendConn *websocket.Conn
 		for {
 			msgType, data, err := relayConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("relay terminal read: %w", err)
+				errCh <- terminalWebSocketReadError("relay terminal", err)
 				return
 			}
 			switch msgType {
@@ -1127,7 +1139,7 @@ func proxyNativeTerminalSession(ctx context.Context, backendConn *websocket.Conn
 		for {
 			msgType, data, err := backendConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("backend terminal read: %w", err)
+				errCh <- terminalWebSocketReadError("backend terminal", err)
 				return
 			}
 			switch msgType {

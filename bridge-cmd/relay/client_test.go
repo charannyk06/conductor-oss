@@ -3,11 +3,14 @@ package relay
 import (
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestRelayAuthHeadersUsesAuthorizationBearer(t *testing.T) {
@@ -81,6 +84,29 @@ func TestShouldRetryTerminalAttach(t *testing.T) {
 				t.Fatalf("shouldRetryTerminalAttach(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTerminalWebSocketReadErrorTreatsExpectedClosesAsEOF(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []int{
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseNoStatusReceived,
+	} {
+		err := terminalWebSocketReadError("relay terminal", &websocket.CloseError{Code: code})
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("close code %d returned %v, want io.EOF", code, err)
+		}
+	}
+
+	err := terminalWebSocketReadError(
+		"relay terminal",
+		&websocket.CloseError{Code: websocket.CloseAbnormalClosure},
+	)
+	if err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("abnormal close returned %v, want a diagnostic error", err)
 	}
 }
 
