@@ -13,6 +13,7 @@ import {
 import { resolveNativeTerminalWebSocketUrl } from "@/components/sessions/terminal/terminalClientUrls";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 import {
+  encodeTtydHandshakeFrame,
   encodeTtydInputFrame,
   encodeTtydResizeFrame,
   TTYD_SERVER_COMMAND,
@@ -100,11 +101,16 @@ export function IframeTerminalPage({
   const waitingForTerminalRef = useRef(false);
   const loadedOutputRef = useRef<string | null>(null);
   const hasConnectedOnceRef = useRef(false);
+  const lastSentGeometryRef = useRef<{ cols: number; rows: number } | null>(null);
   const bridgeScopedSession = useMemo(() => decodeBridgeSessionId(sessionId), [sessionId]);
   const usesRelayTerminal = Boolean(bridgeId?.trim() || bridgeScopedSession);
 
   const tokenUrl = useMemo(
     () => withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, bridgeId),
+    [bridgeId, sessionId],
+  );
+  const outputUrl = useMemo(
+    () => withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/output`, bridgeId),
     [bridgeId, sessionId],
   );
 
@@ -119,6 +125,7 @@ export function IframeTerminalPage({
     const socket = socketRef.current;
     socketRef.current = null;
     ttydProtocolRef.current = false;
+    lastSentGeometryRef.current = null;
     allowReconnectRef.current = false;
     if (!socket) {
       return;
@@ -296,7 +303,7 @@ export function IframeTerminalPage({
 
     const tokenWsUrl = info?.wsUrl ?? info?.ttydWsUrl ?? null;
     if (!tokenWsUrl) {
-      const hasOutput = await loadStoredOutput(info?.outputUrl);
+      const hasOutput = await loadStoredOutput(info?.outputUrl ?? outputUrl);
       if (hasOutput) {
         waitingForTerminalRef.current = false;
         return;
@@ -334,11 +341,11 @@ export function IframeTerminalPage({
     ws.binaryType = "arraybuffer";
     socketRef.current = ws;
     ttydProtocolRef.current = useTtydProtocol;
+    lastSentGeometryRef.current = null;
 
     ws.onopen = () => {
       retryAttemptRef.current = 0;
       waitingForTerminalRef.current = false;
-      loadedOutputRef.current = null;
       decoderRef.current = new TextDecoder();
       if (hasConnectedOnceRef.current) {
         terminalRef.current?.reset();
@@ -346,15 +353,27 @@ export function IframeTerminalPage({
         hasConnectedOnceRef.current = true;
       }
       const geometry = fitTerminal();
+      const cols = geometry?.cols ?? 120;
+      const rows = geometry?.rows ?? 32;
       if (useTtydProtocol) {
-        ws.send(encodeResizeFrame(geometry?.cols ?? 120, geometry?.rows ?? 32));
+        // ttyd requires a JSON handshake as the first client message. Conductor's
+        // terminal facade uses it to mark the client ready and replay the retained
+        // screen; sending a resize first leaves late browser attaches blank.
+        ws.send(encodeTtydHandshakeFrame(cols, rows));
       } else {
         ws.send(JSON.stringify({
           type: "hello",
-          cols: geometry?.cols ?? 120,
-          rows: geometry?.rows ?? 32,
+          cols,
+          rows,
         }));
       }
+      lastSentGeometryRef.current = { cols, rows };
+      console.info("[Conductor terminal] websocket attached", {
+        sessionId,
+        transport: relayConnection ? "relay-ttyd" : useTtydProtocol ? "ttyd" : "native",
+        cols,
+        rows,
+      });
     };
 
     ws.onmessage = (event) => {
@@ -430,6 +449,11 @@ export function IframeTerminalPage({
       if (socketRef.current === ws) {
         socketRef.current = null;
       }
+      lastSentGeometryRef.current = null;
+      console.info("[Conductor terminal] websocket closed", {
+        sessionId,
+        transport: relayConnection ? "relay-ttyd" : useTtydProtocol ? "ttyd" : "native",
+      });
       if (!allowReconnectRef.current) {
         return;
       }
@@ -441,6 +465,7 @@ export function IframeTerminalPage({
     };
   }, [
     tokenUrl,
+    outputUrl,
     loadStoredOutput,
     scheduleReconnect,
     usesRelayTerminal,
@@ -448,12 +473,17 @@ export function IframeTerminalPage({
     fitTerminal,
     encodeResizeFrame,
     writeTerminalNotice,
+    sessionId,
   ]);
 
   const applyGeometry = useCallback(() => {
     const geometry = fitTerminal();
     const socket = socketRef.current;
     if (!geometry || !socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const previous = lastSentGeometryRef.current;
+    if (previous?.cols === geometry.cols && previous.rows === geometry.rows) {
       return;
     }
     if (ttydProtocolRef.current) {
@@ -465,7 +495,8 @@ export function IframeTerminalPage({
         rows: geometry.rows,
       }));
     }
-  }, [encodeResizeFrame, fitTerminal, usesRelayTerminal]);
+    lastSentGeometryRef.current = geometry;
+  }, [encodeResizeFrame, fitTerminal]);
 
   useEffect(() => {
     connectInvokerRef.current = () => {
