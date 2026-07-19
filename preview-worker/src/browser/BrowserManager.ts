@@ -1330,7 +1330,6 @@ export class BrowserManager {
         gracefulTeardown.then(() => false),
         new Promise<boolean>((resolve) => {
           timeoutId = setTimeout(() => resolve(true), teardownTimeoutMs);
-          timeoutId.unref();
         }),
       ]);
       if (timeoutId) {
