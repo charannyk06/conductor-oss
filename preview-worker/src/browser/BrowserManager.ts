@@ -47,6 +47,7 @@ const CLEANUP_INTERVAL_MS = 30_000;
 const MAX_DIRECT_RESPONSE_BYTES = 25 * 1024 * 1024;
 const MAX_INTERCEPTED_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_BRIDGE_RESPONSE_PAYLOAD_BYTES = 36 * 1024 * 1024;
+const MAX_BROWSER_TEARDOWN_TIMEOUT_MS = 5_000;
 export const MAX_CONCURRENT_PREVIEW_REQUESTS = 32;
 export const MAX_BUFFERED_PREVIEW_BYTES = 64 * 1024 * 1024;
 export const BLOCKED_BROWSER_NETWORK_URL_PATTERNS = [
@@ -1311,18 +1312,43 @@ export class BrowserManager {
 
     const destruction = (async () => {
       session.status = "closing";
-      await stopTunnel(session.tunnelProcess);
-
-      try {
+      const gracefulTeardown = (async () => {
+        await stopTunnel(session.tunnelProcess).catch(() => {});
         await session.networkGuardSession?.detach().catch(() => {});
         session.networkGuardSession = null;
         if (!session.page.isClosed()) {
           await session.page.close().catch(() => {});
         }
-      } finally {
         await session.browser.close().catch(() => {});
-        this.sessionStore.delete(session.id);
+      })();
+      const teardownTimeoutMs = Math.max(
+        1,
+        Math.min(this.config.chromeCommandTimeoutMs, MAX_BROWSER_TEARDOWN_TIMEOUT_MS),
+      );
+      let timeoutId: NodeJS.Timeout | null = null;
+      const timedOut = await Promise.race([
+        gracefulTeardown.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timeoutId = setTimeout(() => resolve(true), teardownTimeoutMs);
+          timeoutId.unref();
+        }),
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
       }
+      if (timedOut || session.browser.connected) {
+        try {
+          session.browser.process()?.kill("SIGKILL");
+        } catch {
+          // The browser may already have exited while teardown was timing out.
+        }
+        try {
+          session.browser.disconnect();
+        } catch {
+          // The browser may already be disconnected after a forced process exit.
+        }
+      }
+      this.sessionStore.delete(session.id);
     })();
     this.sessionDestructions.set(session.id, destruction);
 
