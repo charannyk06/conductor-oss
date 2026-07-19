@@ -6,6 +6,7 @@ import type { Page } from "puppeteer-core";
 import {
   MAX_BUFFERED_PREVIEW_BYTES,
   MAX_CONCURRENT_PREVIEW_REQUESTS,
+  PreviewBrowserManager,
   assertSafeDirectNavigationTarget,
   beginPreviewInterception,
   buildPinnedRequestOptions,
@@ -14,9 +15,63 @@ import {
   isPrivateNetworkHostname,
   requestSafeDirectNavigation,
   retainDirectLoopbackOrigin,
+  resolvePreviewNavigationCapabilities,
   resolveSafeDirectNavigationTarget,
   resolvePreviewNavigationMode,
 } from "./devPreviewBrowser";
+
+test("preview history excludes Chromium's initial about:blank entry", () => {
+  assert.deepEqual(resolvePreviewNavigationCapabilities(1, [
+    { url: "about:blank" },
+    { url: "http://127.0.0.1:3000/" },
+  ]), {
+    canGoBack: false,
+    canGoForward: false,
+  });
+
+  assert.deepEqual(resolvePreviewNavigationCapabilities(1, [
+    { url: "http://127.0.0.1:3000/" },
+    { url: "http://127.0.0.1:3000/second" },
+    { url: "http://127.0.0.1:3000/third" },
+  ]), {
+    canGoBack: true,
+    canGoForward: true,
+  });
+});
+
+test("preview browser manager relaunches after Chromium disconnects", async () => {
+  const browsers: Array<EventEmitter & { connected: boolean }> = [];
+  const manager = new PreviewBrowserManager(async () => {
+    const browser = Object.assign(new EventEmitter(), { connected: true });
+    browsers.push(browser);
+    return browser as never;
+  });
+  const getBrowser = (manager as unknown as { getBrowser(): Promise<{ connected: boolean }> }).getBrowser.bind(manager);
+
+  const first = await getBrowser();
+  assert.equal(browsers.length, 1);
+  browsers[0]!.connected = false;
+  browsers[0]!.emit("disconnected");
+
+  const second = await getBrowser();
+  assert.equal(browsers.length, 2);
+  assert.notEqual(second, first);
+});
+
+test("preview browser manager retries after a launch failure", async () => {
+  let launches = 0;
+  const browser = Object.assign(new EventEmitter(), { connected: true });
+  const manager = new PreviewBrowserManager(async () => {
+    launches += 1;
+    if (launches === 1) throw new Error("launch failed");
+    return browser as never;
+  });
+  const getBrowser = (manager as unknown as { getBrowser(): Promise<{ connected: boolean }> }).getBrowser.bind(manager);
+
+  await assert.rejects(getBrowser(), /launch failed/);
+  assert.equal(await getBrowser(), browser);
+  assert.equal(launches, 2);
+});
 
 test("browser network guard blocks WebSocket and non-HTTP network schemes below the page", async () => {
   const events = new EventEmitter();
@@ -160,7 +215,13 @@ test("direct preview requests enforce an absolute deadline against slow-drip res
     for (const interval of intervals) clearInterval(interval);
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
+      server.close((error) => {
+        if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") {
+          resolve();
+          return;
+        }
+        reject(error);
+      });
     });
   }
 });

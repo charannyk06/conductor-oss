@@ -669,25 +669,102 @@ function normalizeText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim();
 }
 
-class PreviewBrowserManager {
+export interface PreviewNavigationHistoryEntry {
+  url?: string | null;
+}
+
+export function resolvePreviewNavigationCapabilities(
+  currentIndex: number,
+  entries: PreviewNavigationHistoryEntry[],
+): { canGoBack: boolean; canGoForward: boolean } {
+  const isUsableEntry = (entry: PreviewNavigationHistoryEntry | undefined): boolean => {
+    const url = entry?.url?.trim();
+    return Boolean(url && url !== "about:blank");
+  };
+
+  return {
+    canGoBack: currentIndex > 0 && isUsableEntry(entries[currentIndex - 1]),
+    canGoForward: currentIndex >= 0
+      && currentIndex < entries.length - 1
+      && isUsableEntry(entries[currentIndex + 1]),
+  };
+}
+
+export type PreviewBrowserLauncher = () => Promise<Browser>;
+
+function launchSystemPreviewBrowser(): Promise<Browser> {
+  return puppeteer.launch({
+    headless: true,
+    executablePath: resolveChromePath(),
+    defaultViewport: VIEWPORT,
+    args: [
+      "--disable-dev-shm-usage",
+      "--disable-background-networking",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
+  });
+}
+
+export class PreviewBrowserManager {
   private browserPromise: Promise<Browser> | null = null;
   private states = new Map<string, PreviewState>();
 
-  private async getBrowser(): Promise<Browser> {
-    if (!this.browserPromise) {
-      this.browserPromise = puppeteer.launch({
-        headless: true,
-        executablePath: resolveChromePath(),
-        defaultViewport: VIEWPORT,
-        args: [
-          "--disable-dev-shm-usage",
-          "--disable-background-networking",
-          "--no-first-run",
-          "--no-default-browser-check",
-        ],
-      });
+  constructor(private readonly launchBrowser: PreviewBrowserLauncher = launchSystemPreviewBrowser) {}
+
+  private resetDisconnectedBrowserStates(): void {
+    for (const state of this.states.values()) {
+      state.context = null;
+      state.page = null;
+      state.networkGuardSession = null;
+      state.requestInterceptionEnabled = false;
+      state.activeFrameId = null;
+      state.selectedElement = null;
+      state.navigationMode = "direct";
+      state.directLoopbackOrigin = null;
+      state.interceptionBudget = { activeRequests: 0, bufferedBytes: 0 };
+      state.lastError = "Preview browser disconnected. Connect again to relaunch it.";
     }
-    return this.browserPromise;
+  }
+
+  private beginBrowserLaunch(): Promise<Browser> {
+    const launchPromise = this.launchBrowser();
+    this.browserPromise = launchPromise;
+
+    void launchPromise.then((browser) => {
+      browser.once("disconnected", () => {
+        if (this.browserPromise !== launchPromise) return;
+        this.browserPromise = null;
+        this.resetDisconnectedBrowserStates();
+      });
+
+      if (!browser.connected) {
+        if (this.browserPromise === launchPromise) {
+          this.browserPromise = null;
+        }
+        this.resetDisconnectedBrowserStates();
+      }
+    }).catch(() => {
+      if (this.browserPromise === launchPromise) {
+        this.browserPromise = null;
+      }
+    });
+
+    return launchPromise;
+  }
+
+  private async getBrowser(): Promise<Browser> {
+    while (true) {
+      const browserPromise = this.browserPromise ?? this.beginBrowserLaunch();
+      const browser = await browserPromise;
+      if (browser.connected) {
+        return browser;
+      }
+      if (this.browserPromise === browserPromise) {
+        this.browserPromise = null;
+        this.resetDisconnectedBrowserStates();
+      }
+    }
   }
 
   private getState(sessionId: string): PreviewState {
@@ -1017,6 +1094,7 @@ class PreviewBrowserManager {
       }
     });
     page.on("close", () => {
+      if (this.states.get(state.sessionId)?.page !== page) return;
       void this.destroySession(state.sessionId, { closePage: false });
     });
   }
@@ -1528,14 +1606,18 @@ class PreviewBrowserManager {
       const root = document.body ?? document.documentElement;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
       const results = [];
-      let visited = 0;
+      let truncated = false;
 
       while (walker.nextNode()) {
-        visited += 1;
         const element = walker.currentNode;
         if (!(element instanceof Element)) continue;
         const interactive = isInteractive(element);
         if (onlyInteractive && !interactive) continue;
+
+        if (results.length >= limit) {
+          truncated = true;
+          break;
+        }
 
         const text = normalize(element.textContent).slice(0, 220);
         const rect = element.getBoundingClientRect();
@@ -1556,14 +1638,11 @@ class PreviewBrowserManager {
             height: rect.height,
           },
         });
-        if (results.length >= limit) {
-          break;
-        }
       }
 
       return {
         nodes: results,
-        truncated: results.length >= limit || visited > results.length,
+        truncated,
       };
     }, { interactiveOnly, limit: DOM_NODE_LIMIT });
 
@@ -1596,12 +1675,9 @@ class PreviewBrowserManager {
       cdpSession = await page.createCDPSession();
       const history = await cdpSession.send("Page.getNavigationHistory") as {
         currentIndex: number;
-        entries: Array<unknown>;
+        entries: PreviewNavigationHistoryEntry[];
       };
-      return {
-        canGoBack: history.currentIndex > 0,
-        canGoForward: history.currentIndex < history.entries.length - 1,
-      };
+      return resolvePreviewNavigationCapabilities(history.currentIndex, history.entries);
     } catch {
       return {
         canGoBack: false,
