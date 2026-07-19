@@ -189,46 +189,66 @@ if [ "$healthy" -ne 1 ]; then
   exit 1
 fi
 
-session_json=$(run_docker exec "$container_name" node -e '
+run_docker exec -e PREVIEW_SMOKE_URL="$public_health_url" "$container_name" node -e '
 const fail = (error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 };
-fetch("http://127.0.0.1:3099/sessions", {
-  method: "POST",
-  headers: {
-    Authorization: `Bearer ${process.env.WORKER_API_KEY}`,
-    "Content-Type": "application/json",
-  },
-  body: "{}",
-  signal: AbortSignal.timeout(30_000),
-})
-  .then(async (response) => {
-    const body = await response.text();
-    if (!response.ok) throw new Error(`session launch failed (${response.status}): ${body}`);
-    process.stdout.write(body);
-  })
-  .catch(fail);
-')
-session_id=$(jq -r '.sessionId // empty' <<< "$session_json")
-if [ -z "$session_id" ]; then
-  echo "New preview worker could not launch a sandboxed browser session." >&2
-  exit 1
-fi
-run_docker exec -e PREVIEW_SMOKE_SESSION_ID="$session_id" "$container_name" node -e '
-const fail = (error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
+const workerUrl = "http://127.0.0.1:3099";
+const authHeaders = { Authorization: `Bearer ${process.env.WORKER_API_KEY}` };
+const jsonHeaders = { ...authHeaders, "Content-Type": "application/json" };
+let sessionId = null;
+let smokeCompleted = false;
+
+const requestJson = async (path, body) => {
+  const response = await fetch(`${workerUrl}${path}`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await response.json();
+  if (!response.ok || payload.kind === "error") {
+    throw new Error(`preview smoke request failed (${response.status}): ${JSON.stringify(payload)}`);
+  }
+  return payload;
 };
-fetch(`http://127.0.0.1:3099/sessions/${encodeURIComponent(process.env.PREVIEW_SMOKE_SESSION_ID)}`, {
-  method: "DELETE",
-  headers: { Authorization: `Bearer ${process.env.WORKER_API_KEY}` },
-  signal: AbortSignal.timeout(10_000),
-})
-  .then(async (response) => {
-    if (!response.ok) throw new Error(`session cleanup failed (${response.status}): ${await response.text()}`);
-  })
-  .catch(fail);
+
+(async () => {
+  try {
+    const created = await requestJson("/sessions", {});
+    sessionId = created.sessionId;
+    if (!sessionId) throw new Error("preview smoke session did not return an id");
+
+    const connected = await requestJson(`/sessions/${encodeURIComponent(sessionId)}/command`, {
+      command: "connect",
+      url: process.env.PREVIEW_SMOKE_URL,
+    });
+    if (!connected.connected || connected.currentUrl !== process.env.PREVIEW_SMOKE_URL) {
+      throw new Error(`preview smoke navigation failed: ${JSON.stringify(connected)}`);
+    }
+
+    const screenshot = await requestJson(`/sessions/${encodeURIComponent(sessionId)}/command`, {
+      command: "screenshot",
+    });
+    const image = Buffer.from(screenshot.imageBase64 || "", "base64");
+    if (image.length < 100 || image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
+      throw new Error("preview smoke screenshot did not return a valid PNG");
+    }
+    smokeCompleted = true;
+  } finally {
+    if (sessionId) {
+      const response = await fetch(`${workerUrl}/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+        headers: authHeaders,
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok && !(response.status === 404 && !smokeCompleted)) {
+        throw new Error(`preview smoke cleanup failed (${response.status}): ${await response.text()}`);
+      }
+    }
+  }
+})().catch(fail);
 ' >/dev/null
 
 upstream_health=$(run_docker exec clawcloud-caddy-1 \

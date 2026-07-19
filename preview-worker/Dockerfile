@@ -1,6 +1,9 @@
 FROM oven/bun:1.3.11-alpine@sha256:7ed9f74c326d1c260abe247ac423ccbf5ac92af62bb442d515d1f92f21e8ea9b AS bun-bin
 
-FROM node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd
+# Alpine 3.24's Chromium 150 aborts its sandboxed GPU process on pwritev2
+# while capturing screenshots. Keep the supported 3.23 line pinned until the
+# upstream Chromium sandbox policy includes that syscall.
+FROM node:22-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e
 
 ARG TARGETARCH
 ARG CONDUCTOR_BUILD_SHA=unknown
@@ -14,7 +17,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 RUN apk add --no-cache \
     ca-certificates \
-    chromium \
+    chromium=149.0.7827.53-r0 \
     harfbuzz \
     libgcc \
     libstdc++ \

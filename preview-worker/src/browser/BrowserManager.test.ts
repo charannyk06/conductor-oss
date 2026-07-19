@@ -51,6 +51,7 @@ function config(overrides: Partial<PreviewWorkerConfig> = {}): PreviewWorkerConf
 function fakeBrowser(options: {
   url?: string;
   title?: () => Promise<string>;
+  screenshotError?: Error;
   newPageError?: Error;
 } = {}) {
   const pageEvents = new EventEmitter();
@@ -89,12 +90,21 @@ function fakeBrowser(options: {
       detach: async () => {},
     }),
     isClosed: () => pageClosed,
+    screenshot: async () => {
+      if (options.screenshotError) {
+        pageClosed = true;
+        pageEvents.emit("close");
+        throw options.screenshotError;
+      }
+      return Buffer.from("png");
+    },
     close: async () => {
       pageClosed = true;
       pageEvents.emit("close");
     },
   } as unknown as Page;
   const browser = {
+    connected: true,
     newPage: async () => {
       if (options.newPageError) throw options.newPageError;
       return page;
@@ -369,5 +379,25 @@ test("a timed-out command poisons and closes its session before queued work can 
   assert.equal(store.get(session.id), undefined);
 
   titleGate.resolve("late result");
+  await manager.close();
+});
+
+test("a command that loses its browser target releases the preview session", async () => {
+  const fake = fakeBrowser({
+    url: "https://preview.example/",
+    screenshotError: new Error("Protocol error (Page.captureScreenshot): Target closed"),
+  });
+  const store = new SessionStore(60_000);
+  const manager = new BrowserManager(config(), store, async () => fake.browser);
+  const session = await manager.createSession("key-a", { clientSessionId: "client-1" });
+
+  await assert.rejects(
+    manager.executeCommand(session.id, { command: "screenshot" }),
+    /Target closed/,
+  );
+  assert.equal(fake.pageClosed(), true);
+  assert.equal(fake.browserClosed(), true);
+  assert.equal(store.get(session.id), undefined);
+
   await manager.close();
 });

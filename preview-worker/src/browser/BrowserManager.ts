@@ -683,8 +683,12 @@ export class BrowserManager {
       try {
         return await this.withTimeout(operation, this.config.chromeCommandTimeoutMs);
       } catch (error) {
-        if (error instanceof PreviewWorkerError && error.statusCode === 408) {
+        const timedOut = error instanceof PreviewWorkerError && error.statusCode === 408;
+        const browserTargetClosed = session.page.isClosed() || session.browser.connected === false;
+        if (timedOut) {
           session.lastError = error.message;
+        }
+        if (timedOut || browserTargetClosed) {
           await this.destroySessionInternal(session);
         }
         throw error;
@@ -886,6 +890,11 @@ export class BrowserManager {
 
     if (session.status === "closing") {
       throw this.error(404, `Preview session ${sessionId} is closing.`);
+    }
+
+    if (session.page.isClosed() || session.browser.connected === false) {
+      await this.destroySessionInternal(session);
+      throw this.error(404, `Preview session ${sessionId} browser target is unavailable.`);
     }
 
     if (this.sessionStore.isExpired(session)) {
