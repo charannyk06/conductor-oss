@@ -97,6 +97,47 @@ test("runCommand creates a remote session and posts the command to the worker", 
   assert.ok(calls.some((c) => c.includes("POST") && c.includes("/sessions/remote-1/command")));
 });
 
+test("destroySession omits the JSON content type when deleting a worker session", async () => {
+  env.CONDUCTOR_PREVIEW_WORKER_URL = "http://127.0.0.1:3099";
+  env.CONDUCTOR_PREVIEW_WORKER_KEY = "unit-test-key";
+
+  let deleteRequest: RequestInit | undefined;
+  global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+
+    if (url.endsWith("/sessions") && init?.method === "POST") {
+      return new Response(JSON.stringify({ sessionId: "remote-delete-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.endsWith("/sessions/remote-delete-1/command")) {
+      return new Response(JSON.stringify({ kind: "status", connected: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.endsWith("/sessions/remote-delete-1") && init?.method === "DELETE") {
+      deleteRequest = init;
+      return new Response(null, { status: 204 });
+    }
+
+    return new Response("unexpected", { status: 500 });
+  }) as typeof fetch;
+
+  const client = getPreviewWorkerClient();
+  await client.runCommand("session-delete", { command: "reload" });
+  await client.destroySession("session-delete");
+
+  assert.ok(deleteRequest);
+  const headers = new Headers(deleteRequest.headers);
+  assert.equal(headers.get("Authorization"), "Bearer unit-test-key");
+  assert.equal(headers.get("Content-Type"), null);
+  assert.equal(deleteRequest.body, undefined);
+});
+
 
 test("configureBridgePreview forwards bridge relay metadata when creating a remote session", async () => {
   env.CONDUCTOR_PREVIEW_WORKER_URL = "http://127.0.0.1:3099";

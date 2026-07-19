@@ -123,7 +123,7 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
     try {
       await fetch(`${this.workerUrl}/sessions/${encodeURIComponent(remoteSessionId)}`, {
         method: "DELETE",
-        headers: this.buildHeaders(),
+        headers: this.buildAuthHeaders(),
         cache: "no-store",
       });
     } catch {
@@ -142,7 +142,7 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
     try {
       await fetch(`${this.workerUrl}/sessions/${encodeURIComponent(remoteSessionId)}`, {
         method: "DELETE",
-        headers: this.buildHeaders(),
+        headers: this.buildAuthHeaders(),
         cache: "no-store",
       });
     } catch {
@@ -308,8 +308,14 @@ class PreviewWorkerClient implements PreviewBrowserManagerClient {
 
   private buildHeaders(): HeadersInit {
     return {
-      Authorization: `Bearer ${this.workerApiKey}`,
+      ...this.buildAuthHeaders(),
       "Content-Type": "application/json",
+    };
+  }
+
+  private buildAuthHeaders(): HeadersInit {
+    return {
+      Authorization: `Bearer ${this.workerApiKey}`,
     };
   }
 
