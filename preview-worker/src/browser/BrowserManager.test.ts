@@ -53,12 +53,17 @@ function fakeBrowser(options: {
   title?: () => Promise<string>;
   screenshotError?: Error;
   newPageError?: Error;
+  pageClose?: () => Promise<void>;
+  browserClose?: () => Promise<void>;
 } = {}) {
   const pageEvents = new EventEmitter();
   const cdpEvents = new EventEmitter();
   const cdpCommands: Array<{ method: string; params?: unknown }> = [];
   let pageClosed = false;
   let browserClosed = false;
+  let browserConnected = true;
+  let browserDisconnected = false;
+  let browserProcessKilled = false;
   const frame = {
     name: () => "",
     url: () => options.url ?? "about:blank",
@@ -99,18 +104,39 @@ function fakeBrowser(options: {
       return Buffer.from("png");
     },
     close: async () => {
+      if (options.pageClose) {
+        await options.pageClose();
+      }
       pageClosed = true;
       pageEvents.emit("close");
     },
   } as unknown as Page;
   const browser = {
-    connected: true,
+    get connected() {
+      return browserConnected;
+    },
     newPage: async () => {
       if (options.newPageError) throw options.newPageError;
       return page;
     },
     close: async () => {
+      if (options.browserClose) {
+        await options.browserClose();
+      }
       browserClosed = true;
+      browserConnected = false;
+    },
+    process: () => ({
+      kill: () => {
+        browserProcessKilled = true;
+        browserClosed = true;
+        browserConnected = false;
+        return true;
+      },
+    }),
+    disconnect: () => {
+      browserDisconnected = true;
+      browserConnected = false;
     },
   } as unknown as Browser;
 
@@ -119,6 +145,8 @@ function fakeBrowser(options: {
     page,
     pageClosed: () => pageClosed,
     browserClosed: () => browserClosed,
+    browserDisconnected: () => browserDisconnected,
+    browserProcessKilled: () => browserProcessKilled,
     cdpCommands,
     emitCdp: (name: string, payload: unknown) => cdpEvents.emit(name, payload),
   };
@@ -398,6 +426,47 @@ test("a command that loses its browser target releases the preview session", asy
   assert.equal(fake.pageClosed(), true);
   assert.equal(fake.browserClosed(), true);
   assert.equal(store.get(session.id), undefined);
+
+  await manager.close();
+});
+
+test("browser teardown is bounded when Chromium does not close gracefully", async () => {
+  const never = new Promise<void>(() => {});
+  const fake = fakeBrowser({ pageClose: async () => await never });
+  const store = new SessionStore(60_000);
+  const manager = new BrowserManager(
+    config({ chromeCommandTimeoutMs: 20 }),
+    store,
+    async () => fake.browser,
+  );
+  const session = await manager.createSession("key-a", { clientSessionId: "client-1" });
+
+  const startedAt = Date.now();
+  await manager.destroySession(session.id);
+
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(store.get(session.id), undefined);
+  assert.equal(fake.browserProcessKilled(), true);
+  assert.equal(fake.browserDisconnected(), true);
+
+  await manager.close();
+});
+
+test("browser teardown forces a still-connected process after close rejects", async () => {
+  const fake = fakeBrowser({
+    browserClose: async () => {
+      throw new Error("browser close failed");
+    },
+  });
+  const store = new SessionStore(60_000);
+  const manager = new BrowserManager(config(), store, async () => fake.browser);
+  const session = await manager.createSession("key-a", { clientSessionId: "client-1" });
+
+  await manager.destroySession(session.id);
+
+  assert.equal(store.get(session.id), undefined);
+  assert.equal(fake.browserProcessKilled(), true);
+  assert.equal(fake.browserDisconnected(), true);
 
   await manager.close();
 });
