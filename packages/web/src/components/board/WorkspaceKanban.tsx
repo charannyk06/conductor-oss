@@ -36,6 +36,10 @@ import {
   X,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 import { usePreferences } from "@/hooks/usePreferences";
 import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -4151,11 +4155,11 @@ export function WorkspaceKanban({
 
       {activeEditingTask && (
         <div
-          className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0"
+          className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0`}
           onClick={closeEditor}
         >
           <div
-            className="flex max-h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[560px] sm:rounded-[6px] sm:border"
+            className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] sm:max-w-[560px] sm:rounded-[6px] sm:border`}
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -4432,11 +4436,11 @@ export function WorkspaceKanban({
 
       {composerOpen && (
         <div
-          className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0"
+          className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0`}
           onClick={() => !submitting && setComposerOpen(false)}
         >
           <div
-            className="flex max-h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.45)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[980px] sm:rounded-[10px] sm:border"
+            className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.45)] sm:max-w-[980px] sm:rounded-[10px] sm:border`}
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"

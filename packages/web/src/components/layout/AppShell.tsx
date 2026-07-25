@@ -4,6 +4,14 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { AppUpdateNotice } from "@/components/layout/AppUpdateNotice";
+import {
+  KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
+  KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR,
+  KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR,
+  KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR,
+  resolveKeyboardSafeViewportMetrics,
+  resolveStableLayoutViewportHeight,
+} from "@/components/layout/keyboardSafeViewport";
 
 interface AppShellProps {
   sidebar: ReactNode;
@@ -74,11 +82,38 @@ export function AppShell({
 
   useEffect(() => {
     const root = document.documentElement;
+    const initialVisualViewport = window.visualViewport;
+    let stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
+      0,
+      window.innerHeight,
+      root.clientHeight,
+      initialVisualViewport?.height ?? Number.NaN,
+      initialVisualViewport?.offsetTop ?? Number.NaN,
+    );
 
     const syncViewportMetrics = () => {
       const visualViewport = window.visualViewport;
-      const viewportHeight = visualViewport?.height ?? window.innerHeight;
-      root.style.setProperty("--oc-app-shell-height", `${Math.round(viewportHeight)}px`);
+      stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
+        stableLayoutViewportHeight,
+        window.innerHeight,
+        root.clientHeight,
+        visualViewport?.height ?? Number.NaN,
+        visualViewport?.offsetTop ?? Number.NaN,
+      );
+      const viewportMetrics = resolveKeyboardSafeViewportMetrics(
+        stableLayoutViewportHeight,
+        visualViewport?.height ?? Number.NaN,
+        visualViewport?.offsetTop ?? Number.NaN,
+      );
+      root.style.setProperty(KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR, `${viewportMetrics.bottom}px`);
+      root.style.setProperty(
+        KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR,
+        `${viewportMetrics.visibleHeight}px`,
+      );
+      root.style.setProperty(
+        KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR,
+        `${viewportMetrics.offsetTop}px`,
+      );
     };
 
     syncViewportMetrics();
@@ -91,12 +126,15 @@ export function AppShell({
       visualViewport?.removeEventListener("resize", syncViewportMetrics);
       visualViewport?.removeEventListener("scroll", syncViewportMetrics);
       window.removeEventListener("resize", syncViewportMetrics);
+      root.style.removeProperty(KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR);
+      root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR);
+      root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR);
     };
   }, []);
 
   const shellStyle = {
     "--workspace-sidebar-width": `${sidebarWidth}px`,
-    "--oc-shell-height": "var(--oc-app-shell-height, 100dvh)",
+    "--oc-shell-height": KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
   } as CSSProperties;
 
   return (

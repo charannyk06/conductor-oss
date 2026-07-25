@@ -52,6 +52,12 @@ import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
 import { agentModelAccessBadgeLabel, agentSetupStatusLabel } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
+import {
+  KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
   type RuntimeAgentModelCatalog,
@@ -1114,7 +1120,7 @@ export function NewWorkspaceDialog({
   return (
     <>
       <div
-        className="fixed inset-0 z-[80] flex items-end justify-center overflow-y-auto bg-black/65 px-0 py-0 sm:items-center sm:px-3 sm:py-3"
+        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[80] flex items-start justify-center overflow-y-auto bg-black/65 px-0 py-0 sm:items-center sm:px-3 sm:py-3`}
         onClick={() => {
           if (creating || folderPickerOpen) return;
           onClose();
@@ -1124,7 +1130,7 @@ export function NewWorkspaceDialog({
         <form
           onSubmit={handleSubmit}
           onClick={(event) => event.stopPropagation()}
-          className="flex h-dvh w-full max-w-none flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-auto sm:max-h-[calc(100dvh-3rem)] sm:max-w-[860px] sm:rounded-[10px] sm:border"
+          className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full max-w-none flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-auto sm:max-w-[860px] sm:rounded-[10px] sm:border`}
         >
           <header className="border-b border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_92%,transparent)] px-4 py-3 backdrop-blur">
             <div className="mb-3 flex justify-center sm:hidden">
@@ -1962,7 +1968,7 @@ function FolderPickerDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[95] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0"
+      className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[95] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0`}
       onClick={() => {
         onClose();
         onSelect(null);
@@ -1970,7 +1976,7 @@ function FolderPickerDialog({
       role="presentation"
     >
       <div
-        className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+        className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]`}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="border-b border-[var(--vk-border)] px-4 py-3">
@@ -2716,7 +2722,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   return (
     <>
       <div
-        className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-6"
+        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-6`}
         onClick={() => {
           if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen || filesystemRootPickerOpen) return;
           onClose();
@@ -2724,7 +2730,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
         role="presentation"
       >
         <div
-          className="flex h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-h-[calc(100dvh-3rem)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row"
+          className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row`}
           onClick={(event) => event.stopPropagation()}
         >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
