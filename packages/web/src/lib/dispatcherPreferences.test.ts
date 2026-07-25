@@ -246,6 +246,39 @@ test("serialized dispatcher preference patch queue clears scoped pending and rec
   assert.equal(pendingByScope.get("demo-thread"), false);
 });
 
+test("serialized dispatcher preference patch queue dispose clears in-flight pending state once the request settles", async () => {
+  const gate = deferredPromise<string>();
+  const pendingByScope = new Map<string, boolean>();
+  const queue = createSerializedDispatcherPreferencePatchQueue<string, string>({
+    getScopeKey: () => "demo-thread",
+    send: async (payload) => {
+      await gate.promise;
+      return payload;
+    },
+    onPendingChange: (scopeKey, pending) => {
+      pendingByScope.set(scopeKey, pending);
+    },
+  });
+
+  queue.schedule("first");
+  await Promise.resolve();
+
+  assert.equal(queue.isPending("demo-thread"), true);
+  assert.equal(pendingByScope.get("demo-thread"), true);
+
+  queue.dispose();
+  assert.equal(queue.isPending("demo-thread"), false);
+  assert.equal(pendingByScope.get("demo-thread"), false);
+
+  gate.resolve("done");
+  await Promise.resolve();
+  await Promise.resolve();
+  await queue.waitForIdle();
+
+  assert.equal(queue.isPending("demo-thread"), false);
+  assert.equal(pendingByScope.get("demo-thread"), false);
+});
+
 test("serialized dispatcher preference patch queue lets a stale A success avoid visually rolling back optimistic B while B is pending", async () => {
   const scope = dispatcherPreferencePatchScopeKey({
     projectId: "demo",

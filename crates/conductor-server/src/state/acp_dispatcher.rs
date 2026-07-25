@@ -864,6 +864,7 @@ fn clear_dispatcher_runtime_state(thread: &mut SessionRecord) {
 fn prepare_dispatcher_for_runtime_preference_change(thread: &mut SessionRecord) {
     clear_dispatcher_runtime_state(thread);
     clear_dispatcher_runtime_error(thread);
+    thread.metadata.remove(ACP_APPROVAL_STATE_METADATA_KEY);
     thread.metadata.remove("finishedAt");
     thread.status = SessionStatus::Idle;
     thread.activity = Some("idle".to_string());
@@ -1861,6 +1862,14 @@ pub(crate) fn build_acp_dispatcher_prompt(
 }
 
 impl AppState {
+    async fn dispatcher_transition_guard(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let mut guards = self.dispatcher_transition_guards.lock().await;
+        guards
+            .entry(thread_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub(crate) fn dispatcher_store_dir(&self) -> PathBuf {
         self.workspace_path
             .join(".conductor")
@@ -2711,6 +2720,8 @@ impl AppState {
         thread_id: &str,
         patch: DispatcherPreferencesPatch,
     ) -> Result<SessionRecord> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
@@ -2878,6 +2889,8 @@ impl AppState {
         model: Option<String>,
         reasoning_effort: Option<String>,
     ) -> Result<SessionRecord> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
@@ -3998,6 +4011,8 @@ impl AppState {
         thread_id: &str,
         request: DispatcherTurnRequest,
     ) -> Result<()> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let DispatcherTurnRequest {
             message,
             runtime_message,
@@ -4048,6 +4063,7 @@ impl AppState {
 
         clear_parser_state(thread);
         clear_dispatcher_runtime_error(thread);
+        thread.metadata.remove("lastStderr");
         thread.last_activity_at = Utc::now().to_rfc3339();
         thread.status = SessionStatus::Working;
         thread.activity = Some("active".to_string());
@@ -4290,17 +4306,17 @@ mod tests {
         dispatcher_model_supported_for_agent, dispatcher_resume_target,
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_dispatcher_model_for_agent,
-        normalize_loaded_dispatcher_thread, prepare_dispatcher_runtime_env, read_json,
-        AcpSessionMemoryState, AppState, CreateDispatcherThreadOptions, DispatcherPreferencesPatch,
-        DispatcherRuntimeHandle, OpenClawDispatcherConfigPatch, ACP_APPROVAL_REQUIRED,
-        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_IMPLEMENTATION_MODEL_METADATA_KEY,
-        ACP_IMPLEMENTATION_REASONING_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY,
-        ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY, ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY,
-        ACP_SESSION_KIND, GEMINI_FLASH_MODEL_ID, GEMINI_STALE_FLASH_MODEL_ID,
-        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
-        OPENCLAW_SESSION_KEY_METADATA_KEY,
+        normalize_loaded_dispatcher_thread, prepare_dispatcher_for_runtime_preference_change,
+        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
+        CreateDispatcherThreadOptions, DispatcherPreferencesPatch, DispatcherRuntimeHandle,
+        OpenClawDispatcherConfigPatch, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
+        ACP_IMPLEMENTATION_MODEL_METADATA_KEY, ACP_IMPLEMENTATION_REASONING_METADATA_KEY,
+        ACP_RESUME_TARGET_METADATA_KEY, ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY,
+        ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY, ACP_SESSION_KIND, GEMINI_FLASH_MODEL_ID,
+        GEMINI_STALE_FLASH_MODEL_ID, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
     use anyhow::{anyhow, Result};
@@ -5229,6 +5245,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_preference_change_clears_stale_plan_approval_metadata() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-pref-reset-approval".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread.summary = Some("Plan ready".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+        thread
+            .metadata
+            .insert("parserState".to_string(), "approval_required".to_string());
+
+        prepare_dispatcher_for_runtime_preference_change(&mut thread);
+
+        assert_eq!(thread.status, SessionStatus::Idle);
+        assert_eq!(thread.activity.as_deref(), Some("idle"));
+        assert_eq!(
+            thread.summary.as_deref(),
+            Some("Dispatcher ready for the next turn")
+        );
+        assert!(!thread
+            .metadata
+            .contains_key(ACP_APPROVAL_STATE_METADATA_KEY));
+        assert!(!thread.metadata.contains_key("parserState"));
+    }
+
     #[tokio::test]
     async fn headless_plan_only_dispatcher_turn_waits_for_explicit_approval() {
         let (root, state) = build_test_state("acp-headless-plan-only").await;
@@ -5744,6 +5799,133 @@ mod tests {
         assert_eq!(resent.status, SessionStatus::Working);
         assert_eq!(resent.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(resent.activity.as_deref(), Some("active"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_turn_start_clears_stale_last_stderr() {
+        let (root, state) = build_test_state("acp-turn-clears-stderr").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "slow reply".to_string(),
+                delay: Duration::from_secs(5),
+            }),
+        );
+
+        let mut stale = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should exist");
+        stale
+            .metadata
+            .insert("lastStderr".to_string(), "stale stderr".to_string());
+        stale
+            .metadata
+            .insert("error".to_string(), "stale stderr".to_string());
+        stale.summary = Some("stale stderr".to_string());
+        stale
+            .metadata
+            .insert("summary".to_string(), "stale stderr".to_string());
+        state
+            .replace_dispatcher_thread(stale)
+            .await
+            .expect("stale dispatcher thread should persist");
+
+        state
+            .send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "New turn".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            )
+            .await
+            .expect("dispatcher turn should start");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
+        assert!(!updated.metadata.contains_key("lastStderr"));
+        assert!(!updated.metadata.contains_key("error"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_transition_guard_blocks_turn_start_until_runtime_resets_finish() {
+        let (root, state) = build_test_state("acp-transition-guard-send").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "guarded reply".to_string(),
+                delay: Duration::from_secs(5),
+            }),
+        );
+
+        let transition_guard = state.dispatcher_transition_guard(&thread.id).await;
+        let transition_lock = transition_guard.lock().await;
+
+        let state_for_send = Arc::clone(&state);
+        let thread_id = thread.id.clone();
+        let mut send_task = tokio::spawn(async move {
+            state_for_send
+                .send_to_dispatcher_thread(
+                    &thread_id,
+                    DispatcherTurnRequest::plain(
+                        "Blocked turn".to_string(),
+                        Vec::new(),
+                        None,
+                        None,
+                        "chat",
+                    ),
+                )
+                .await
+        });
+
+        assert!(
+            timeout(Duration::from_millis(150), &mut send_task)
+                .await
+                .is_err(),
+            "turn start should wait for an in-flight dispatcher transition"
+        );
+
+        let still_idle = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(still_idle.status, SessionStatus::Idle);
+
+        drop(transition_lock);
+
+        send_task
+            .await
+            .expect("send task should join cleanly")
+            .expect("dispatcher send should succeed once the transition completes");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
 
         let _ = fs::remove_dir_all(root);
     }

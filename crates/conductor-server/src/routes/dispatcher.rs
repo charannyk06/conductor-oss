@@ -272,6 +272,20 @@ fn resolve_create_dispatcher_agents(
     )
 }
 
+fn should_seed_implementation_preferences_from_dispatcher(
+    dispatcher_agent: Option<&str>,
+    implementation_agent: Option<&str>,
+) -> bool {
+    match (
+        trimmed_query_value(dispatcher_agent),
+        trimmed_query_value(implementation_agent),
+    ) {
+        (_, None) => true,
+        (Some(dispatcher), Some(implementation)) => dispatcher.eq_ignore_ascii_case(implementation),
+        (None, Some(_)) => false,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct CreateDispatcherPreferenceResolution {
     dispatcher_model: Option<String>,
@@ -281,6 +295,7 @@ struct CreateDispatcherPreferenceResolution {
 }
 
 fn resolve_create_dispatcher_preferences(
+    agents: (Option<&str>, Option<&str>),
     legacy_model: Option<String>,
     dispatcher_model: Option<String>,
     implementation_model: Option<String>,
@@ -290,11 +305,21 @@ fn resolve_create_dispatcher_preferences(
 ) -> CreateDispatcherPreferenceResolution {
     let dispatcher_model = trimmed_owned_value(dispatcher_model);
     let dispatcher_reasoning_effort = trimmed_owned_value(dispatcher_reasoning_effort);
+    let seed_implementation_from_dispatcher =
+        should_seed_implementation_preferences_from_dispatcher(agents.0, agents.1);
     let implementation_model = trimmed_owned_value(implementation_model)
-        .or_else(|| dispatcher_model.clone())
+        .or_else(|| {
+            seed_implementation_from_dispatcher
+                .then(|| dispatcher_model.clone())
+                .flatten()
+        })
         .or_else(|| trimmed_owned_value(legacy_model));
     let implementation_reasoning_effort = trimmed_owned_value(implementation_reasoning_effort)
-        .or_else(|| dispatcher_reasoning_effort.clone())
+        .or_else(|| {
+            seed_implementation_from_dispatcher
+                .then(|| dispatcher_reasoning_effort.clone())
+                .flatten()
+        })
         .or_else(|| trimmed_owned_value(legacy_reasoning_effort));
 
     CreateDispatcherPreferenceResolution {
@@ -485,7 +510,13 @@ async fn create_dispatcher(
         implementation_reasoning_effort,
     } = body;
 
+    let (resolved_dispatcher_agent, resolved_implementation_agent) =
+        resolve_create_dispatcher_agents(agent, dispatcher_agent, implementation_agent);
     let resolved_preferences = resolve_create_dispatcher_preferences(
+        (
+            resolved_dispatcher_agent.as_deref(),
+            resolved_implementation_agent.as_deref(),
+        ),
         model,
         dispatcher_model,
         implementation_model,
@@ -493,8 +524,6 @@ async fn create_dispatcher(
         dispatcher_reasoning_effort,
         implementation_reasoning_effort,
     );
-    let (resolved_dispatcher_agent, resolved_implementation_agent) =
-        resolve_create_dispatcher_agents(agent, dispatcher_agent, implementation_agent);
 
     match state
         .create_project_dispatcher_thread(
@@ -601,6 +630,10 @@ async fn upsert_dispatcher_binding(
             body.implementation_agent,
         );
     let resolved_preferences = resolve_create_dispatcher_preferences(
+        (
+            resolved_dispatcher_agent.as_deref(),
+            resolved_implementation_agent.as_deref(),
+        ),
         body.model,
         body.dispatcher_model,
         body.implementation_model,
@@ -1465,6 +1498,7 @@ mod tests {
     #[test]
     fn legacy_create_model_and_reasoning_only_map_to_implementation_preferences() {
         let resolved = resolve_create_dispatcher_preferences(
+            (None, None),
             Some(" auto ".to_string()),
             None,
             None,
@@ -1487,6 +1521,7 @@ mod tests {
     #[test]
     fn explicit_dispatcher_preferences_still_seed_implementation_defaults() {
         let resolved = resolve_create_dispatcher_preferences(
+            (Some("gemini"), None),
             None,
             Some("gpt-5.5".to_string()),
             None,
@@ -1502,6 +1537,29 @@ mod tests {
                 dispatcher_reasoning_effort: Some("high".to_string()),
                 implementation_model: Some("gpt-5.5".to_string()),
                 implementation_reasoning_effort: Some("high".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn dispatcher_preferences_do_not_cross_seed_implementation_defaults_when_agents_differ() {
+        let resolved = resolve_create_dispatcher_preferences(
+            (Some("gemini"), Some("cursor-cli")),
+            None,
+            Some("gemini-3.1-pro-preview".to_string()),
+            None,
+            None,
+            Some("high".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            super::CreateDispatcherPreferenceResolution {
+                dispatcher_model: Some("gemini-3.1-pro-preview".to_string()),
+                dispatcher_reasoning_effort: Some("high".to_string()),
+                implementation_model: None,
+                implementation_reasoning_effort: None,
             }
         );
     }

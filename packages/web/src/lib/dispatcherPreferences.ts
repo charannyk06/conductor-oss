@@ -272,14 +272,13 @@ export function createSerializedDispatcherPreferencePatchQueue<TPayload, TResult
       if (disposed) {
         scopeStates.clear();
         scopePending.clear();
-        resolveIdle();
-        return;
-      }
-      if (state.pendingPayload !== undefined) {
-        void drain(scopeKey);
       } else {
-        scopeStates.delete(scopeKey);
-        notifyPending(scopeKey);
+        if (state.pendingPayload !== undefined) {
+          void drain(scopeKey);
+        } else {
+          scopeStates.delete(scopeKey);
+          notifyPending(scopeKey);
+        }
       }
       resolveIdle();
     }
