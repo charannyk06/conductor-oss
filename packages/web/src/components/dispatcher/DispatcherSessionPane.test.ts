@@ -75,3 +75,27 @@ test("applyFeedDelta patch appends textDelta onto the existing entry text", () =
   assert.equal(replayed.entries.length, 1);
   assert.equal(replayed.entries[0]?.text, "hello world");
 });
+
+test("applyFeedDelta keeps dispatcher runtime errors in sync with feed updates", () => {
+  const current = {
+    ...EMPTY_FEED_PAYLOAD,
+    error: "old runtime error",
+  };
+
+  const next = applyFeedDelta(current, {
+    type: "append",
+    entries: [makeEntry("entry-1", "retrying", false)],
+    totalEntries: 1,
+    windowLimit: 200,
+    truncated: false,
+    sessionStatus: "working",
+    approvalState: null,
+    parserState: null,
+    runtimeStatus: null,
+    source: "stream",
+    error: null,
+    integration: null,
+  });
+
+  assert.equal(next.error, null);
+});

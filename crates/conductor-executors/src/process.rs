@@ -25,7 +25,11 @@ fn apply_pty_command_env(
         cmd.env_remove(key);
     }
     for (key, value) in env {
-        cmd.env(key, value);
+        if value.is_empty() {
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -42,7 +46,11 @@ fn apply_tokio_command_env(
         cmd.env_remove(key);
     }
     for (key, value) in env {
-        cmd.env(key, value);
+        if value.is_empty() {
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -894,6 +902,25 @@ mod tests {
     use std::path::Path;
     use tokio::time::{timeout, Duration};
 
+    async fn collect_process_events(handle: &mut super::ProcessHandle) -> Vec<ExecutorOutput> {
+        let mut events = Vec::new();
+        loop {
+            let event = timeout(Duration::from_secs(5), handle.output_rx.recv())
+                .await
+                .expect("timed out waiting for process event")
+                .expect("output channel closed before completion");
+            let finished = matches!(
+                event,
+                ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
+            );
+            events.push(event);
+            if finished {
+                break;
+            }
+        }
+        events
+    }
+
     fn parse_child_pid(line: &str) -> Option<u32> {
         line.split("child_pid=")
             .nth(1)
@@ -1325,6 +1352,92 @@ int main(void) {
         assert!(
             matches!(second, ExecutorOutput::Completed { exit_code: 0 }),
             "expected completion after stdout flush, got {second:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_no_stdin_removes_empty_env_values_but_keeps_non_empty_overrides() {
+        let mut handle = spawn_process_no_stdin(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "if [ -z \"${ANTHROPIC_API_KEY+x}\" ]; then printf 'anthropic=unset\\n'; else printf 'anthropic=set:%s\\n' \"$ANTHROPIC_API_KEY\"; fi; \
+                 if [ -z \"${CLAUDECODE+x}\" ]; then printf 'claudecode=unset\\n'; else printf 'claudecode=set:%s\\n' \"$CLAUDECODE\"; fi"
+                    .to_string(),
+            ],
+            Path::new("."),
+            &HashMap::from([
+                ("ANTHROPIC_API_KEY".to_string(), String::new()),
+                ("CLAUDECODE".to_string(), "1".to_string()),
+            ]),
+        )
+        .await
+        .expect("headless process should spawn");
+
+        let events = collect_process_events(&mut handle).await;
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ExecutorOutput::Stdout(line) if line == "anthropic=unset")
+            ),
+            "expected empty env value to be removed, got {events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ExecutorOutput::Stdout(line) if line == "claudecode=set:1")
+            ),
+            "expected non-empty override to stay set, got {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(ExecutorOutput::Completed { exit_code: 0 })
+            ),
+            "expected clean completion, got {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_process_removes_empty_env_values_but_keeps_non_empty_overrides() {
+        let mut handle = spawn_process(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "if [ -z \"${ANTHROPIC_API_KEY+x}\" ]; then printf 'anthropic=unset\\n'; else printf 'anthropic=set:%s\\n' \"$ANTHROPIC_API_KEY\"; fi; \
+                 if [ -z \"${CLAUDECODE+x}\" ]; then printf 'claudecode=unset\\n'; else printf 'claudecode=set:%s\\n' \"$CLAUDECODE\"; fi"
+                    .to_string(),
+            ],
+            Path::new("."),
+            &HashMap::from([
+                ("ANTHROPIC_API_KEY".to_string(), String::new()),
+                ("CLAUDECODE".to_string(), "1".to_string()),
+            ]),
+        )
+        .await
+        .expect("pty process should spawn");
+
+        let events = collect_process_events(&mut handle).await;
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ExecutorOutput::Stdout(line) if line == "anthropic=unset")
+            ),
+            "expected empty env value to be removed, got {events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ExecutorOutput::Stdout(line) if line == "claudecode=set:1")
+            ),
+            "expected non-empty override to stay set, got {events:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(ExecutorOutput::Completed { exit_code: 0 })
+            ),
+            "expected clean completion, got {events:?}"
         );
     }
 }

@@ -17,8 +17,6 @@ import { getKnownAgent } from "@/lib/knownAgents";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
-const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini", "cursor-cli", "openclaw", "letta"] as const;
-
 function formatReasoningLabel(value: string): string {
   if (value === "xhigh") {
     return "Extra High";
@@ -97,37 +95,41 @@ function PreferenceChip({
 }
 
 type DispatcherPreferenceChipsProps = {
-  implementationAgent: string;
+  agent: string;
+  agentOptions: readonly string[];
+  agentLabel: string;
   modelSelection: ModelSelectionState;
   modelAccess: ModelAccessPreferences;
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   disabled?: boolean;
   className?: string;
-  onImplementationAgentChange: (next: string) => void;
+  onAgentChange: (next: string) => void;
   onModelSelectionChange: (next: ModelSelectionState) => void;
 };
 
 export function DispatcherPreferenceChips({
-  implementationAgent,
+  agent,
+  agentOptions,
+  agentLabel,
   modelSelection,
   modelAccess,
   runtimeModelCatalogs,
   disabled = false,
   className,
-  onImplementationAgentChange,
+  onAgentChange,
   onModelSelectionChange,
 }: DispatcherPreferenceChipsProps) {
   const availableModels = getSelectableAgentModels(
-    implementationAgent,
+    agent,
     modelAccess,
     runtimeModelCatalogs,
   );
   const resolvedModel = resolveModelSelectionValue(modelSelection) ?? modelSelection.catalogModel;
   const modelLabel = resolvedModel
-    ? formatCurrentModelLabel(implementationAgent, resolvedModel)
+    ? formatCurrentModelLabel(agent, resolvedModel)
     : "Change model";
   const availableReasoningOptions = getSelectableAgentReasoningOptions(
-    implementationAgent,
+    agent,
     modelAccess,
     runtimeModelCatalogs,
     resolvedModel,
@@ -139,31 +141,31 @@ export function DispatcherPreferenceChips({
     <div className={cn("grid w-full grid-cols-[repeat(auto-fit,minmax(7.25rem,1fr))] gap-1.5 sm:flex sm:flex-wrap sm:items-center", className)}>
       <div className="min-w-0 sm:flex-none">
         <PreferenceChip
-          label={<AgentLabel agent={implementationAgent} />}
-          title={`Change coding agent (${getKnownAgent(implementationAgent)?.label ?? implementationAgent})`}
+          label={<AgentLabel agent={agent} />}
+          title={`Change ${agentLabel.toLowerCase()} (${getKnownAgent(agent)?.label ?? agent})`}
           disabled={disabled}
           triggerClassName="w-full justify-between sm:h-[27px] sm:w-auto sm:justify-start sm:max-w-[6.75rem]"
         >
           <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
-            Coding agent
+            {agentLabel}
           </div>
-          {DISPATCHER_AGENT_OPTIONS.map((agent) => {
-            const known = getKnownAgent(agent);
-            const selected = implementationAgent === agent;
+          {agentOptions.map((option) => {
+            const known = getKnownAgent(option);
+            const selected = agent === option;
             return (
               <DropdownMenu.Item
-                key={agent}
-                onSelect={() => onImplementationAgentChange(agent)}
+                key={option}
+                onSelect={() => onAgentChange(option)}
                 className="flex min-h-[40px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[34px] sm:rounded-[7px] sm:px-2 sm:py-1.5 sm:text-[12px]"
               >
                 <AgentTileIcon
-                  seed={{ label: agent }}
+                  seed={{ label: option }}
                   className="h-4 w-4 border-none bg-transparent sm:h-3.5 sm:w-3.5"
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium sm:text-[12.5px]">{known?.label ?? agent}</p>
+                  <p className="truncate text-[13px] font-medium sm:text-[12.5px]">{known?.label ?? option}</p>
                   <p className="truncate text-[11px] text-[rgba(255,255,255,0.58)] sm:text-[10.5px]">
-                    {known?.description ?? "Coding agent"}
+                    {known?.description ?? agentLabel}
                   </p>
                 </div>
                 {selected ? <Check className="h-4 w-4 text-[#f2d9cd] sm:h-3.5 sm:w-3.5" /> : null}
@@ -192,7 +194,7 @@ export function DispatcherPreferenceChips({
                   key={model.id}
                   onSelect={() => {
                     const nextReasoningOptions = getSelectableAgentReasoningOptions(
-                      implementationAgent,
+                      agent,
                       modelAccess,
                       runtimeModelCatalogs,
                       model.id,
@@ -203,7 +205,7 @@ export function DispatcherPreferenceChips({
                       reasoningEffort: nextReasoningOptions.some((option) => option.id === reasoningValue)
                         ? reasoningValue
                         : getSelectableDefaultReasoningEffort(
-                          implementationAgent,
+                          agent,
                           modelAccess,
                           runtimeModelCatalogs,
                           model.id,

@@ -232,10 +232,13 @@ struct UpsertDispatcherBindingBody {
     create_dispatcher: bool,
     #[serde(default)]
     force_new_dispatcher: bool,
+    agent: Option<String>,
     dispatcher_agent: Option<String>,
     implementation_agent: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    dispatcher_model: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
     implementation_model: Option<String>,
     implementation_reasoning_effort: Option<String>,
     title: Option<String>,
@@ -256,6 +259,50 @@ fn trimmed_owned_value(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn resolve_create_dispatcher_agents(
+    legacy_agent: Option<String>,
+    dispatcher_agent: Option<String>,
+    implementation_agent: Option<String>,
+) -> (Option<String>, Option<String>) {
+    (
+        trimmed_owned_value(dispatcher_agent),
+        trimmed_owned_value(implementation_agent).or_else(|| trimmed_owned_value(legacy_agent)),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CreateDispatcherPreferenceResolution {
+    dispatcher_model: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
+    implementation_model: Option<String>,
+    implementation_reasoning_effort: Option<String>,
+}
+
+fn resolve_create_dispatcher_preferences(
+    legacy_model: Option<String>,
+    dispatcher_model: Option<String>,
+    implementation_model: Option<String>,
+    legacy_reasoning_effort: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
+    implementation_reasoning_effort: Option<String>,
+) -> CreateDispatcherPreferenceResolution {
+    let dispatcher_model = trimmed_owned_value(dispatcher_model);
+    let dispatcher_reasoning_effort = trimmed_owned_value(dispatcher_reasoning_effort);
+    let implementation_model = trimmed_owned_value(implementation_model)
+        .or_else(|| dispatcher_model.clone())
+        .or_else(|| trimmed_owned_value(legacy_model));
+    let implementation_reasoning_effort = trimmed_owned_value(implementation_reasoning_effort)
+        .or_else(|| dispatcher_reasoning_effort.clone())
+        .or_else(|| trimmed_owned_value(legacy_reasoning_effort));
+
+    CreateDispatcherPreferenceResolution {
+        dispatcher_model,
+        dispatcher_reasoning_effort,
+        implementation_model,
+        implementation_reasoning_effort,
+    }
 }
 
 fn binding_query_lookup(query: &DispatcherBindingQuery) -> DispatcherBindingLookup {
@@ -438,35 +485,35 @@ async fn create_dispatcher(
         implementation_reasoning_effort,
     } = body;
 
-    let normalized_dispatcher_model =
-        trimmed_owned_value(dispatcher_model).or_else(|| trimmed_owned_value(model.clone()));
-    let normalized_dispatcher_reasoning = trimmed_owned_value(dispatcher_reasoning_effort)
-        .or_else(|| trimmed_owned_value(reasoning_effort.clone()));
-    let normalized_implementation_model = trimmed_owned_value(implementation_model)
-        .or_else(|| normalized_dispatcher_model.clone())
-        .or_else(|| trimmed_owned_value(model));
-    let normalized_implementation_reasoning = trimmed_owned_value(implementation_reasoning_effort)
-        .or_else(|| normalized_dispatcher_reasoning.clone())
-        .or_else(|| trimmed_owned_value(reasoning_effort));
+    let resolved_preferences = resolve_create_dispatcher_preferences(
+        model,
+        dispatcher_model,
+        implementation_model,
+        reasoning_effort,
+        dispatcher_reasoning_effort,
+        implementation_reasoning_effort,
+    );
+    let (resolved_dispatcher_agent, resolved_implementation_agent) =
+        resolve_create_dispatcher_agents(agent, dispatcher_agent, implementation_agent);
 
     match state
         .create_project_dispatcher_thread(
             &project_id,
             CreateDispatcherThreadOptions {
                 bridge_id: bridge_id.or(query.bridge_id),
-                dispatcher_agent: trimmed_owned_value(dispatcher_agent)
-                    .or_else(|| trimmed_owned_value(agent)),
-                implementation_agent,
+                dispatcher_agent: resolved_dispatcher_agent,
+                implementation_agent: resolved_implementation_agent,
                 openclaw_config: OpenClawDispatcherConfigPatch {
                     gateway_url: openclaw_gateway_url,
                     gateway_token: openclaw_gateway_token,
                     gateway_scopes: openclaw_gateway_scopes,
                     session_key: openclaw_session_key,
                 },
-                dispatcher_model: normalized_dispatcher_model,
-                dispatcher_reasoning_effort: normalized_dispatcher_reasoning,
-                implementation_model: normalized_implementation_model,
-                implementation_reasoning_effort: normalized_implementation_reasoning,
+                dispatcher_model: resolved_preferences.dispatcher_model,
+                dispatcher_reasoning_effort: resolved_preferences.dispatcher_reasoning_effort,
+                implementation_model: resolved_preferences.implementation_model,
+                implementation_reasoning_effort: resolved_preferences
+                    .implementation_reasoning_effort,
                 force_new,
             },
         )
@@ -547,6 +594,20 @@ async fn upsert_dispatcher_binding(
     Query(query): Query<DispatcherBindingQuery>,
     Json(body): Json<UpsertDispatcherBindingBody>,
 ) -> ApiResponse {
+    let (resolved_dispatcher_agent, resolved_implementation_agent) =
+        resolve_create_dispatcher_agents(
+            body.agent,
+            body.dispatcher_agent,
+            body.implementation_agent,
+        );
+    let resolved_preferences = resolve_create_dispatcher_preferences(
+        body.model,
+        body.dispatcher_model,
+        body.implementation_model,
+        body.reasoning_effort,
+        body.dispatcher_reasoning_effort,
+        body.implementation_reasoning_effort,
+    );
     let input = UpsertDispatcherBindingInput {
         binding_id: body.binding_id.or(query.binding_id),
         provider: body.provider,
@@ -557,12 +618,12 @@ async fn upsert_dispatcher_binding(
         dispatcher_thread_id: body.dispatcher_thread_id.or(query.dispatcher_thread_id),
         create_dispatcher: body.create_dispatcher,
         force_new_dispatcher: body.force_new_dispatcher,
-        dispatcher_agent: body.dispatcher_agent,
-        implementation_agent: body.implementation_agent,
-        dispatcher_model: body.model,
-        dispatcher_reasoning_effort: body.reasoning_effort,
-        implementation_model: body.implementation_model,
-        implementation_reasoning_effort: body.implementation_reasoning_effort,
+        dispatcher_agent: resolved_dispatcher_agent,
+        implementation_agent: resolved_implementation_agent,
+        dispatcher_model: resolved_preferences.dispatcher_model,
+        dispatcher_reasoning_effort: resolved_preferences.dispatcher_reasoning_effort,
+        implementation_model: resolved_preferences.implementation_model,
+        implementation_reasoning_effort: resolved_preferences.implementation_reasoning_effort,
         title: body.title,
         metadata: body.metadata.unwrap_or_default(),
     };
@@ -647,23 +708,13 @@ async fn update_dispatcher_preferences(
         }
     };
 
-    let dispatcher_agent = body
-        .dispatcher_agent
-        .or_else(|| body.implementation_agent.clone());
-    let dispatcher_model = body
-        .dispatcher_model
-        .or_else(|| body.implementation_model.clone());
-    let dispatcher_reasoning_effort = body
-        .dispatcher_reasoning_effort
-        .or_else(|| body.implementation_reasoning_effort.clone());
-
     match state
         .update_dispatcher_preferences(
             &dispatcher.id,
             DispatcherPreferencesPatch {
-                dispatcher_agent,
-                dispatcher_model,
-                dispatcher_reasoning_effort,
+                dispatcher_agent: body.dispatcher_agent,
+                dispatcher_model: body.dispatcher_model,
+                dispatcher_reasoning_effort: body.dispatcher_reasoning_effort,
                 implementation_agent: body.implementation_agent,
                 implementation_model: body.implementation_model,
                 implementation_reasoning_effort: body.implementation_reasoning_effort,
@@ -772,6 +823,19 @@ fn dispatcher_task_status(error: &anyhow::Error) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
+fn dispatcher_feed_error(dispatcher: &SessionRecord) -> Option<&str> {
+    if dispatcher.status != SessionStatus::Errored {
+        return None;
+    }
+
+    dispatcher
+        .metadata
+        .get("error")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 async fn dispatcher_feed_payload(
     state: &AppState,
     dispatcher: &SessionRecord,
@@ -819,6 +883,7 @@ async fn dispatcher_feed_payload(
         "parserState": parser_state,
         "runtimeStatus": Value::Null,
         "source": "dispatcher_conversation",
+        "error": dispatcher_feed_error(dispatcher),
         "integration": dispatcher_integration_payload(dispatcher, &dispatcher.project_id),
     });
 
@@ -1313,9 +1378,21 @@ async fn interrupt_dispatcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatcher_matches_scope, trimmed_query_value};
-    use crate::state::{SessionRecord, SessionStatus};
-    use serde_json::Value;
+    use super::{
+        dispatcher_feed_error, dispatcher_matches_scope, resolve_create_dispatcher_agents,
+        resolve_create_dispatcher_preferences, router, trimmed_query_value,
+    };
+    use crate::state::{AppState, CreateDispatcherThreadOptions, SessionRecord, SessionStatus};
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_db::Database;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
 
     fn build_dispatcher(id: &str) -> SessionRecord {
         let mut session = SessionRecord::new(
@@ -1361,6 +1438,71 @@ mod tests {
         assert_eq!(
             super::dispatcher_thread_query("thread/1", Some("bridge id")),
             "threadId=thread%2F1&bridgeId=bridge+id"
+        );
+    }
+
+    #[test]
+    fn legacy_create_agent_maps_to_implementation_only() {
+        let (dispatcher_agent, implementation_agent) =
+            resolve_create_dispatcher_agents(Some(" cursor-cli ".to_string()), None, None);
+
+        assert_eq!(dispatcher_agent, None);
+        assert_eq!(implementation_agent.as_deref(), Some("cursor-cli"));
+    }
+
+    #[test]
+    fn explicit_dispatcher_agent_stays_separate_from_legacy_create_agent() {
+        let (dispatcher_agent, implementation_agent) = resolve_create_dispatcher_agents(
+            Some("pi".to_string()),
+            Some("gemini".to_string()),
+            None,
+        );
+
+        assert_eq!(dispatcher_agent.as_deref(), Some("gemini"));
+        assert_eq!(implementation_agent.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn legacy_create_model_and_reasoning_only_map_to_implementation_preferences() {
+        let resolved = resolve_create_dispatcher_preferences(
+            Some(" auto ".to_string()),
+            None,
+            None,
+            Some(" medium ".to_string()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            super::CreateDispatcherPreferenceResolution {
+                dispatcher_model: None,
+                dispatcher_reasoning_effort: None,
+                implementation_model: Some("auto".to_string()),
+                implementation_reasoning_effort: Some("medium".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_dispatcher_preferences_still_seed_implementation_defaults() {
+        let resolved = resolve_create_dispatcher_preferences(
+            None,
+            Some("gpt-5.5".to_string()),
+            None,
+            None,
+            Some("high".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            resolved,
+            super::CreateDispatcherPreferenceResolution {
+                dispatcher_model: Some("gpt-5.5".to_string()),
+                dispatcher_reasoning_effort: Some("high".to_string()),
+                implementation_model: Some("gpt-5.5".to_string()),
+                implementation_reasoning_effort: Some("high".to_string()),
+            }
         );
     }
 
@@ -1487,5 +1629,428 @@ mod tests {
             delta.get("textDelta").and_then(|value| value.as_str()),
             Some(" on it")
         );
+    }
+
+    #[test]
+    fn errored_dispatcher_feed_exposes_concise_error_only_for_errored_threads() {
+        let mut dispatcher = build_dispatcher("dispatcher-1");
+        dispatcher.status = SessionStatus::Errored;
+        dispatcher
+            .metadata
+            .insert("error".to_string(), "UNSUPPORTED_CLIENT".to_string());
+
+        assert_eq!(
+            dispatcher_feed_error(&dispatcher),
+            Some("UNSUPPORTED_CLIENT")
+        );
+
+        dispatcher.status = SessionStatus::NeedsInput;
+        assert_eq!(dispatcher_feed_error(&dispatcher), None);
+
+        dispatcher.status = SessionStatus::Errored;
+        dispatcher.metadata.remove("error");
+        assert_eq!(dispatcher_feed_error(&dispatcher), None);
+    }
+
+    async fn build_test_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
+        let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("test repo should be created");
+        fs::write(repo.join("CONDUCTOR.md"), "## Inbox\n").expect("board should be created");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: repo.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("direct".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (root, state)
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response body should be json")
+    }
+
+    #[tokio::test]
+    async fn direct_create_legacy_cursor_model_auto_preserves_busy_dispatcher_runtime() {
+        let (root, state) = build_test_state("dispatcher-route-direct-legacy").await;
+        let mut existing = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should exist");
+        existing.status = SessionStatus::Working;
+        existing.activity = Some("active".to_string());
+        existing.summary = Some("current runtime".to_string());
+        state
+            .replace_dispatcher_thread(existing.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/demo/dispatcher")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "forceNew": false,
+                            "agent": "cursor-cli",
+                            "model": "auto",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        let thread = payload.get("thread").expect("thread payload should exist");
+        assert_eq!(
+            thread.get("id").and_then(Value::as_str),
+            Some(existing.id.as_str())
+        );
+        assert_eq!(
+            thread.get("status").and_then(Value::as_str),
+            Some("working")
+        );
+        assert_eq!(thread.get("agent").and_then(Value::as_str), Some("codex"));
+        assert_eq!(thread.get("model").and_then(Value::as_str), Some("gpt-5.4"));
+        assert_eq!(
+            thread.get("reasoningEffort").and_then(Value::as_str),
+            Some("high")
+        );
+        let metadata = thread
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be serialized");
+        assert_eq!(
+            metadata
+                .get("acpImplementationAgent")
+                .and_then(Value::as_str),
+            Some("cursor-cli")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationModel")
+                .and_then(Value::as_str),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationReasoningEffort")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+
+        let persisted = state
+            .get_dispatcher_thread(&existing.id)
+            .await
+            .expect("dispatcher should remain available");
+        assert_eq!(persisted.status, SessionStatus::Working);
+        assert_eq!(persisted.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(persisted.reasoning_effort.as_deref(), Some("high"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn direct_create_explicit_dispatcher_preferences_retune_runtime() {
+        let (root, state) = build_test_state("dispatcher-route-direct-explicit").await;
+        let mut existing = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should exist");
+        existing.status = SessionStatus::Working;
+        existing.activity = Some("active".to_string());
+        state
+            .replace_dispatcher_thread(existing.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/demo/dispatcher")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "forceNew": false,
+                            "dispatcherModel": "gpt-5.5",
+                            "dispatcherReasoningEffort": "medium",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        let thread = payload.get("thread").expect("thread payload should exist");
+        assert_eq!(
+            thread.get("id").and_then(Value::as_str),
+            Some(existing.id.as_str())
+        );
+        assert_eq!(thread.get("status").and_then(Value::as_str), Some("idle"));
+        assert_eq!(thread.get("agent").and_then(Value::as_str), Some("codex"));
+        assert_eq!(thread.get("model").and_then(Value::as_str), Some("gpt-5.5"));
+        assert_eq!(
+            thread.get("reasoningEffort").and_then(Value::as_str),
+            Some("medium")
+        );
+        let metadata = thread
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be serialized");
+        assert_eq!(
+            metadata
+                .get("acpImplementationModel")
+                .and_then(Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationReasoningEffort")
+                .and_then(Value::as_str),
+            Some("medium")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn binding_create_legacy_cursor_agent_model_and_reasoning_preserve_busy_dispatcher_runtime(
+    ) {
+        let (root, state) = build_test_state("dispatcher-route-binding-legacy").await;
+        let mut existing = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should exist");
+        existing.status = SessionStatus::Working;
+        existing.activity = Some("active".to_string());
+        state
+            .replace_dispatcher_thread(existing.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/demo/dispatcher/bindings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider": "openclaw",
+                            "threadId": "legacy-thread",
+                            "createDispatcher": true,
+                            "agent": "cursor-cli",
+                            "model": "auto",
+                            "reasoningEffort": "medium",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        let binding = payload
+            .get("binding")
+            .expect("binding payload should exist");
+        let thread = binding
+            .get("dispatcherThread")
+            .expect("dispatcher thread should be serialized");
+        assert_eq!(
+            thread.get("id").and_then(Value::as_str),
+            Some(existing.id.as_str())
+        );
+        assert_eq!(
+            thread.get("status").and_then(Value::as_str),
+            Some("working")
+        );
+        assert_eq!(thread.get("agent").and_then(Value::as_str), Some("codex"));
+        assert_eq!(thread.get("model").and_then(Value::as_str), Some("gpt-5.4"));
+        assert_eq!(
+            thread.get("reasoningEffort").and_then(Value::as_str),
+            Some("high")
+        );
+        let metadata = thread
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be serialized");
+        assert_eq!(
+            metadata
+                .get("acpImplementationAgent")
+                .and_then(Value::as_str),
+            Some("cursor-cli")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationModel")
+                .and_then(Value::as_str),
+            Some("auto")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationReasoningEffort")
+                .and_then(Value::as_str),
+            Some("medium")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn binding_create_explicit_fields_keep_runtime_and_implementation_preferences_separate() {
+        let (root, state) = build_test_state("dispatcher-route-binding-explicit").await;
+        let mut existing = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should exist");
+        existing.status = SessionStatus::Working;
+        existing.activity = Some("active".to_string());
+        state
+            .replace_dispatcher_thread(existing.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/demo/dispatcher/bindings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider": "openclaw",
+                            "threadId": "explicit-thread",
+                            "createDispatcher": true,
+                            "agent": "cursor-cli",
+                            "model": "auto",
+                            "reasoningEffort": "low",
+                            "dispatcherAgent": "gemini",
+                            "dispatcherModel": "gemini-3.1-pro-preview",
+                            "dispatcherReasoningEffort": "medium",
+                            "implementationAgent": "pi",
+                            "implementationModel": "openai/gpt-5.5",
+                            "implementationReasoningEffort": "high",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let payload = response_json(response).await;
+        let binding = payload
+            .get("binding")
+            .expect("binding payload should exist");
+        let thread = binding
+            .get("dispatcherThread")
+            .expect("dispatcher thread should be serialized");
+        let thread_id = thread
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("thread id should be serialized");
+        assert_ne!(thread_id, existing.id.as_str());
+        assert_eq!(thread.get("status").and_then(Value::as_str), Some("idle"));
+        assert_eq!(thread.get("agent").and_then(Value::as_str), Some("gemini"));
+        assert_eq!(
+            thread.get("model").and_then(Value::as_str),
+            Some("gemini-3.1-pro-preview")
+        );
+        assert_eq!(
+            thread.get("reasoningEffort").and_then(Value::as_str),
+            Some("medium")
+        );
+        let metadata = thread
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be serialized");
+        assert_eq!(
+            metadata
+                .get("acpImplementationAgent")
+                .and_then(Value::as_str),
+            Some("pi")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationModel")
+                .and_then(Value::as_str),
+            Some("openai/gpt-5.5")
+        );
+        assert_eq!(
+            metadata
+                .get("acpImplementationReasoningEffort")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -16,17 +16,13 @@ import {
   type ModelSelectionState,
 } from "@/lib/agentModelSelection";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import {
+  buildNewDispatcherConversationDefaults,
+  DISPATCHER_HANDOFF_AGENT_OPTIONS,
+  DISPATCHER_RUNTIME_AGENT_OPTIONS,
+} from "@/lib/dispatcherPreferences";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
-
-function readMetadataValue(
-  thread: DashboardSession,
-  key: string,
-  fallback = "",
-): string {
-  const value = thread.metadata?.[key];
-  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
-}
 
 type ProjectDispatcherPanelProps = {
   projectId: string;
@@ -37,6 +33,103 @@ type ProjectDispatcherPanelProps = {
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 };
+
+type CreateDispatcherConversationDialogProps = {
+  creating: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  runtimeAgent: string;
+  runtimeModelSelection: ModelSelectionState;
+  implementationAgent: string;
+  implementationModelSelection: ModelSelectionState;
+  modelAccess: ModelAccessPreferences;
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
+  onRuntimeAgentChange: (nextAgent: string) => void;
+  onRuntimeModelSelectionChange: (nextSelection: ModelSelectionState) => void;
+  onImplementationAgentChange: (nextAgent: string) => void;
+  onImplementationModelSelectionChange: (nextSelection: ModelSelectionState) => void;
+};
+
+function CreateDispatcherConversationDialog({
+  creating,
+  error,
+  onCancel,
+  onConfirm,
+  runtimeAgent,
+  runtimeModelSelection,
+  implementationAgent,
+  implementationModelSelection,
+  modelAccess,
+  runtimeModelCatalogs,
+  onRuntimeAgentChange,
+  onRuntimeModelSelectionChange,
+  onImplementationAgentChange,
+  onImplementationModelSelectionChange,
+}: CreateDispatcherConversationDialogProps) {
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 px-4">
+      <div className="w-full max-w-[720px] rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
+        <div className="border-b border-[var(--vk-border)] px-5 py-4">
+          <h2 className="text-[18px] font-semibold text-[var(--vk-text-strong)]">
+            Start new dispatcher conversation
+          </h2>
+          <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+            Choose the runtime agent for the conversation and the default agent for implementation handoffs.
+          </p>
+        </div>
+        <div className="space-y-4 px-5 py-5">
+          <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-3">
+            <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+              Dispatcher runtime
+            </p>
+            <DispatcherPreferenceChips
+              agent={runtimeAgent}
+              agentOptions={DISPATCHER_RUNTIME_AGENT_OPTIONS}
+              agentLabel="Runtime agent"
+              modelSelection={runtimeModelSelection}
+              modelAccess={modelAccess}
+              runtimeModelCatalogs={runtimeModelCatalogs}
+              disabled={creating}
+              onAgentChange={onRuntimeAgentChange}
+              onModelSelectionChange={onRuntimeModelSelectionChange}
+            />
+          </div>
+          <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-3">
+            <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+              Default task handoff
+            </p>
+            <DispatcherPreferenceChips
+              agent={implementationAgent}
+              agentOptions={DISPATCHER_HANDOFF_AGENT_OPTIONS}
+              agentLabel="Handoff agent"
+              modelSelection={implementationModelSelection}
+              modelAccess={modelAccess}
+              runtimeModelCatalogs={runtimeModelCatalogs}
+              disabled={creating}
+              onAgentChange={onImplementationAgentChange}
+              onModelSelectionChange={onImplementationModelSelectionChange}
+            />
+          </div>
+          {error ? (
+            <div className="rounded-[10px] border border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[#d25151]">
+              {error}
+            </div>
+          ) : null}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-5 py-4">
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={creating}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onConfirm} disabled={creating}>
+            {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Start conversation
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function ProjectDispatcherPanel({
   projectId,
@@ -52,10 +145,30 @@ export function ProjectDispatcherPanel({
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [creating, setCreating] = useState(false);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [implementationAgent, setImplementationAgent] = useState(defaultAgent);
-  const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
-    buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
+  const defaultConversationAgents = useMemo(
+    () => buildNewDispatcherConversationDefaults(defaultAgent),
+    [defaultAgent],
+  );
+  const [draftRuntimeAgent, setDraftRuntimeAgent] = useState(defaultConversationAgents.runtimeAgent);
+  const [draftRuntimeModelSelection, setDraftRuntimeModelSelection] = useState<ModelSelectionState>(() =>
+    buildModelSelection(
+      defaultConversationAgents.runtimeAgent,
+      modelAccess,
+      runtimeModelCatalogs,
+      null,
+      null,
+    ));
+  const [draftImplementationAgent, setDraftImplementationAgent] = useState(defaultConversationAgents.implementationAgent);
+  const [draftImplementationModelSelection, setDraftImplementationModelSelection] = useState<ModelSelectionState>(() =>
+    buildModelSelection(
+      defaultConversationAgents.implementationAgent,
+      modelAccess,
+      runtimeModelCatalogs,
+      null,
+      null,
+    ));
 
   const dispatcherSession = useMemo(() => {
     if (!selectedThreadId) {
@@ -64,25 +177,21 @@ export function ProjectDispatcherPanel({
     return dispatcherThreads.find((thread) => thread.id === selectedThreadId) ?? dispatcherThreads[0] ?? null;
   }, [dispatcherThreads, selectedThreadId]);
 
-  useEffect(() => {
-    if (!dispatcherSession) {
-      setImplementationAgent(defaultAgent);
-      setModelSelection(buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
-      return;
-    }
-
-    const nextAgent = readMetadataValue(dispatcherSession, "acpImplementationAgent", defaultAgent);
-    setImplementationAgent(nextAgent);
-    setModelSelection(
-      buildModelSelection(
-        nextAgent,
-        modelAccess,
-        runtimeModelCatalogs,
-        readMetadataValue(dispatcherSession, "acpImplementationModel") || null,
-        readMetadataValue(dispatcherSession, "acpImplementationReasoningEffort") || null,
-      ),
+  const resetCreateDraft = useCallback(() => {
+    const defaults = buildNewDispatcherConversationDefaults(defaultAgent);
+    setDraftRuntimeAgent(defaults.runtimeAgent);
+    setDraftRuntimeModelSelection(
+      buildModelSelection(defaults.runtimeAgent, modelAccess, runtimeModelCatalogs, null, null),
     );
-  }, [defaultAgent, dispatcherSession, modelAccess, runtimeModelCatalogs]);
+    setDraftImplementationAgent(defaults.implementationAgent);
+    setDraftImplementationModelSelection(
+      buildModelSelection(defaults.implementationAgent, modelAccess, runtimeModelCatalogs, null, null),
+    );
+  }, [defaultAgent, modelAccess, runtimeModelCatalogs]);
+
+  useEffect(() => {
+    resetCreateDraft();
+  }, [resetCreateDraft]);
 
   const loadDispatcherThreads = useCallback(async () => {
     setLoadingThreads(true);
@@ -128,18 +237,22 @@ export function ProjectDispatcherPanel({
     setCreating(true);
     setError(null);
     try {
-      const selectedModel = modelSelection.customModel.trim() || modelSelection.catalogModel;
+      const runtimeModel =
+        draftRuntimeModelSelection.customModel.trim() || draftRuntimeModelSelection.catalogModel;
+      const implementationModel =
+        draftImplementationModelSelection.customModel.trim()
+        || draftImplementationModelSelection.catalogModel;
       const response = await fetch(withBridgeQuery(`/api/projects/${projectId}/dispatcher`, bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           forceNew,
-          dispatcherAgent: implementationAgent,
-          dispatcherModel: selectedModel,
-          dispatcherReasoningEffort: modelSelection.reasoningEffort,
-          implementationAgent,
-          implementationModel: selectedModel,
-          implementationReasoningEffort: modelSelection.reasoningEffort,
+          dispatcherAgent: draftRuntimeAgent,
+          dispatcherModel: runtimeModel,
+          dispatcherReasoningEffort: draftRuntimeModelSelection.reasoningEffort,
+          implementationAgent: draftImplementationAgent,
+          implementationModel,
+          implementationReasoningEffort: draftImplementationModelSelection.reasoningEffort,
         }),
       });
       const payload = await response.json().catch(() => null);
@@ -152,6 +265,8 @@ export function ProjectDispatcherPanel({
       }
       setDispatcherThreads((current) => upsertDispatcherThread(current, session));
       setSelectedThreadId(session.id);
+      setShowCreateDialog(false);
+      resetCreateDraft();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start dispatcher");
     } finally {
@@ -159,14 +274,23 @@ export function ProjectDispatcherPanel({
     }
   }, [
     bridgeId,
-    defaultAgent,
-    dispatcherSession,
-    implementationAgent,
-    modelSelection.catalogModel,
-    modelSelection.customModel,
-    modelSelection.reasoningEffort,
+    draftImplementationAgent,
+    draftImplementationModelSelection.catalogModel,
+    draftImplementationModelSelection.customModel,
+    draftImplementationModelSelection.reasoningEffort,
+    draftRuntimeAgent,
+    draftRuntimeModelSelection.catalogModel,
+    draftRuntimeModelSelection.customModel,
+    draftRuntimeModelSelection.reasoningEffort,
     projectId,
+    resetCreateDraft,
   ]);
+
+  const handleOpenCreateDialog = useCallback(() => {
+    resetCreateDraft();
+    setError(null);
+    setShowCreateDialog(true);
+  }, [resetCreateDraft]);
 
   const handleDeleteThread = useCallback(async (threadId: string) => {
     setDeletingThreadId(threadId);
@@ -267,19 +391,44 @@ export function ProjectDispatcherPanel({
             </p>
             <div className="mt-5 rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-3 text-left">
               <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                Default task handoff
+                Dispatcher runtime
               </p>
               <DispatcherPreferenceChips
-                implementationAgent={implementationAgent}
-                modelSelection={modelSelection}
+                agent={draftRuntimeAgent}
+                agentOptions={DISPATCHER_RUNTIME_AGENT_OPTIONS}
+                agentLabel="Runtime agent"
+                modelSelection={draftRuntimeModelSelection}
                 modelAccess={modelAccess}
                 runtimeModelCatalogs={runtimeModelCatalogs}
                 disabled={creating}
-                onImplementationAgentChange={(nextAgent) => {
-                  setImplementationAgent(nextAgent);
-                  setModelSelection(buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null));
+                onAgentChange={(nextAgent) => {
+                  setDraftRuntimeAgent(nextAgent);
+                  setDraftRuntimeModelSelection(
+                    buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null),
+                  );
                 }}
-                onModelSelectionChange={setModelSelection}
+                onModelSelectionChange={setDraftRuntimeModelSelection}
+              />
+            </div>
+            <div className="mt-3 rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-3 text-left">
+              <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                Default task handoff
+              </p>
+              <DispatcherPreferenceChips
+                agent={draftImplementationAgent}
+                agentOptions={DISPATCHER_HANDOFF_AGENT_OPTIONS}
+                agentLabel="Handoff agent"
+                modelSelection={draftImplementationModelSelection}
+                modelAccess={modelAccess}
+                runtimeModelCatalogs={runtimeModelCatalogs}
+                disabled={creating}
+                onAgentChange={(nextAgent) => {
+                  setDraftImplementationAgent(nextAgent);
+                  setDraftImplementationModelSelection(
+                    buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null),
+                  );
+                }}
+                onModelSelectionChange={setDraftImplementationModelSelection}
               />
             </div>
             {error ? <div className="mt-4 text-[13px] text-[#d25151]">{error}</div> : null}
@@ -312,13 +461,48 @@ export function ProjectDispatcherPanel({
           runtimeModelCatalogs={runtimeModelCatalogs}
           onSelectThread={setSelectedThreadId}
           onDeleteThread={(threadId) => void handleDeleteThread(threadId)}
+          onThreadUpdated={(thread) => {
+            setDispatcherThreads((current) => upsertDispatcherThread(current, thread));
+          }}
           deletingThreadId={deletingThreadId}
-          onStartNewConversation={() => void handleCreate(true)}
+          onStartNewConversation={handleOpenCreateDialog}
           creatingConversation={creating}
           onToggleCollapse={onToggleCollapsed}
           className="w-full border-l-0 border-t-0 xl:w-full"
         />
       </div>
+      {showCreateDialog ? (
+        <CreateDispatcherConversationDialog
+          creating={creating}
+          error={error}
+          onCancel={() => {
+            if (!creating) {
+              setShowCreateDialog(false);
+            }
+          }}
+          onConfirm={() => void handleCreate(true)}
+          runtimeAgent={draftRuntimeAgent}
+          runtimeModelSelection={draftRuntimeModelSelection}
+          implementationAgent={draftImplementationAgent}
+          implementationModelSelection={draftImplementationModelSelection}
+          modelAccess={modelAccess}
+          runtimeModelCatalogs={runtimeModelCatalogs}
+          onRuntimeAgentChange={(nextAgent) => {
+            setDraftRuntimeAgent(nextAgent);
+            setDraftRuntimeModelSelection(
+              buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null),
+            );
+          }}
+          onRuntimeModelSelectionChange={setDraftRuntimeModelSelection}
+          onImplementationAgentChange={(nextAgent) => {
+            setDraftImplementationAgent(nextAgent);
+            setDraftImplementationModelSelection(
+              buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null),
+            );
+          }}
+          onImplementationModelSelectionChange={setDraftImplementationModelSelection}
+        />
+      ) : null}
     </section>
   );
 }
