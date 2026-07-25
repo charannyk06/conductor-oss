@@ -13,6 +13,7 @@ import {
 import type { DashboardSession } from "@/lib/types";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { isProjectDispatcherSession } from "@/lib/sessionKinds";
+import { KEYBOARD_SAFE_VIEWPORT_SHEET_CLASS_NAME } from "@/components/layout/keyboardSafeViewport";
 
 import type {
   ViewMode,
@@ -57,7 +58,7 @@ const NOTES_MAIN_PANEL_COMPACT_CLASS_NAME = "flex min-h-0 flex-1 flex-col overfl
 const NOTES_EDITOR_PANEL_CLASS_NAME = "min-h-[320px] overflow-hidden xl:min-h-0";
 const NOTES_PREVIEW_PANEL_CLASS_NAME = "min-h-[280px] overflow-auto bg-[var(--vk-bg-panel)]/25 px-4 py-4 xl:min-h-0";
 const NOTES_SHEET_OVERLAY_CLASS_NAME = "fixed inset-0 z-[130] bg-black/60 backdrop-blur-[2px]";
-const NOTES_SHEET_CONTENT_CLASS_NAME = "fixed inset-x-0 bottom-0 top-[10%] z-[131] flex flex-col overflow-hidden rounded-t-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_-24px_80px_rgba(0,0,0,0.42)]";
+const NOTES_SHEET_CONTENT_CLASS_NAME = `fixed inset-x-0 ${KEYBOARD_SAFE_VIEWPORT_SHEET_CLASS_NAME} z-[131] flex flex-col overflow-hidden rounded-t-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_-24px_80px_rgba(0,0,0,0.42)]`;
 
 // ---------------------------------------------------------------------------
 // Component
