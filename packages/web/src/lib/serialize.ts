@@ -50,6 +50,7 @@ export function sessionToDashboard(session: Session): DashboardSession {
   return {
     id: session.id,
     projectId: session.projectId,
+    agent: session.metadata["agent"]?.trim() || undefined,
     status: session.status,
     activity: session.activity,
     branch: session.branch,

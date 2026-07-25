@@ -176,6 +176,7 @@ function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
     bridgeId: session.bridgeId ?? null,
     bridgeConnected: session.bridgeConnected ?? null,
     bridgeConnection: session.bridgeConnection ?? null,
+    agent: session.agent?.trim() || undefined,
     status: session.status,
     activity: session.activity,
     branch: session.branch,

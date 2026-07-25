@@ -56,6 +56,9 @@ pub(crate) const ACP_IMPLEMENTATION_AGENT_METADATA_KEY: &str = "acpImplementatio
 pub(crate) const ACP_IMPLEMENTATION_MODEL_METADATA_KEY: &str = "acpImplementationModel";
 pub(crate) const ACP_IMPLEMENTATION_REASONING_METADATA_KEY: &str =
     "acpImplementationReasoningEffort";
+const ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY: &str = "acpRuntimeLaunchAgent";
+const ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY: &str = "acpRuntimeLaunchModel";
+const ACP_RUNTIME_LAUNCH_REASONING_METADATA_KEY: &str = "acpRuntimeLaunchReasoningEffort";
 const ACP_RESUME_TARGET_METADATA_KEY: &str = "acpResumeTarget";
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
@@ -715,6 +718,163 @@ fn detect_parser_state(session: &mut SessionRecord, text: &str) -> bool {
     false
 }
 
+fn concise_dispatcher_runtime_error(error: &str, exit_code: Option<i32>) -> String {
+    let sanitized = sanitize_terminal_text(error);
+    for line in sanitized.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("at ")
+            || trimmed.starts_with("node:")
+            || trimmed.starts_with("file://")
+            || trimmed.starts_with('/')
+            || trimmed.eq_ignore_ascii_case("stack trace")
+        {
+            continue;
+        }
+        let normalized = trimmed
+            .strip_prefix("Error: ")
+            .or_else(|| trimmed.strip_prefix("error: "))
+            .unwrap_or(trimmed)
+            .trim();
+        if !normalized.is_empty() {
+            return normalized.to_string();
+        }
+    }
+
+    exit_code
+        .map(|code| format!("Dispatcher runtime exited with code {code}"))
+        .unwrap_or_else(|| "Dispatcher runtime exited unexpectedly".to_string())
+}
+
+fn clear_dispatcher_runtime_error(session: &mut SessionRecord) {
+    session.metadata.remove("error");
+}
+
+fn set_dispatcher_runtime_error(session: &mut SessionRecord, error: &str, exit_code: Option<i32>) {
+    let detail = concise_dispatcher_runtime_error(error, exit_code);
+    session.metadata.insert("error".to_string(), detail.clone());
+    session.summary = Some(detail.clone());
+    session.metadata.insert("summary".to_string(), detail);
+}
+
+fn set_dispatcher_runtime_launch_metadata(
+    session: &mut SessionRecord,
+    agent: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) {
+    session.metadata.insert(
+        ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY.to_string(),
+        agent.to_string(),
+    );
+    match model.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            session.metadata.insert(
+                ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY.to_string(),
+                value.to_string(),
+            );
+        }
+        None => {
+            session
+                .metadata
+                .remove(ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY);
+        }
+    }
+    match reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            session.metadata.insert(
+                ACP_RUNTIME_LAUNCH_REASONING_METADATA_KEY.to_string(),
+                value.to_string(),
+            );
+        }
+        None => {
+            session
+                .metadata
+                .remove(ACP_RUNTIME_LAUNCH_REASONING_METADATA_KEY);
+        }
+    }
+}
+
+fn clear_dispatcher_runtime_launch_metadata(session: &mut SessionRecord) {
+    session
+        .metadata
+        .remove(ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY);
+    session
+        .metadata
+        .remove(ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY);
+    session
+        .metadata
+        .remove(ACP_RUNTIME_LAUNCH_REASONING_METADATA_KEY);
+}
+
+fn dispatcher_runtime_launch_matches_thread(session: &SessionRecord) -> bool {
+    let runtime_agent = session
+        .metadata
+        .get(ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if runtime_agent != Some(session.agent.trim()) {
+        return false;
+    }
+
+    let runtime_model = session
+        .metadata
+        .get(ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let thread_model = session
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if runtime_model != thread_model {
+        return false;
+    }
+
+    let runtime_reasoning = session
+        .metadata
+        .get(ACP_RUNTIME_LAUNCH_REASONING_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let thread_reasoning = session
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    runtime_reasoning == thread_reasoning
+}
+
+fn clear_dispatcher_runtime_state(thread: &mut SessionRecord) {
+    thread.pid = None;
+    thread.metadata.remove("startedAt");
+    thread.metadata.remove("lastStderr");
+    thread.metadata.remove("exitCode");
+    clear_dispatcher_runtime_launch_metadata(thread);
+    clear_parser_state(thread);
+}
+
+fn prepare_dispatcher_for_runtime_preference_change(thread: &mut SessionRecord) {
+    clear_dispatcher_runtime_state(thread);
+    clear_dispatcher_runtime_error(thread);
+    thread.metadata.remove(ACP_APPROVAL_STATE_METADATA_KEY);
+    thread.metadata.remove("finishedAt");
+    thread.status = SessionStatus::Idle;
+    thread.activity = Some("idle".to_string());
+    thread.summary = Some("Dispatcher ready for the next turn".to_string());
+    thread.metadata.insert(
+        "summary".to_string(),
+        "Dispatcher ready for the next turn".to_string(),
+    );
+}
+
 fn prepare_dispatcher_runtime_env(env: &mut HashMap<String, String>) {
     env.entry("TERM".to_string())
         .or_insert_with(|| "xterm-256color".to_string());
@@ -1117,6 +1277,17 @@ fn canonical_dispatcher_agent(value: &str) -> Option<String> {
     }
 }
 
+fn validate_requested_dispatcher_agent(value: Option<String>) -> Result<Option<String>> {
+    match normalize_optional_string(value) {
+        Some(value) => canonical_dispatcher_agent(&value).map(Some).ok_or_else(|| {
+            anyhow!(
+                "Unsupported dispatcher agent `{value}`. Expected codex, claude-code, gemini, openclaw, or letta"
+            )
+        }),
+        None => Ok(None),
+    }
+}
+
 fn canonical_implementation_agent(value: &str) -> Option<String> {
     match AgentKind::parse(value) {
         AgentKind::Codex
@@ -1127,6 +1298,17 @@ fn canonical_implementation_agent(value: &str) -> Option<String> {
         | AgentKind::Pi
         | AgentKind::Letta => Some(AgentKind::parse(value).to_string()),
         _ => None,
+    }
+}
+
+fn validate_requested_implementation_agent(value: Option<String>) -> Result<Option<String>> {
+    match normalize_optional_string(value) {
+        Some(value) => canonical_implementation_agent(&value).map(Some).ok_or_else(|| {
+            anyhow!(
+                "Unsupported implementation agent `{value}`. Expected codex, claude-code, gemini, openclaw, cursor-cli, pi, or letta"
+            )
+        }),
+        None => Ok(None),
     }
 }
 
@@ -1141,14 +1323,19 @@ fn default_implementation_agent(
     canonical_implementation_agent(candidate).unwrap_or_else(|| "codex".to_string())
 }
 
+fn default_dispatcher_agent(project: &ProjectConfig, default_agent: &str) -> String {
+    project
+        .agent
+        .as_deref()
+        .and_then(canonical_dispatcher_agent)
+        .or_else(|| canonical_dispatcher_agent(default_agent))
+        .unwrap_or_else(|| "codex".to_string())
+}
+
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn normalize_dispatcher_agent(value: Option<String>) -> Option<String> {
-    normalize_optional_string(value).and_then(|value| canonical_dispatcher_agent(&value))
 }
 
 fn normalize_implementation_agent(value: Option<String>) -> Option<String> {
@@ -1675,6 +1862,14 @@ pub(crate) fn build_acp_dispatcher_prompt(
 }
 
 impl AppState {
+    async fn dispatcher_transition_guard(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let mut guards = self.dispatcher_transition_guards.lock().await;
+        guards
+            .entry(thread_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub(crate) fn dispatcher_store_dir(&self) -> PathBuf {
         self.workspace_path
             .join(".conductor")
@@ -2362,10 +2557,11 @@ impl AppState {
         let default_agent =
             normalize_implementation_agent(Some(config.preferences.coding_agent.clone()))
                 .unwrap_or_else(|| "codex".to_string());
-        let agent = normalize_dispatcher_agent(dispatcher_agent)
-            .or_else(|| normalize_dispatcher_agent(project.agent.clone()))
-            .or_else(|| canonical_dispatcher_agent(&default_agent))
-            .unwrap_or_else(|| "codex".to_string());
+        let requested_dispatcher_agent = validate_requested_dispatcher_agent(dispatcher_agent)?;
+        let requested_implementation_agent =
+            validate_requested_implementation_agent(implementation_agent.clone())?;
+        let agent = requested_dispatcher_agent
+            .unwrap_or_else(|| default_dispatcher_agent(&project, &default_agent));
         let dispatcher_model = requested_dispatcher_model_for_agent(
             &agent,
             dispatcher_model.as_deref(),
@@ -2394,7 +2590,7 @@ impl AppState {
                             )
                             .await?;
                     }
-                    if implementation_agent.is_some()
+                    if requested_implementation_agent.is_some()
                         || implementation_model.is_some()
                         || implementation_reasoning_effort.is_some()
                         || has_openclaw_dispatcher_config_patch(&openclaw_config)
@@ -2403,7 +2599,7 @@ impl AppState {
                             .update_dispatcher_preferences(
                                 &updated.id,
                                 DispatcherPreferencesPatch {
-                                    implementation_agent,
+                                    implementation_agent: requested_implementation_agent.clone(),
                                     implementation_model,
                                     implementation_reasoning_effort,
                                     openclaw_config: openclaw_config.clone(),
@@ -2456,10 +2652,9 @@ impl AppState {
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             ACP_APPROVAL_GRANTED.to_string(),
         );
-        let selected_implementation_agent = normalize_implementation_agent(implementation_agent)
-            .unwrap_or_else(|| {
-                default_implementation_agent(Some(agent.as_str()), &project, &default_agent)
-            });
+        let selected_implementation_agent = requested_implementation_agent.unwrap_or_else(|| {
+            default_implementation_agent(Some(agent.as_str()), &project, &default_agent)
+        });
         thread.metadata.insert(
             ACP_IMPLEMENTATION_AGENT_METADATA_KEY.to_string(),
             selected_implementation_agent.clone(),
@@ -2525,6 +2720,8 @@ impl AppState {
         thread_id: &str,
         patch: DispatcherPreferencesPatch,
     ) -> Result<SessionRecord> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
@@ -2542,15 +2739,7 @@ impl AppState {
 
         let current_dispatcher_agent = canonical_dispatcher_agent(&thread.agent)
             .unwrap_or_else(|| thread.agent.trim().to_ascii_lowercase());
-        let requested_dispatcher_agent = normalize_optional_string(dispatcher_agent.clone())
-            .map(|value| {
-                canonical_dispatcher_agent(&value).ok_or_else(|| {
-                    anyhow!(
-                        "Unsupported dispatcher agent `{value}`. Expected codex, claude-code, gemini, openclaw, or letta"
-                    )
-                })
-            })
-            .transpose()?;
+        let requested_dispatcher_agent = validate_requested_dispatcher_agent(dispatcher_agent)?;
         let target_dispatcher_agent =
             requested_dispatcher_agent.unwrap_or_else(|| current_dispatcher_agent.clone());
 
@@ -2592,15 +2781,8 @@ impl AppState {
             })
         });
 
-        let requested_implementation_agent = normalize_optional_string(implementation_agent.clone())
-            .map(|value| {
-                canonical_implementation_agent(&value).ok_or_else(|| {
-                    anyhow!(
-                        "Unsupported implementation agent `{value}`. Expected codex, claude-code, gemini, openclaw, cursor-cli, or letta"
-                    )
-                })
-            })
-            .transpose()?;
+        let requested_implementation_agent =
+            validate_requested_implementation_agent(implementation_agent.clone())?;
         let target_implementation_agent = requested_implementation_agent.unwrap_or_else(|| {
             canonical_implementation_agent(&dispatcher_preferred_implementation_agent(&thread))
                 .unwrap_or_else(|| "codex".to_string())
@@ -2659,6 +2841,7 @@ impl AppState {
                     thread.metadata.remove("reasoningEffort");
                 }
             }
+            clear_dispatcher_runtime_launch_metadata(&mut thread);
         }
 
         let implementation_changed = apply_dispatcher_implementation_preferences(
@@ -2672,13 +2855,31 @@ impl AppState {
             return Ok(thread);
         }
 
-        thread.last_activity_at = Utc::now().to_rfc3339();
-        self.replace_dispatcher_thread(thread.clone()).await?;
-        self.sync_acp_dispatcher_state(&thread).await?;
-        if runtime_changed && self.dispatcher_runtime_attached(thread_id).await {
-            let _ = self.interrupt_dispatcher(thread_id).await;
-            self.clear_dispatcher_runtime(thread_id).await;
+        let retired_runtime = if runtime_changed {
+            self.take_dispatcher_runtime(thread_id).await
+        } else {
+            None
+        };
+        if runtime_changed
+            && (retired_runtime.is_some()
+                || matches!(
+                    thread.status,
+                    SessionStatus::Working
+                        | SessionStatus::Queued
+                        | SessionStatus::Spawning
+                        | SessionStatus::NeedsInput
+                ))
+        {
+            prepare_dispatcher_for_runtime_preference_change(&mut thread);
         }
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
+        let replace_result = self.replace_dispatcher_thread(thread.clone()).await;
+        if let Some(handle) = retired_runtime {
+            self.interrupt_retired_dispatcher_runtime(handle).await;
+        }
+        replace_result?;
+        self.sync_acp_dispatcher_state(&thread).await?;
         Ok(thread)
     }
 
@@ -2688,6 +2889,8 @@ impl AppState {
         model: Option<String>,
         reasoning_effort: Option<String>,
     ) -> Result<SessionRecord> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
@@ -2751,6 +2954,19 @@ impl AppState {
                 thread.metadata.remove("reasoningEffort");
             }
         }
+        clear_dispatcher_runtime_launch_metadata(&mut thread);
+        let retired_runtime = self.take_dispatcher_runtime(thread_id).await;
+        if retired_runtime.is_some()
+            || matches!(
+                thread.status,
+                SessionStatus::Working
+                    | SessionStatus::Queued
+                    | SessionStatus::Spawning
+                    | SessionStatus::NeedsInput
+            )
+        {
+            prepare_dispatcher_for_runtime_preference_change(&mut thread);
+        }
         if implementation_agent == dispatcher_agent {
             if let Some(value) = thread.model.clone() {
                 thread
@@ -2772,7 +2988,11 @@ impl AppState {
             }
         }
         thread.last_activity_at = Utc::now().to_rfc3339();
-        self.replace_dispatcher_thread(thread.clone()).await?;
+        let replace_result = self.replace_dispatcher_thread(thread.clone()).await;
+        if let Some(handle) = retired_runtime {
+            self.interrupt_retired_dispatcher_runtime(handle).await;
+        }
+        replace_result?;
         self.sync_acp_dispatcher_state(&thread).await?;
         Ok(thread)
     }
@@ -3159,6 +3379,10 @@ impl AppState {
         self.dispatcher_runtimes.lock().await.remove(thread_id);
     }
 
+    async fn take_dispatcher_runtime(&self, thread_id: &str) -> Option<DispatcherRuntimeHandle> {
+        self.dispatcher_runtimes.lock().await.remove(thread_id)
+    }
+
     async fn clear_dispatcher_runtime_if(&self, thread_id: &str, runtime_id: &str) {
         let mut runtimes = self.dispatcher_runtimes.lock().await;
         if runtimes
@@ -3167,6 +3391,80 @@ impl AppState {
             .unwrap_or(false)
         {
             runtimes.remove(thread_id);
+        }
+    }
+
+    async fn interrupt_retired_dispatcher_runtime(&self, handle: DispatcherRuntimeHandle) {
+        let mut kill_tx = handle.kill_tx.lock().await;
+        if let Some(kill_tx) = kill_tx.take() {
+            let _ = kill_tx.send(());
+        }
+    }
+
+    async fn persist_dispatcher_runtime_recovery_failure(
+        self: &Arc<Self>,
+        thread_id: &str,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        self.clear_dispatcher_runtime(thread_id).await;
+
+        let detail = format!(
+            "Failed to recover dispatcher runtime: {}",
+            concise_dispatcher_runtime_error(&error.to_string(), None)
+        );
+        let updated = {
+            let mut threads = self.dispatcher_threads.write().await;
+            let Some(thread) = threads.get_mut(thread_id) else {
+                return Ok(());
+            };
+            if !matches!(
+                thread.status,
+                SessionStatus::Working | SessionStatus::Queued | SessionStatus::Spawning
+            ) {
+                return Ok(());
+            }
+
+            clear_dispatcher_runtime_state(thread);
+            thread.status = SessionStatus::Errored;
+            thread.activity = Some("exited".to_string());
+            thread.last_activity_at = Utc::now().to_rfc3339();
+            thread
+                .metadata
+                .insert("finishedAt".to_string(), thread.last_activity_at.clone());
+            set_dispatcher_runtime_error(thread, &detail, None);
+            thread.clone()
+        };
+
+        self.persist_dispatcher_thread(&updated).await?;
+        self.sync_acp_dispatcher_state(&updated).await?;
+        self.publish_dispatcher_update(thread_id).await;
+        Ok(())
+    }
+
+    async fn ensure_dispatcher_runtime_or_recover(
+        self: &Arc<Self>,
+        thread: &SessionRecord,
+        initial_message: &str,
+        attachments: &[String],
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    ) -> Result<()> {
+        match self
+            .ensure_dispatcher_runtime(
+                thread,
+                initial_message,
+                attachments,
+                model,
+                reasoning_effort,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.persist_dispatcher_runtime_recovery_failure(&thread.id, &err)
+                    .await?;
+                Err(err)
+            }
         }
     }
 
@@ -3320,6 +3618,8 @@ impl AppState {
         } else {
             runtime_prompt.clone()
         };
+        let launch_model = model.clone();
+        let launch_reasoning_effort = reasoning_effort.clone();
         let handle = executor
             .spawn(SpawnOptions {
                 cwd: PathBuf::from(
@@ -3364,6 +3664,12 @@ impl AppState {
                 current
                     .metadata
                     .insert("startedAt".to_string(), Utc::now().to_rfc3339());
+                set_dispatcher_runtime_launch_metadata(
+                    current,
+                    &thread.agent,
+                    launch_model.as_deref(),
+                    launch_reasoning_effort.as_deref(),
+                );
             }
         }
         if let Some(updated) = self.get_dispatcher_thread(&thread.id).await {
@@ -3425,6 +3731,16 @@ impl AppState {
             event,
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
         );
+        let Some(active_runtime_id) = self
+            .dispatcher_runtime_handle(thread_id)
+            .await
+            .map(|handle| handle.runtime_id)
+        else {
+            return Ok(());
+        };
+        if active_runtime_id != runtime_id {
+            return Ok(());
+        }
         let mut threads = self.dispatcher_threads.write().await;
         let Some(thread) = threads.get_mut(thread_id) else {
             drop(threads);
@@ -3459,6 +3775,7 @@ impl AppState {
 
         match event {
             ExecutorOutput::Stdout(line) => {
+                clear_dispatcher_runtime_error(thread);
                 if apply_dispatcher_stdout_event(thread, &line) {
                     feed_dirty = true;
                 }
@@ -3477,6 +3794,7 @@ impl AppState {
                 thread.metadata.insert("lastStderr".to_string(), line);
             }
             ExecutorOutput::StructuredStatus { text, metadata } => {
+                clear_dispatcher_runtime_error(thread);
                 if let Some(resume_target) = metadata
                     .get("nativeResumeTarget")
                     .and_then(Value::as_str)
@@ -3525,6 +3843,7 @@ impl AppState {
                 }
             }
             ExecutorOutput::NeedsInput(prompt) => {
+                clear_dispatcher_runtime_error(thread);
                 if thread.status != SessionStatus::NeedsInput {
                     thread.status = SessionStatus::NeedsInput;
                     feed_dirty = true;
@@ -3545,10 +3864,12 @@ impl AppState {
                 if clear_parser_state(thread) {
                     feed_dirty = true;
                 }
+                clear_dispatcher_runtime_launch_metadata(thread);
                 thread
                     .metadata
                     .insert("exitCode".to_string(), exit_code.to_string());
                 if exit_code == 0 {
+                    clear_dispatcher_runtime_error(thread);
                     let approval_required = thread
                         .metadata
                         .get(ACP_APPROVAL_STATE_METADATA_KEY)
@@ -3618,30 +3939,19 @@ impl AppState {
                     thread
                         .metadata
                         .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                    let summary = thread
-                        .summary
-                        .clone()
-                        .filter(|value| !value.trim().is_empty())
-                        .or_else(|| {
-                            thread
-                                .metadata
-                                .get("lastStderr")
-                                .cloned()
-                                .filter(|value| !value.trim().is_empty())
-                        })
+                    let error = thread
+                        .metadata
+                        .get("lastStderr")
+                        .cloned()
+                        .or_else(|| thread.summary.clone())
                         .unwrap_or_else(|| format!("Process exited with code {exit_code}"));
-                    thread.summary = Some(summary.clone());
-                    thread.metadata.insert("summary".to_string(), summary);
+                    set_dispatcher_runtime_error(thread, &error, Some(exit_code));
                 }
             }
             ExecutorOutput::Failed { error, exit_code } => {
                 let parser_state_detected = detect_parser_state(thread, &error);
                 let requested_kill = error == "killed";
-                let summary = if requested_kill {
-                    "Interrupted".to_string()
-                } else {
-                    error.clone()
-                };
+                clear_dispatcher_runtime_launch_metadata(thread);
                 thread.status = if requested_kill {
                     SessionStatus::Killed
                 } else {
@@ -3651,8 +3961,15 @@ impl AppState {
                 thread
                     .metadata
                     .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                thread.summary = Some(summary.clone());
-                thread.metadata.insert("summary".to_string(), summary);
+                if requested_kill {
+                    clear_dispatcher_runtime_error(thread);
+                    thread.summary = Some("Interrupted".to_string());
+                    thread
+                        .metadata
+                        .insert("summary".to_string(), "Interrupted".to_string());
+                } else {
+                    set_dispatcher_runtime_error(thread, &error, exit_code);
+                }
                 if let Some(code) = exit_code {
                     thread
                         .metadata
@@ -3694,6 +4011,8 @@ impl AppState {
         thread_id: &str,
         request: DispatcherTurnRequest,
     ) -> Result<()> {
+        let transition_guard = self.dispatcher_transition_guard(thread_id).await;
+        let _transition_lock = transition_guard.lock().await;
         let DispatcherTurnRequest {
             message,
             runtime_message,
@@ -3743,6 +4062,8 @@ impl AppState {
         });
 
         clear_parser_state(thread);
+        clear_dispatcher_runtime_error(thread);
+        thread.metadata.remove("lastStderr");
         thread.last_activity_at = Utc::now().to_rfc3339();
         thread.status = SessionStatus::Working;
         thread.activity = Some("active".to_string());
@@ -3836,7 +4157,19 @@ impl AppState {
 
         if !uses_headless_turns {
             if let Some(runtime_handle) = self.dispatcher_runtime_input(thread_id).await {
-                if let Err(err) = runtime_handle
+                if !dispatcher_runtime_launch_matches_thread(&updated) {
+                    let _ = self.interrupt_dispatcher(thread_id).await;
+                    self.clear_dispatcher_runtime_if(thread_id, &runtime_handle.runtime_id)
+                        .await;
+                    self.ensure_dispatcher_runtime_or_recover(
+                        &updated,
+                        &runtime_message,
+                        &effective_attachments,
+                        updated.model.clone(),
+                        reasoning_effort.or_else(|| updated.reasoning_effort.clone()),
+                    )
+                    .await?;
+                } else if let Err(err) = runtime_handle
                     .input_tx
                     .send(ExecutorInput::Text(runtime_prompt))
                     .await
@@ -3848,7 +4181,7 @@ impl AppState {
                     );
                     self.clear_dispatcher_runtime_if(thread_id, &runtime_handle.runtime_id)
                         .await;
-                    self.ensure_dispatcher_runtime(
+                    self.ensure_dispatcher_runtime_or_recover(
                         &updated,
                         &runtime_message,
                         &effective_attachments,
@@ -3858,7 +4191,7 @@ impl AppState {
                     .await?;
                 }
             } else {
-                self.ensure_dispatcher_runtime(
+                self.ensure_dispatcher_runtime_or_recover(
                     &updated,
                     &runtime_message,
                     &effective_attachments,
@@ -3868,7 +4201,7 @@ impl AppState {
                 .await?;
             }
         } else {
-            self.ensure_dispatcher_runtime(
+            self.ensure_dispatcher_runtime_or_recover(
                 &updated,
                 &runtime_message,
                 &effective_attachments,
@@ -3973,17 +4306,20 @@ mod tests {
         dispatcher_model_supported_for_agent, dispatcher_resume_target,
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_dispatcher_model_for_agent,
-        normalize_loaded_dispatcher_thread, prepare_dispatcher_runtime_env, read_json,
-        AcpSessionMemoryState, AppState, CreateDispatcherThreadOptions, DispatcherPreferencesPatch,
+        normalize_loaded_dispatcher_thread, prepare_dispatcher_for_runtime_preference_change,
+        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
+        CreateDispatcherThreadOptions, DispatcherPreferencesPatch, DispatcherRuntimeHandle,
         OpenClawDispatcherConfigPatch, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
         ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
-        ACP_IMPLEMENTATION_MODEL_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
-        GEMINI_FLASH_MODEL_ID, GEMINI_STALE_FLASH_MODEL_ID, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        ACP_IMPLEMENTATION_MODEL_METADATA_KEY, ACP_IMPLEMENTATION_REASONING_METADATA_KEY,
+        ACP_RESUME_TARGET_METADATA_KEY, ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY,
+        ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY, ACP_SESSION_KIND, GEMINI_FLASH_MODEL_ID,
+        GEMINI_STALE_FLASH_MODEL_ID, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
         OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
         OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
-    use anyhow::Result;
+    use anyhow::{anyhow, Result};
     use async_trait::async_trait;
     use chrono::Utc;
     use conductor_core::{
@@ -4014,6 +4350,11 @@ mod tests {
     #[derive(Clone)]
     struct PromptAfterAttachExecutor {
         observed_input_tx: mpsc::UnboundedSender<String>,
+    }
+
+    #[derive(Clone)]
+    struct FailingSpawnExecutor {
+        error: String,
     }
 
     #[async_trait]
@@ -4070,6 +4411,45 @@ mod tests {
                 input_tx,
                 kill_tx,
             ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    #[async_trait]
+    impl Executor for FailingSpawnExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Letta
+        }
+
+        fn name(&self) -> &str {
+            "FailingSpawnExecutor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/tmp/failing-spawn-executor")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        fn supports_direct_terminal_ui(&self) -> bool {
+            true
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            Err(anyhow!("{}", self.error))
         }
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
@@ -4172,6 +4552,17 @@ mod tests {
             .expect("test db should initialize");
         let state = AppState::new(root.join("conductor.yaml"), config, db).await;
         (root, state)
+    }
+
+    async fn register_test_dispatcher_runtime(
+        state: &Arc<AppState>,
+        thread_id: &str,
+    ) -> DispatcherRuntimeHandle {
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .store_dispatcher_runtime(thread_id, input_tx, true, kill_tx)
+            .await
     }
 
     #[test]
@@ -4854,6 +5245,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_preference_change_clears_stale_plan_approval_metadata() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-pref-reset-approval".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread.summary = Some("Plan ready".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+        thread
+            .metadata
+            .insert("parserState".to_string(), "approval_required".to_string());
+
+        prepare_dispatcher_for_runtime_preference_change(&mut thread);
+
+        assert_eq!(thread.status, SessionStatus::Idle);
+        assert_eq!(thread.activity.as_deref(), Some("idle"));
+        assert_eq!(
+            thread.summary.as_deref(),
+            Some("Dispatcher ready for the next turn")
+        );
+        assert!(!thread
+            .metadata
+            .contains_key(ACP_APPROVAL_STATE_METADATA_KEY));
+        assert!(!thread.metadata.contains_key("parserState"));
+    }
+
     #[tokio::test]
     async fn headless_plan_only_dispatcher_turn_waits_for_explicit_approval() {
         let (root, state) = build_test_state("acp-headless-plan-only").await;
@@ -5027,17 +5457,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_runtime_replacement_failure_persists_errored_dispatcher_and_clears_runtime_state(
+    ) {
+        let (root, state) = build_test_state("acp-stale-runtime-recovery").await;
+        let mut thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("letta".to_string()),
+                    implementation_agent: Some("letta".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread.metadata.insert(
+            ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY.to_string(),
+            "codex".to_string(),
+        );
+        thread.metadata.insert(
+            ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY.to_string(),
+            "gpt-5.4".to_string(),
+        );
+        thread
+            .metadata
+            .insert("startedAt".to_string(), Utc::now().to_rfc3339());
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (kill_tx, kill_rx) = oneshot::channel();
+        let _runtime_handle = state
+            .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
+            .await;
+
+        state.executors.write().await.insert(
+            AgentKind::Letta,
+            Arc::new(FailingSpawnExecutor {
+                error: "Error: Missing Letta binary\n    at spawn (file:///tmp/letta.js:1:1)"
+                    .to_string(),
+            }),
+        );
+
+        let error = state
+            .send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "Retry the dispatcher".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            )
+            .await
+            .expect_err("runtime recovery should fail");
+        assert!(
+            error.to_string().contains("Missing Letta binary"),
+            "unexpected send error: {error}"
+        );
+
+        timeout(Duration::from_secs(1), kill_rx)
+            .await
+            .expect("stale runtime should be interrupted")
+            .expect("kill signal should be sent");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Errored);
+        assert_eq!(updated.activity.as_deref(), Some("exited"));
+        assert_eq!(updated.pid, None);
+        assert_eq!(
+            updated.metadata.get("error").map(String::as_str),
+            Some("Failed to recover dispatcher runtime: Missing Letta binary")
+        );
+        assert_eq!(
+            updated.summary.as_deref(),
+            Some("Failed to recover dispatcher runtime: Missing Letta binary")
+        );
+        assert!(!updated
+            .metadata
+            .contains_key(ACP_RUNTIME_LAUNCH_AGENT_METADATA_KEY));
+        assert!(!updated
+            .metadata
+            .contains_key(ACP_RUNTIME_LAUNCH_MODEL_METADATA_KEY));
+        assert!(!updated.metadata.contains_key("startedAt"));
+        assert!(!state.dispatcher_runtime_attached(&thread.id).await);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn runtime_events_refresh_session_memory_artifacts() {
         let (root, state) = build_test_state("acp-runtime-memory-sync").await;
         let thread = state
             .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
             .await
             .expect("dispatcher thread should be created");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
 
         state
             .apply_dispatcher_runtime_event(
                 &thread.id,
-                "runtime-test",
+                &runtime.runtime_id,
                 ExecutorOutput::Stdout("assistant update".to_string()),
             )
             .await
@@ -5052,6 +5580,352 @@ mod tests {
             .recent_conversation
             .iter()
             .any(|note| note.label == "Assistant" && note.text.contains("assistant update")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_events_do_not_override_replacement_runtime_state() {
+        let (root, state) = build_test_state("acp-stale-runtime-events").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread.summary = Some("current runtime".to_string());
+        thread.output = "current output".to_string();
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let (old_input_tx, _old_input_rx) = mpsc::channel(1);
+        let (old_kill_tx, _old_kill_rx) = oneshot::channel();
+        let old_runtime = state
+            .store_dispatcher_runtime(&thread.id, old_input_tx, true, old_kill_tx)
+            .await;
+
+        let (new_input_tx, _new_input_rx) = mpsc::channel(1);
+        let (new_kill_tx, _new_kill_rx) = oneshot::channel();
+        let new_runtime = state
+            .store_dispatcher_runtime(&thread.id, new_input_tx, true, new_kill_tx)
+            .await;
+
+        for event in [
+            ExecutorOutput::Stdout("stale stdout".to_string()),
+            ExecutorOutput::Stderr("stale stderr".to_string()),
+            ExecutorOutput::Failed {
+                error: "killed".to_string(),
+                exit_code: None,
+            },
+            ExecutorOutput::Failed {
+                error: "stale failure".to_string(),
+                exit_code: Some(1),
+            },
+            ExecutorOutput::Completed { exit_code: 1 },
+        ] {
+            state
+                .apply_dispatcher_runtime_event(&thread.id, &old_runtime.runtime_id, event)
+                .await
+                .expect("stale runtime event should be ignored");
+        }
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
+        assert_eq!(updated.summary.as_deref(), Some("current runtime"));
+        assert_eq!(updated.output, "current output");
+        assert!(!updated.metadata.contains_key("lastStderr"));
+        assert!(!updated.metadata.contains_key("exitCode"));
+        assert!(!updated.metadata.contains_key("finishedAt"));
+
+        let active_runtime = state
+            .dispatcher_runtime_handle(&thread.id)
+            .await
+            .expect("replacement runtime should remain attached");
+        assert_eq!(active_runtime.runtime_id, new_runtime.runtime_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn retired_runtime_events_are_ignored_once_no_active_handle_remains() {
+        let (root, state) = build_test_state("acp-retired-runtime-no-handle").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread.summary = Some("replacement pending".to_string());
+        thread.output = "current output".to_string();
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let retired_runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
+        state.clear_dispatcher_runtime(&thread.id).await;
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &retired_runtime.runtime_id,
+                ExecutorOutput::Failed {
+                    error: "stale failure".to_string(),
+                    exit_code: Some(1),
+                },
+            )
+            .await
+            .expect("retired runtime event should be ignored");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
+        assert_eq!(updated.summary.as_deref(), Some("replacement pending"));
+        assert_eq!(updated.output, "current output");
+        assert!(!updated.metadata.contains_key("error"));
+        assert!(!updated.metadata.contains_key("exitCode"));
+        assert!(!updated.metadata.contains_key("finishedAt"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn busy_dispatcher_becomes_sendable_after_runtime_preference_change() {
+        let (root, state) = build_test_state("acp-pref-change-sendable").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread.summary = Some("current runtime".to_string());
+        thread.output = "current output".to_string();
+        thread.pid = Some(4242);
+        thread
+            .metadata
+            .insert("startedAt".to_string(), Utc::now().to_rfc3339());
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("busy dispatcher thread should persist");
+
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (kill_tx, mut kill_rx) = oneshot::channel();
+        let retired_runtime = state
+            .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
+            .await;
+        assert!(state.dispatcher_runtime_attached(&thread.id).await);
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "slow reply".to_string(),
+                delay: Duration::from_secs(5),
+            }),
+        );
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                DispatcherPreferencesPatch {
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    ..DispatcherPreferencesPatch::default()
+                },
+            )
+            .await
+            .expect("dispatcher preferences should update");
+
+        assert_eq!(updated.status, SessionStatus::Idle);
+        assert_eq!(updated.activity.as_deref(), Some("idle"));
+        assert_eq!(
+            updated.summary.as_deref(),
+            Some("Dispatcher ready for the next turn")
+        );
+        assert_eq!(updated.pid, None);
+        assert_eq!(updated.model.as_deref(), Some("gpt-5.4"));
+        assert!(!updated.metadata.contains_key("startedAt"));
+        assert!(!updated.metadata.contains_key("lastStderr"));
+        assert!(!updated.metadata.contains_key("exitCode"));
+        assert!(!updated.metadata.contains_key("finishedAt"));
+        assert!(!state.dispatcher_runtime_attached(&thread.id).await);
+        timeout(Duration::from_secs(1), &mut kill_rx)
+            .await
+            .expect("retired runtime should be interrupted")
+            .expect("retired runtime kill signal should be delivered");
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &retired_runtime.runtime_id,
+                ExecutorOutput::Failed {
+                    error: "killed".to_string(),
+                    exit_code: None,
+                },
+            )
+            .await
+            .expect("retired runtime event should be ignored");
+
+        timeout(
+            Duration::from_millis(750),
+            state.send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "Second turn".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            ),
+        )
+        .await
+        .expect("second dispatcher send should not block")
+        .expect("dispatcher should become sendable again");
+
+        let resent = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(resent.status, SessionStatus::Working);
+        assert_eq!(resent.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(resent.activity.as_deref(), Some("active"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_turn_start_clears_stale_last_stderr() {
+        let (root, state) = build_test_state("acp-turn-clears-stderr").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "slow reply".to_string(),
+                delay: Duration::from_secs(5),
+            }),
+        );
+
+        let mut stale = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should exist");
+        stale
+            .metadata
+            .insert("lastStderr".to_string(), "stale stderr".to_string());
+        stale
+            .metadata
+            .insert("error".to_string(), "stale stderr".to_string());
+        stale.summary = Some("stale stderr".to_string());
+        stale
+            .metadata
+            .insert("summary".to_string(), "stale stderr".to_string());
+        state
+            .replace_dispatcher_thread(stale)
+            .await
+            .expect("stale dispatcher thread should persist");
+
+        state
+            .send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "New turn".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            )
+            .await
+            .expect("dispatcher turn should start");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
+        assert!(!updated.metadata.contains_key("lastStderr"));
+        assert!(!updated.metadata.contains_key("error"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_transition_guard_blocks_turn_start_until_runtime_resets_finish() {
+        let (root, state) = build_test_state("acp-transition-guard-send").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "guarded reply".to_string(),
+                delay: Duration::from_secs(5),
+            }),
+        );
+
+        let transition_guard = state.dispatcher_transition_guard(&thread.id).await;
+        let transition_lock = transition_guard.lock().await;
+
+        let state_for_send = Arc::clone(&state);
+        let thread_id = thread.id.clone();
+        let mut send_task = tokio::spawn(async move {
+            state_for_send
+                .send_to_dispatcher_thread(
+                    &thread_id,
+                    DispatcherTurnRequest::plain(
+                        "Blocked turn".to_string(),
+                        Vec::new(),
+                        None,
+                        None,
+                        "chat",
+                    ),
+                )
+                .await
+        });
+
+        assert!(
+            timeout(Duration::from_millis(150), &mut send_task)
+                .await
+                .is_err(),
+            "turn start should wait for an in-flight dispatcher transition"
+        );
+
+        let still_idle = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(still_idle.status, SessionStatus::Idle);
+
+        drop(transition_lock);
+
+        send_task
+            .await
+            .expect("send task should join cleanly")
+            .expect("dispatcher send should succeed once the transition completes");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -5136,6 +6010,88 @@ mod tests {
                 .get(ACP_IMPLEMENTATION_AGENT_METADATA_KEY)
                 .map(String::as_str),
             Some("letta")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_dispatcher_thread_rejects_explicit_unsupported_dispatcher_agent() {
+        let (root, state) = build_test_state("acp-dispatcher-invalid-create").await;
+
+        let error = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("cursor-cli".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect_err("unsupported dispatcher agent should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported dispatcher agent `cursor-cli`"),
+            "unexpected error: {error}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn implementation_only_preference_updates_do_not_mutate_dispatcher_runtime() {
+        let (root, state) = build_test_state("acp-dispatcher-impl-only-patch").await;
+        let thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                DispatcherPreferencesPatch {
+                    implementation_agent: Some("cursor-cli".to_string()),
+                    implementation_model: Some("auto".to_string()),
+                    implementation_reasoning_effort: Some("medium".to_string()),
+                    ..DispatcherPreferencesPatch::default()
+                },
+            )
+            .await
+            .expect("implementation-only preferences should update");
+
+        assert_eq!(updated.agent, "codex");
+        assert_eq!(updated.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(updated.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_AGENT_METADATA_KEY)
+                .map(String::as_str),
+            Some("cursor-cli")
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_MODEL_METADATA_KEY)
+                .map(String::as_str),
+            Some("auto")
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_REASONING_METADATA_KEY)
+                .map(String::as_str),
+            Some("medium")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -5268,6 +6224,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn omitted_dispatcher_agent_prefers_project_then_global_then_codex() {
+        let (root, state) = build_test_state("acp-dispatcher-agent-fallbacks").await;
+
+        {
+            let mut config = state.config.write().await;
+            config.preferences.coding_agent = "claude-code".to_string();
+            config
+                .projects
+                .get_mut("demo")
+                .expect("demo project should exist")
+                .agent = Some("gemini".to_string());
+        }
+        let project_preferred = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    force_new: true,
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should use the supported project agent");
+        assert_eq!(project_preferred.agent, "gemini");
+
+        {
+            let mut config = state.config.write().await;
+            config
+                .projects
+                .get_mut("demo")
+                .expect("demo project should exist")
+                .agent = Some("cursor-cli".to_string());
+        }
+        let global_preferred = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    force_new: true,
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should fall back to the global coding agent");
+        assert_eq!(global_preferred.agent, "claude-code");
+
+        {
+            let mut config = state.config.write().await;
+            config.preferences.coding_agent = "cursor-cli".to_string();
+        }
+        let codex_fallback = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    force_new: true,
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should fall back to codex");
+        assert_eq!(codex_fallback.agent, "codex");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn structured_runtime_events_refresh_heartbeat_metadata() {
         let (root, state) = build_test_state("acp-structured-heartbeat").await;
         let mut thread = state
@@ -5289,11 +6309,12 @@ mod tests {
             .replace_dispatcher_thread(thread.clone())
             .await
             .expect("dispatcher thread should persist");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
 
         state
             .apply_dispatcher_runtime_event(
                 &thread.id,
-                "runtime-test",
+                &runtime.runtime_id,
                 ExecutorOutput::StructuredStatus {
                     text: "Thinking".to_string(),
                     metadata: HashMap::new(),

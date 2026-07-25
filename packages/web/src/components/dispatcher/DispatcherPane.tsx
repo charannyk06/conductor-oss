@@ -2,7 +2,7 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
 import {
@@ -16,7 +16,15 @@ import {
   resolveReasoningSelectionValue,
   type ModelSelectionState,
 } from "@/lib/agentModelSelection";
-import { withBridgeQuery } from "@/lib/bridgeQuery";
+import {
+  createSerializedDispatcherPreferencePatchQueue,
+  dispatcherPreferencePatchScopeKey,
+  DISPATCHER_HANDOFF_AGENT_OPTIONS,
+  type DispatcherPreferencePatchRequest,
+  DISPATCHER_RUNTIME_AGENT_OPTIONS,
+  resolveDispatcherActiveAgentName,
+  sendDispatcherPreferencePatchRequest,
+} from "@/lib/dispatcherPreferences";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
 
@@ -30,6 +38,7 @@ type DispatcherPaneProps = {
   runtimeModelCatalogs?: Record<string, RuntimeAgentModelCatalog>;
   onSelectThread?: (threadId: string) => void;
   onDeleteThread?: (threadId: string) => void | Promise<void>;
+  onThreadUpdated?: (thread: DashboardSession) => void;
   deletingThreadId?: string | null;
   onStartNewConversation?: () => void;
   creatingConversation?: boolean;
@@ -177,12 +186,30 @@ export function DispatcherPane({
   runtimeModelCatalogs = {},
   onSelectThread,
   onDeleteThread,
+  onThreadUpdated,
   deletingThreadId = null,
   onStartNewConversation,
   creatingConversation = false,
   onToggleCollapse,
   className,
 }: DispatcherPaneProps) {
+  const preferredRuntimeAgent = useMemo(
+    () => resolveDispatcherActiveAgentName({
+      isDispatcher: true,
+      sessionAgent: thread.agent ?? null,
+      legacyMetadataAgent: thread.metadata.agent ?? null,
+      repositoryAgent: null,
+    }),
+    [thread.agent, thread.metadata.agent],
+  );
+  const preferredRuntimeModel = useMemo(
+    () => thread.model?.trim() || readMetadataValue(thread, "model"),
+    [thread],
+  );
+  const preferredRuntimeReasoning = useMemo(
+    () => thread.reasoningEffort?.trim() || readMetadataValue(thread, "reasoningEffort"),
+    [thread],
+  );
   const preferredImplementationAgent = useMemo(
     () => readMetadataValue(thread, "acpImplementationAgent", "codex"),
     [thread],
@@ -195,11 +222,21 @@ export function DispatcherPane({
     () => readMetadataValue(thread, "acpImplementationReasoningEffort"),
     [thread],
   );
+  const [runtimeAgent, setRuntimeAgent] = useState(preferredRuntimeAgent);
+  const [runtimeModelSelection, setRuntimeModelSelection] = useState<ModelSelectionState>(() =>
+    buildModelSelection(
+      preferredRuntimeAgent,
+      modelAccess,
+      runtimeModelCatalogs,
+      preferredRuntimeModel || null,
+      preferredRuntimeReasoning || null,
+    ));
   const [implementationAgent, setImplementationAgent] = useState(preferredImplementationAgent);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
+  const [preferenceError, setPreferenceError] = useState<string | null>(null);
+  const [implementationModelSelection, setImplementationModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(
       preferredImplementationAgent,
       modelAccess,
@@ -209,25 +246,85 @@ export function DispatcherPane({
     ));
   const [updatingPreferences, setUpdatingPreferences] = useState(false);
   const showPreferenceEditor = Object.keys(runtimeModelCatalogs).length > 0;
+  const currentScopeKey = useMemo(
+    () => dispatcherPreferencePatchScopeKey({ projectId, bridgeId, threadId: thread.id }),
+    [bridgeId, projectId, thread.id],
+  );
+  const currentScopeKeyRef = useRef(currentScopeKey);
+  currentScopeKeyRef.current = currentScopeKey;
+  const lastConfirmedThreadRef = useRef(thread);
+
+  const syncPreferenceControlsFromThread = useCallback(
+    (nextThread: DashboardSession) => {
+      const nextRuntimeAgent = resolveDispatcherActiveAgentName({
+        isDispatcher: true,
+        sessionAgent: nextThread.agent ?? null,
+        legacyMetadataAgent: nextThread.metadata.agent ?? null,
+        repositoryAgent: null,
+      });
+      const nextRuntimeModel = nextThread.model?.trim() || readMetadataValue(nextThread, "model");
+      const nextRuntimeReasoning =
+        nextThread.reasoningEffort?.trim() || readMetadataValue(nextThread, "reasoningEffort");
+      const nextImplementationAgent = readMetadataValue(
+        nextThread,
+        "acpImplementationAgent",
+        "codex",
+      );
+      const nextImplementationModel = readMetadataValue(nextThread, "acpImplementationModel");
+      const nextImplementationReasoning = readMetadataValue(
+        nextThread,
+        "acpImplementationReasoningEffort",
+      );
+
+      setRuntimeAgent(nextRuntimeAgent);
+      setRuntimeModelSelection(
+        buildModelSelection(
+          nextRuntimeAgent,
+          modelAccess,
+          runtimeModelCatalogs,
+          nextRuntimeModel || null,
+          nextRuntimeReasoning || null,
+        ),
+      );
+      setImplementationAgent(nextImplementationAgent);
+      setImplementationModelSelection(
+        buildModelSelection(
+          nextImplementationAgent,
+          modelAccess,
+          runtimeModelCatalogs,
+          nextImplementationModel || null,
+          nextImplementationReasoning || null,
+        ),
+      );
+    },
+    [modelAccess, runtimeModelCatalogs],
+  );
 
   useEffect(() => {
-    setImplementationAgent(preferredImplementationAgent);
-    setModelSelection(
-      buildModelSelection(
-        preferredImplementationAgent,
-        modelAccess,
-        runtimeModelCatalogs,
-        preferredImplementationModel || null,
-        preferredImplementationReasoning || null,
-      ),
-    );
+    lastConfirmedThreadRef.current = thread;
+  }, [thread]);
+
+  useEffect(() => {
+    if (updatingPreferences) {
+      return;
+    }
+    syncPreferenceControlsFromThread(thread);
   }, [
-    modelAccess,
     preferredImplementationAgent,
     preferredImplementationModel,
     preferredImplementationReasoning,
-    runtimeModelCatalogs,
+    preferredRuntimeAgent,
+    preferredRuntimeModel,
+    preferredRuntimeReasoning,
+    syncPreferenceControlsFromThread,
+    thread.id,
+    updatingPreferences,
   ]);
+
+  useEffect(() => {
+    setPreferenceError(null);
+    setUpdatingPreferences(preferencePatchQueueRef.current?.isPending(currentScopeKey) ?? false);
+  }, [currentScopeKey]);
 
   const confirmDeleteThread = useMemo(
     () => threads.find((candidate) => candidate.id === confirmDeleteThreadId) ?? null,
@@ -241,49 +338,129 @@ export function DispatcherPane({
     }
   }, [confirmDeleteThread, confirmDeleteThreadId]);
 
-  const threadQuery = useMemo(
-    () => `threadId=${encodeURIComponent(thread.id)}`,
-    [thread.id],
-  );
+  const threadQuery = useMemo(() => `threadId=${encodeURIComponent(thread.id)}`, [thread.id]);
   const showThreadMenu = threads.length > 0 && (threads.length > 1 || Boolean(onDeleteThread));
+  const onThreadUpdatedRef = useRef(onThreadUpdated);
+  onThreadUpdatedRef.current = onThreadUpdated;
+  const preferencePatchQueueRef = useRef<ReturnType<
+    typeof createSerializedDispatcherPreferencePatchQueue<
+      DispatcherPreferencePatchRequest,
+      DashboardSession | null
+    >
+  > | null>(null);
+  if (!preferencePatchQueueRef.current) {
+    preferencePatchQueueRef.current = createSerializedDispatcherPreferencePatchQueue({
+      getScopeKey: (payload) => dispatcherPreferencePatchScopeKey(payload),
+      send: (body) => sendDispatcherPreferencePatchRequest(body),
+      onSuccess: (updatedThread, payload) => {
+        if (
+          dispatcherPreferencePatchScopeKey(payload)
+          === currentScopeKeyRef.current
+        ) {
+          setPreferenceError(null);
+          if (updatedThread?.id) {
+            lastConfirmedThreadRef.current = updatedThread;
+          }
+        }
+        if (updatedThread?.id) {
+          onThreadUpdatedRef.current?.(updatedThread);
+        }
+      },
+      onError: (error, payload) => {
+        if (
+          dispatcherPreferencePatchScopeKey(payload)
+          !== currentScopeKeyRef.current
+        ) {
+          return;
+        }
+        const confirmedThread = lastConfirmedThreadRef.current;
+        setPreferenceError(
+          error instanceof Error
+            ? error.message
+            : "Failed to update dispatcher preferences",
+        );
+        syncPreferenceControlsFromThread(confirmedThread);
+      },
+      onPendingChange: (scopeKey, pending) => {
+        if (scopeKey === currentScopeKeyRef.current) {
+          setUpdatingPreferences(pending);
+        }
+      },
+    });
+  }
+
+  useEffect(() => () => {
+    preferencePatchQueueRef.current?.dispose();
+  }, []);
 
   const persistPreferences = useCallback(
-    async (
-      nextAgent: string,
-      nextSelection: ModelSelectionState,
+    (
+      nextRuntimeAgent: string,
+      nextRuntimeSelection: ModelSelectionState,
+      nextImplementationAgent: string,
+      nextImplementationSelection: ModelSelectionState,
     ) => {
-      setUpdatingPreferences(true);
-      try {
-        const body: Record<string, string> = {
-          dispatcherAgent: nextAgent,
-          dispatcherModel: resolveModelSelectionValue(nextSelection) ?? "",
-          dispatcherReasoningEffort:
-            resolveReasoningSelectionValue(nextSelection) ?? "",
-          implementationAgent: nextAgent,
-          implementationModel: resolveModelSelectionValue(nextSelection) ?? "",
-          implementationReasoningEffort:
-            resolveReasoningSelectionValue(nextSelection) ?? "",
-        };
-        const response = await fetch(
-          withBridgeQuery(
-            `/api/projects/${projectId}/dispatcher/preferences?${threadQuery}`,
-            bridgeId,
-          ),
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          },
-        );
-        if (!response.ok) {
-          const payload = await response.json().catch(() => null);
-          throw new Error(payload?.error ?? "Failed to update dispatcher preferences");
-        }
-      } finally {
-        setUpdatingPreferences(false);
-      }
+      setPreferenceError(null);
+      preferencePatchQueueRef.current?.schedule({
+        projectId,
+        bridgeId,
+        threadId: thread.id,
+        dispatcherAgent: nextRuntimeAgent,
+        dispatcherModel: resolveModelSelectionValue(nextRuntimeSelection) ?? "",
+        dispatcherReasoningEffort:
+          resolveReasoningSelectionValue(nextRuntimeSelection) ?? "",
+        implementationAgent: nextImplementationAgent,
+        implementationModel: resolveModelSelectionValue(nextImplementationSelection) ?? "",
+        implementationReasoningEffort:
+          resolveReasoningSelectionValue(nextImplementationSelection) ?? "",
+      });
     },
-    [bridgeId, projectId, threadQuery],
+    [bridgeId, projectId, thread.id],
+  );
+
+  const handleRuntimeAgentChange = useCallback(
+    (nextAgent: string) => {
+      const nextSelection = buildModelSelection(
+        nextAgent,
+        modelAccess,
+        runtimeModelCatalogs,
+        null,
+        null,
+      );
+      setRuntimeAgent(nextAgent);
+      setRuntimeModelSelection(nextSelection);
+      void persistPreferences(
+        nextAgent,
+        nextSelection,
+        implementationAgent,
+        implementationModelSelection,
+      );
+    },
+    [
+      implementationAgent,
+      implementationModelSelection,
+      modelAccess,
+      persistPreferences,
+      runtimeModelCatalogs,
+    ],
+  );
+
+  const handleRuntimeModelSelectionChange = useCallback(
+    (nextSelection: ModelSelectionState) => {
+      setRuntimeModelSelection(nextSelection);
+      void persistPreferences(
+        runtimeAgent,
+        nextSelection,
+        implementationAgent,
+        implementationModelSelection,
+      );
+    },
+    [
+      implementationAgent,
+      implementationModelSelection,
+      persistPreferences,
+      runtimeAgent,
+    ],
   );
 
   const handleImplementationAgentChange = useCallback(
@@ -296,18 +473,34 @@ export function DispatcherPane({
         null,
       );
       setImplementationAgent(nextAgent);
-      setModelSelection(nextSelection);
-      void persistPreferences(nextAgent, nextSelection);
+      setImplementationModelSelection(nextSelection);
+      void persistPreferences(
+        runtimeAgent,
+        runtimeModelSelection,
+        nextAgent,
+        nextSelection,
+      );
     },
-    [modelAccess, persistPreferences, runtimeModelCatalogs],
+    [
+      modelAccess,
+      persistPreferences,
+      runtimeAgent,
+      runtimeModelCatalogs,
+      runtimeModelSelection,
+    ],
   );
 
-  const handleModelSelectionChange = useCallback(
+  const handleImplementationModelSelectionChange = useCallback(
     (nextSelection: ModelSelectionState) => {
-      setModelSelection(nextSelection);
-      void persistPreferences(implementationAgent, nextSelection);
+      setImplementationModelSelection(nextSelection);
+      void persistPreferences(
+        runtimeAgent,
+        runtimeModelSelection,
+        implementationAgent,
+        nextSelection,
+      );
     },
-    [implementationAgent, persistPreferences],
+    [implementationAgent, persistPreferences, runtimeAgent, runtimeModelSelection],
   );
 
   const handleConfirmDeleteThread = useCallback(async () => {
@@ -427,15 +620,45 @@ export function DispatcherPane({
   );
 
   const composerToolbar = showPreferenceEditor ? (
-    <DispatcherPreferenceChips
-      implementationAgent={implementationAgent}
-      modelSelection={modelSelection}
-      modelAccess={modelAccess}
-      runtimeModelCatalogs={runtimeModelCatalogs}
-      disabled={updatingPreferences}
-      onImplementationAgentChange={handleImplementationAgentChange}
-      onModelSelectionChange={handleModelSelectionChange}
-    />
+    <div className="space-y-2">
+      <div>
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+          Dispatcher runtime
+        </p>
+        <DispatcherPreferenceChips
+          agent={runtimeAgent}
+          agentOptions={DISPATCHER_RUNTIME_AGENT_OPTIONS}
+          agentLabel="Runtime agent"
+          modelSelection={runtimeModelSelection}
+          modelAccess={modelAccess}
+          runtimeModelCatalogs={runtimeModelCatalogs}
+          disabled={updatingPreferences}
+          onAgentChange={handleRuntimeAgentChange}
+          onModelSelectionChange={handleRuntimeModelSelectionChange}
+        />
+      </div>
+      <div>
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+          Default task handoff
+        </p>
+        <DispatcherPreferenceChips
+          agent={implementationAgent}
+          agentOptions={DISPATCHER_HANDOFF_AGENT_OPTIONS}
+          agentLabel="Handoff agent"
+          modelSelection={implementationModelSelection}
+          modelAccess={modelAccess}
+          runtimeModelCatalogs={runtimeModelCatalogs}
+          disabled={updatingPreferences}
+          onAgentChange={handleImplementationAgentChange}
+          onModelSelectionChange={handleImplementationModelSelectionChange}
+        />
+      </div>
+      {preferenceError ? (
+        <div className="rounded-[10px] border border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[#d25151]">
+          {preferenceError}
+        </div>
+      ) : null}
+    </div>
   ) : null;
 
   return (

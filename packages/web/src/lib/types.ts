@@ -66,6 +66,7 @@ export interface DashboardSession {
   bridgeId?: string | null;
   bridgeConnected?: boolean | null;
   bridgeConnection?: DashboardBridgeConnection | null;
+  agent?: string;
   status: SessionStatus;
   activity: ActivityState | null;
   branch: string | null;
@@ -132,6 +133,7 @@ export interface SSESnapshotSession {
   bridgeId?: string | null;
   bridgeConnected?: boolean | null;
   bridgeConnection?: DashboardBridgeConnection | null;
+  agent?: string;
   status: SessionStatus;
   activity: ActivityState | null;
   attentionLevel: AttentionLevel;

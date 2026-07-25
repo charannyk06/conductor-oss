@@ -40,6 +40,10 @@ import {
   dispatchProjectBoardRefresh,
   findDispatcherBoardRefreshReason,
 } from "@/lib/dispatcherBoardRefresh";
+import {
+  resolveDispatcherActiveAgentName,
+  resolveDispatcherSessionAgentName,
+} from "@/lib/dispatcherPreferences";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
 import { useAgents, type Agent } from "@/hooks/useAgents";
 import { iterateSseFrames } from "@/lib/sseFetch";
@@ -645,13 +649,15 @@ function dispatcherLifecycleHeadline(operation: DispatcherLifecycleEvent["operat
 function SessionFeedMessage({
   entry,
   session,
+  assistantAgentLabel,
 }: {
   entry: SessionFeedEntry;
   session: DashboardSession;
+  assistantAgentLabel: string;
 }) {
   const timestamp = formatEntryTime(entry.createdAt);
   const label = entry.kind === "assistant"
-    ? (entry.source === "runtime" ? "Thinking" : formatAgentName(session.metadata.agent?.trim() || "assistant"))
+    ? (entry.source === "runtime" ? "Thinking" : assistantAgentLabel)
     : entry.label || "Session";
   const attachments = entry.attachments
     .map((attachment) => {
@@ -1027,9 +1033,26 @@ export function DispatcherSessionPane({
   const { agents: fetchedAgents = [] } = useAgents(bridgeId);
   const [commandCopied, setCommandCopied] = useState(false);
 
+  const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
+  const dispatcherSessionAgent = useMemo(
+    () => resolveDispatcherSessionAgentName({
+      sessionAgent: session.agent ?? null,
+      legacyMetadataAgent: session.metadata.agent ?? null,
+    }),
+    [session.agent, session.metadata.agent],
+  );
+  const dispatcherAssistantLabel = useMemo(
+    () => formatAgentName(dispatcherSessionAgent ?? "assistant"),
+    [dispatcherSessionAgent],
+  );
   const activeAgentName = useMemo(
-    () => repository?.agent?.trim() || session.metadata.agent?.trim() || "codex",
-    [repository?.agent, session.metadata.agent],
+    () => resolveDispatcherActiveAgentName({
+      isDispatcher,
+      sessionAgent: session.agent ?? null,
+      legacyMetadataAgent: session.metadata.agent ?? null,
+      repositoryAgent: repository?.agent ?? null,
+    }),
+    [isDispatcher, repository?.agent, session.agent, session.metadata.agent],
   );
 
   const activeAgentInfo = useMemo(() => {
@@ -1118,8 +1141,12 @@ export function DispatcherSessionPane({
     return `${primary} / ${secondary}`;
   }, [session.branch, session.id, session.issueId, session.metadata.sessionKind, session.projectId]);
   const agentLabel = useMemo(
-    () => formatAgentName(repository?.agent?.trim() || session.metadata.agent?.trim() || "agent"),
-    [repository?.agent, session.metadata.agent],
+    () => formatAgentName(
+      isDispatcher
+        ? (dispatcherSessionAgent ?? "agent")
+        : (repository?.agent?.trim() || dispatcherSessionAgent || "agent"),
+    ),
+    [dispatcherSessionAgent, isDispatcher, repository?.agent],
   );
   const statusLabel = useMemo(
     () => payload.sessionStatus?.trim() || session.status,
@@ -1129,7 +1156,6 @@ export function DispatcherSessionPane({
     () => statusLabel.trim().toLowerCase(),
     [statusLabel],
   );
-  const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
   const awaitingApproval = useMemo(
     () => isDispatcher && shouldShowDispatcherApprovalBanner(
@@ -1146,6 +1172,13 @@ export function DispatcherSessionPane({
   const showRowStopAction = showInterruptAction && !showComposerStopAction;
   const showMetaRow = !hideRepositoryControls || !hideSessionStatusBadge || showRowStopAction;
   const canContinue = session.status !== "archived" && !(isDispatcher && showInterruptAction);
+  const dispatcherRuntimeError = useMemo(() => {
+    if (!isDispatcher || normalizedStatusLabel !== "errored") {
+      return null;
+    }
+    const message = payload.error?.trim();
+    return message ? message : null;
+  }, [isDispatcher, normalizedStatusLabel, payload.error]);
   const loadRepository = useCallback(async () => {
     if (hideRepositoryControls) {
       setRepository(null);
@@ -1844,7 +1877,12 @@ rel="noopener noreferrer"
               )
             ) : (
               payload.entries.map((entry) => (
-                <SessionFeedMessage key={entry.id} entry={entry} session={session} />
+                <SessionFeedMessage
+                  key={entry.id}
+                  entry={entry}
+                  session={session}
+                  assistantAgentLabel={dispatcherAssistantLabel}
+                />
               ))
             )}
           </div>
@@ -1962,6 +2000,21 @@ rel="noopener noreferrer"
                 <span>Request changes</span>
               </Button>
             </div>
+          </div>
+        ) : null}
+
+        {dispatcherRuntimeError ? (
+          <div className="mb-3 rounded-[12px] border border-[rgba(210,81,81,0.35)] bg-[rgba(82,27,27,0.5)] px-3 py-3 text-[12px] text-[#f3c5c5]">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-[#ffd7d7]">
+              <AlertCircle className="h-4 w-4" />
+              <span>Dispatcher runtime exited</span>
+            </div>
+            <p className="mt-2 leading-5 text-[#f0bcbc]">
+              Change the runtime agent or model in the toolbar below, then retry your message.
+            </p>
+            <p className="mt-2 rounded-[8px] bg-[rgba(0,0,0,0.18)] px-2.5 py-2 font-mono text-[11px] text-[#ffe4e4]">
+              {dispatcherRuntimeError}
+            </p>
           </div>
         ) : null}
 
