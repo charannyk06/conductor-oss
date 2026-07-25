@@ -229,7 +229,7 @@ function ensureWebBundle(rootDir) {
   return { standaloneDir, staticDir, publicDir };
 }
 
-function collectStandalonePlatformDependencies(standaloneRoot) {
+export function collectStandalonePlatformDependencies(standaloneRoot) {
   const sharpManifestPath = join(standaloneRoot, "node_modules", "sharp", "package.json");
   if (!existsSync(sharpManifestPath)) {
     throw new Error("The standalone dashboard is missing its traced sharp runtime.");
@@ -238,6 +238,18 @@ function collectStandalonePlatformDependencies(standaloneRoot) {
   const sharpManifest = readJson(sharpManifestPath);
   if (typeof sharpManifest.version !== "string" || sharpManifest.version.length === 0) {
     throw new Error("The standalone dashboard has an invalid sharp package identity.");
+  }
+
+  const tracedLibvipsPackages = Object.keys(sharpManifest.optionalDependencies ?? {})
+    .filter((packageName) => packageName.startsWith("@img/sharp-libvips-"))
+    .filter((packageName) => existsSync(join(
+      standaloneRoot,
+      "node_modules",
+      ...packageName.split("/"),
+      "package.json",
+    )));
+  if (tracedLibvipsPackages.length === 0) {
+    throw new Error("The standalone dashboard is missing sharp's traced libvips runtime.");
   }
 
   // The Linux-built standalone already carries all traced JavaScript. Publishing

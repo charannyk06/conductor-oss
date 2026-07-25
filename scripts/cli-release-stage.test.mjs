@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { packCliReleasePackage } from "./cli-release-stage.mjs";
+import {
+  collectStandalonePlatformDependencies,
+  packCliReleasePackage,
+} from "./cli-release-stage.mjs";
 import {
   assertBundledDependencyVersionsInTarball,
   assertCliReleaseTarballEquivalence,
@@ -14,6 +17,27 @@ import {
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
+
+test("release staging rejects sharp without its traced libvips runtime", () => {
+  const standaloneDir = mkdtempSync(join(tmpdir(), "conductor-standalone-sharp-fixture-"));
+
+  try {
+    const sharpDir = join(standaloneDir, "node_modules", "sharp");
+    mkdirSync(sharpDir, { recursive: true });
+    writeJson(join(sharpDir, "package.json"), {
+      name: "sharp",
+      version: "0.35.0",
+      optionalDependencies: { "@img/sharp-libvips-linux-x64": "1.3.0" },
+    });
+
+    assert.throws(
+      () => collectStandalonePlatformDependencies(standaloneDir),
+      /missing sharp's traced libvips runtime/,
+    );
+  } finally {
+    rmSync(standaloneDir, { recursive: true, force: true });
+  }
+});
 
 test("release staging gives bundled private packages the parent release identity", () => {
   const rootDir = mkdtempSync(join(tmpdir(), "conductor-cli-stage-fixture-"));
@@ -29,6 +53,10 @@ test("release staging gives bundled private packages the parent release identity
     mkdirSync(join(webDir, ".next", "standalone"), { recursive: true });
     mkdirSync(join(webDir, ".next", "standalone", "node_modules", "next"), { recursive: true });
     mkdirSync(join(webDir, ".next", "standalone", "node_modules", "sharp"), { recursive: true });
+    mkdirSync(
+      join(webDir, ".next", "standalone", "node_modules", "@img", "sharp-libvips-linux-x64"),
+      { recursive: true },
+    );
     mkdirSync(join(webDir, ".next", "static"), { recursive: true });
 
     writeJson(join(cliDir, "package.json"), {
@@ -62,6 +90,19 @@ test("release staging gives bundled private packages the parent release identity
     writeJson(join(webDir, ".next", "standalone", "node_modules", "sharp", "package.json"), {
       name: "sharp",
       version: "0.34.5",
+      optionalDependencies: { "@img/sharp-libvips-linux-x64": "1.2.4" },
+    });
+    writeJson(join(
+      webDir,
+      ".next",
+      "standalone",
+      "node_modules",
+      "@img",
+      "sharp-libvips-linux-x64",
+      "package.json",
+    ), {
+      name: "@img/sharp-libvips-linux-x64",
+      version: "1.2.4",
     });
 
     const { tarballPath } = packCliReleasePackage({
