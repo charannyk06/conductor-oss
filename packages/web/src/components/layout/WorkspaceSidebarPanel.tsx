@@ -18,6 +18,8 @@ interface ProjectItem {
 
 interface WorkspaceSidebarPanelProps {
   projects: ProjectItem[];
+  projectsLoading?: boolean;
+  projectsError?: string | null;
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
   onUnlinkProject?: (projectId: string) => Promise<void>;
@@ -32,6 +34,8 @@ interface WorkspaceSidebarPanelProps {
 
 export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   projects,
+  projectsLoading = false,
+  projectsError = null,
   selectedProjectId,
   onSelectProject,
   onUnlinkProject,
@@ -64,6 +68,13 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
     () => projects.find((project) => project.id === confirmUnlinkProjectId) ?? null,
     [confirmUnlinkProjectId, projects],
   );
+  const projectCountLabel = projects.length > 0
+    ? String(projects.length)
+    : projectsError
+      ? "!"
+      : projectsLoading
+        ? "…"
+        : "0";
 
   const getProjectDefaultsLabel = (project: ProjectItem): string | null => {
     const parts: string[] = [];
@@ -131,8 +142,30 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
             >
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--vk-text-muted)]" />
               <span className="truncate">All projects</span>
-              <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{projects.length}</span>
+              <span
+                className={cn(
+                  "ml-auto text-[11px]",
+                  projectsError && projects.length === 0
+                    ? "text-[var(--vk-red)]"
+                    : "text-[var(--vk-text-muted)]",
+                )}
+                aria-label={projectsError && projects.length === 0
+                  ? "Projects temporarily unavailable"
+                  : `${projects.length} projects`}
+              >
+                {projectCountLabel}
+              </span>
             </button>
+
+            {projectsError && projects.length === 0 ? (
+              <p
+                className="mb-2 px-3 text-[11px] leading-4 text-[var(--vk-text-muted)]"
+                role="status"
+                aria-live="polite"
+              >
+                Projects unavailable. Retrying bridge connection…
+              </p>
+            ) : null}
 
             {projects.map((project) => {
               const selected = selectedProjectId === project.id;

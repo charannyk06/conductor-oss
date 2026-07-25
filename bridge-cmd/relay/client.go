@@ -710,7 +710,10 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 			return true, nil
 		case err := <-errCh:
 			stopTtyd()
-			return false, err
+			// The relay handshake and initial status message already succeeded.
+			// Report that this attempt connected so Run resets exponential
+			// backoff before retrying a dropped long-lived session.
+			return true, err
 		case <-heartbeat.C:
 			if err := send(bridgeEnvelope{
 				Type:      "bridge_status",
@@ -720,14 +723,14 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				Version:   opts.version,
 			}); err != nil {
 				stopTtyd()
-				return false, fmt.Errorf("send bridge_status: %w", err)
+				return true, fmt.Errorf("send bridge_status: %w", err)
 			}
 			relayMu.Lock()
 			err := relayConn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
 			relayMu.Unlock()
 			if err != nil {
 				stopTtyd()
-				return false, fmt.Errorf("relay ping: %w", err)
+				return true, fmt.Errorf("relay ping: %w", err)
 			}
 		}
 	}

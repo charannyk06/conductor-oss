@@ -1,14 +1,17 @@
 package relay
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -43,6 +46,48 @@ func TestTerminalBridgeEndpointOmitsTokenQuery(t *testing.T) {
 	}
 	if endpoint != "wss://relay.example.com/terminal/terminal-123/bridge" {
 		t.Fatalf("endpoint = %q", endpoint)
+	}
+}
+
+func TestRunSessionReportsEstablishedConnectionAfterRelayDrops(t *testing.T) {
+	t.Setenv(legacyTTYDMirrorEnv, "")
+
+	serverErr := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+
+		if _, _, err := conn.ReadMessage(); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}))
+	defer server.Close()
+
+	connected, err := runSession(context.Background(), sessionOptions{
+		relayURL:          server.URL,
+		refreshToken:      "refresh-token",
+		scope:             "device-123",
+		hostname:          "test-host",
+		osName:            "test-os",
+		version:           "test-version",
+		stderr:            io.Discard,
+		heartbeatInterval: time.Hour,
+	})
+	if serverErr := <-serverErr; serverErr != nil {
+		t.Fatalf("relay test server failed: %v", serverErr)
+	}
+	if !connected {
+		t.Fatal("runSession reported an unestablished attempt after completing the relay handshake")
+	}
+	if err == nil {
+		t.Fatal("runSession returned nil error after the relay dropped the connection")
 	}
 }
 

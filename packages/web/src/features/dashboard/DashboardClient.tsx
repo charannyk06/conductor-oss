@@ -2038,6 +2038,8 @@ export default function DashboardClient({
     return (
       <WorkspaceSidebarPanel
         projects={projects}
+        projectsLoading={configLoading}
+        projectsError={configError}
         selectedProjectId={selectedProjectId}
         onSelectProject={handleSelectProject}
         onUnlinkProject={handleUnlinkProject}
@@ -2050,6 +2052,8 @@ export default function DashboardClient({
     );
   }, [
     dashboardSessions,
+    configError,
+    configLoading,
     handleArchiveSession,
     handleSelectProject,
     handleSelectSession,
@@ -2498,6 +2502,8 @@ export default function DashboardClient({
       <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
         <WorkspaceOverview
           projects={projects}
+          projectsLoading={configLoading}
+          projectsError={configError}
           sessions={dashboardSessions}
           onCreateWorkspace={openWorkspaceDialog}
           onSelectSession={handleSelectSession}
@@ -2506,6 +2512,8 @@ export default function DashboardClient({
     );
   }, [
     dashboardSessions,
+    configError,
+    configLoading,
     mountedSessionIds,
     projectWorkspaceContent,
     selectedSession,

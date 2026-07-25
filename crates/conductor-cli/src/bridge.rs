@@ -56,9 +56,9 @@ struct PreviewProxyResponse {
     body_base64: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConnectionOutcome {
-    Reconnect,
+    Reconnect { error: Option<String> },
     Exit,
 }
 
@@ -779,7 +779,7 @@ async fn run_bridge_connection_once(
             }
             message = inbound.next() => {
                 let Some(message) = message else {
-                    break ConnectionOutcome::Reconnect;
+                    break ConnectionOutcome::Reconnect { error: None };
                 };
                 match message {
                     Ok(Message::Text(text)) => {
@@ -915,9 +915,14 @@ async fn run_bridge_connection_once(
                     Ok(Message::Binary(_)) => {}
                     Ok(Message::Frame(_)) => {}
                     Ok(Message::Close(_)) => {
-                        break ConnectionOutcome::Reconnect;
+                        break ConnectionOutcome::Reconnect { error: None };
                     }
-                    Err(err) => return Err(err.into()),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "bridge relay connection dropped");
+                        break ConnectionOutcome::Reconnect {
+                            error: Some(err.to_string()),
+                        };
+                    }
                 }
             }
         }
@@ -980,11 +985,14 @@ pub async fn connect(relay: String, token: Option<String>) -> Result<()> {
                 clear_state()?;
                 return Ok(());
             }
-            Ok(ConnectionOutcome::Reconnect) => {
+            Ok(ConnectionOutcome::Reconnect { error }) => {
+                // A reconnect outcome means the websocket handshake completed.
+                // Do not carry dial-failure backoff across a healthy session.
+                backoff = Duration::from_secs(1);
                 save_state(&BridgeRuntimeState {
                     relay_url: relay_url.to_string(),
                     connected: false,
-                    last_error: None,
+                    last_error: error,
                     active_session_id: load_state()?.and_then(|state| state.active_session_id),
                     updated_at_unix: unix_timestamp(),
                 })?;
