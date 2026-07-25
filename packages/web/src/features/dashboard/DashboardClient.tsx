@@ -992,7 +992,13 @@ export default function DashboardClient({
     () => !requiresPairedDeviceScope || Boolean(effectiveBridgeId),
     [effectiveBridgeId, requiresPairedDeviceScope],
   );
-  const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig(effectiveBridgeId, {
+  const {
+    projects,
+    loading: configLoading,
+    error: configError,
+    recovering: configRecovering,
+    refresh: refreshConfig,
+  } = useConfig(effectiveBridgeId, {
     enabled: scopeRequestsEnabled,
   });
   const { agents, loading: agentsLoading } = useAgents(effectiveBridgeId, { enabled: scopeRequestsEnabled });
@@ -2040,6 +2046,7 @@ export default function DashboardClient({
         projects={projects}
         projectsLoading={configLoading}
         projectsError={configError}
+        projectsRecovering={configRecovering}
         selectedProjectId={selectedProjectId}
         onSelectProject={handleSelectProject}
         onUnlinkProject={handleUnlinkProject}
@@ -2054,6 +2061,7 @@ export default function DashboardClient({
     dashboardSessions,
     configError,
     configLoading,
+    configRecovering,
     handleArchiveSession,
     handleSelectProject,
     handleSelectSession,
@@ -2504,6 +2512,7 @@ export default function DashboardClient({
           projects={projects}
           projectsLoading={configLoading}
           projectsError={configError}
+          projectsRecovering={configRecovering}
           sessions={dashboardSessions}
           onCreateWorkspace={openWorkspaceDialog}
           onSelectSession={handleSelectSession}
@@ -2514,6 +2523,7 @@ export default function DashboardClient({
     dashboardSessions,
     configError,
     configLoading,
+    configRecovering,
     mountedSessionIds,
     projectWorkspaceContent,
     selectedSession,

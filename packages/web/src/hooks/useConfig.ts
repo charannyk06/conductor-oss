@@ -24,6 +24,7 @@ interface UseConfigReturn {
   projects: ConfigProject[];
   loading: boolean;
   error: string | null;
+  recovering: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -108,6 +109,7 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
   const [projects, setProjects] = useState<ConfigProject[]>([]);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
   const activeScopeRef = useRef<string | null>(null);
   const requestEpochRef = useRef(0);
   const retryAttemptRef = useRef(0);
@@ -123,6 +125,7 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
 
   const scheduleRetry = useCallback(() => {
     if (!enabled || retryTimerRef.current !== null) return;
+    setRecovering(true);
     const failedAttempt = retryAttemptRef.current;
     retryAttemptRef.current += 1;
     retryTimerRef.current = window.setTimeout(() => {
@@ -135,6 +138,7 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
     if (!enabled) {
       setProjects([]);
       setError(null);
+      setRecovering(false);
       setLoading(false);
       return;
     }
@@ -160,12 +164,15 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
       if (requestEpoch !== requestEpochRef.current) return;
       setProjects(normalizeProjects(payload));
       setError(null);
+      setRecovering(false);
       retryAttemptRef.current = 0;
     } catch (err) {
       if (requestEpoch !== requestEpochRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to fetch config");
       if (!(err instanceof ConfigRequestError) || err.retryable) {
         scheduleRetry();
+      } else {
+        setRecovering(false);
       }
     } finally {
       if (requestEpoch === requestEpochRef.current) {
@@ -185,6 +192,7 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
     if (scopeChanged || !enabled) {
       setProjects([]);
       setError(null);
+      setRecovering(false);
     }
 
     if (!enabled) {
@@ -210,5 +218,11 @@ export function useConfig(bridgeId?: string | null, options?: UseConfigOptions):
     };
   }, [clearRetryTimer, enabled, fetchConfig, scopeKey]);
 
-  return { projects, loading: enabled ? loading : false, error: enabled ? error : null, refresh: fetchConfig };
+  return {
+    projects,
+    loading: enabled ? loading : false,
+    error: enabled ? error : null,
+    recovering: enabled ? recovering : false,
+    refresh: fetchConfig,
+  };
 }

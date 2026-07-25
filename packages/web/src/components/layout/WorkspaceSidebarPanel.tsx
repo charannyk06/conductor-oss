@@ -20,6 +20,7 @@ interface WorkspaceSidebarPanelProps {
   projects: ProjectItem[];
   projectsLoading?: boolean;
   projectsError?: string | null;
+  projectsRecovering?: boolean;
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
   onUnlinkProject?: (projectId: string) => Promise<void>;
@@ -36,6 +37,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   projects,
   projectsLoading = false,
   projectsError = null,
+  projectsRecovering = false,
   selectedProjectId,
   onSelectProject,
   onUnlinkProject,
@@ -151,6 +153,8 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                 )}
                 aria-label={projectsError && projects.length === 0
                   ? "Projects temporarily unavailable"
+                  : projectsLoading && projects.length === 0
+                    ? "Loading projects"
                   : `${projects.length} projects`}
               >
                 {projectCountLabel}
@@ -163,7 +167,9 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                 role="status"
                 aria-live="polite"
               >
-                Projects unavailable. Retrying bridge connection…
+                {projectsRecovering
+                  ? "Projects unavailable. Retrying connection…"
+                  : "Projects unavailable. Check the connection and refresh."}
               </p>
             ) : null}
 
