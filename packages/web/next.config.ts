@@ -61,6 +61,12 @@ const nextConfig: NextConfig = {
   ],
   // Silence "multiple lockfiles" warning — pin workspace root to the monorepo
   outputFileTracingRoot: workspaceRoot,
+  // sharp 0.35 loads libvips through the native addon at runtime, so Next's
+  // static tracer cannot discover the platform package on its own. Keep the
+  // matching native runtime in self-hosted standalone builds.
+  outputFileTracingIncludes: {
+    "/*": ["../../node_modules/@img/sharp-libvips-*/**/*"],
+  },
   async headers() {
     return [
       {
