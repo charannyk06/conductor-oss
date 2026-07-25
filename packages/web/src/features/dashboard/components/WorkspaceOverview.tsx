@@ -2,10 +2,12 @@
 
 import { useMemo } from "react";
 import {
+  AlertTriangle,
   FolderGit2,
   FolderKanban,
   GitBranch,
   Layers3,
+  RefreshCw,
   Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -21,6 +23,9 @@ import { SessionCard } from "@/components/SessionCard";
 
 interface WorkspaceOverviewProps {
   projects: ConfigProject[];
+  projectsLoading?: boolean;
+  projectsError?: string | null;
+  projectsRecovering?: boolean;
   sessions: DashboardSession[];
   onCreateWorkspace: () => void;
   onSelectSession: (sessionId: string) => void;
@@ -50,6 +55,9 @@ function selectRecentSessions(sessions: DashboardSession[], limit: number): Dash
 
 export function WorkspaceOverview({
   projects,
+  projectsLoading = false,
+  projectsError = null,
+  projectsRecovering = false,
   sessions,
   onCreateWorkspace,
   onSelectSession,
@@ -83,7 +91,14 @@ export function WorkspaceOverview({
 
     return { active, attention, merge };
   }, [visibleSessions]);
-  const showWelcomeState = projects.length === 0 && visibleSessions.length === 0;
+  const showProjectRecovery = projects.length === 0 && Boolean(projectsError) && projectsRecovering;
+  const showProjectError = projects.length === 0 && Boolean(projectsError) && !projectsRecovering;
+  const showProjectLoading = projects.length === 0 && projectsLoading && !projectsError;
+  const showWelcomeState = projects.length === 0
+    && visibleSessions.length === 0
+    && !showProjectRecovery
+    && !showProjectError
+    && !showProjectLoading;
 
   const statCards = [
     { label: "Projects", value: String(projects.length), icon: FolderGit2, caption: "Linked workspaces" },
@@ -91,6 +106,38 @@ export function WorkspaceOverview({
     { label: "Need attention", value: String(sessionStats.attention), icon: Sparkles, caption: "Awaiting review or input" },
     { label: "Merge ready", value: String(sessionStats.merge), icon: GitBranch, caption: "Cleared to land" },
   ];
+
+  if (showProjectRecovery || showProjectError || showProjectLoading) {
+    return (
+      <div className={`flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
+        <div className="flex h-full min-h-0 w-full flex-1 items-center justify-center px-3 py-3 sm:px-4 sm:py-4">
+          <Card className="w-full max-w-[680px] border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_88%,transparent)]">
+            <CardContent className="flex flex-col items-center px-6 py-10 text-center sm:px-10 sm:py-12">
+              <span className="inline-flex h-12 w-12 items-center justify-center rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
+                {showProjectError
+                  ? <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+                  : <RefreshCw className="h-5 w-5 animate-spin" aria-hidden="true" />}
+              </span>
+              <h1 className="mt-5 text-[24px] font-semibold tracking-[-0.035em] text-[var(--vk-text-strong)] sm:text-[30px]">
+                {showProjectRecovery
+                  ? "Reconnecting to Conductor"
+                  : showProjectError
+                    ? "Projects are unavailable"
+                    : "Loading your projects"}
+              </h1>
+              <p className="mt-3 max-w-[520px] text-[14px] leading-6 text-[var(--vk-text-muted)]">
+                {showProjectRecovery
+                  ? "Your projects have not been removed. Conductor is retrying the project connection automatically."
+                  : showProjectError
+                    ? "Conductor could not load projects from this connection. Check the bridge or local backend, then refresh the page."
+                    : "Conductor is retrieving your linked projects."}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   if (showWelcomeState) {
     return (

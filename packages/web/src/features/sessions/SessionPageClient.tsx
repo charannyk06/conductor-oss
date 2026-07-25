@@ -53,7 +53,12 @@ export default function SessionPageClient({
     enabled: scopeReady,
   });
   const effectiveBridgeId = currentSession?.bridgeId ?? requestedBridgeId;
-  const { projects } = useConfig(effectiveBridgeId, { enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId) });
+  const {
+    projects,
+    loading: projectsLoading,
+    error: projectsError,
+    recovering: projectsRecovering,
+  } = useConfig(effectiveBridgeId, { enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId) });
   const { preferences, loading: preferencesLoading } = usePreferences(effectiveBridgeId, {
     enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId),
   });
@@ -182,6 +187,9 @@ export default function SessionPageClient({
       sidebar={sidebarVisible ? (
         <WorkspaceSidebarPanel
           projects={projects}
+          projectsLoading={projectsLoading}
+          projectsError={projectsError}
+          projectsRecovering={projectsRecovering}
           selectedProjectId={selectedProjectId}
           onSelectProject={(projectId) => {
             if (projectId === null) {
