@@ -1,8 +1,9 @@
 "use client";
 
+import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type UIEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -11,6 +12,7 @@ import {
   Braces,
   Check,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   Copy,
   ExternalLink,
@@ -22,6 +24,7 @@ import {
   Loader2,
   LoaderCircle,
   PencilLine,
+  Plus,
   Search,
   Send,
   Sparkles,
@@ -31,7 +34,37 @@ import {
   X,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import {
+  DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME,
+  DISPATCHER_CHAT_FRAME_CLASS_NAME,
+  DISPATCHER_DESKTOP_XL_MEDIA_QUERY,
+  DISPATCHER_SURFACE_CONTENT_CLASS_NAME,
+  DISPATCHER_SURFACE_OVERLAY_CLASS_NAME,
+  watchDispatcherDesktopXl,
+} from "@/components/dispatcher/dispatcherMobileLayout";
+import {
+  buildDispatcherSendBody,
+  canSendDispatcherDraft,
+  filterDispatcherContextFiles,
+  normalizeDispatcherAttachmentPaths,
+  resolveDispatcherAttachmentLabel,
+  shouldSendDispatcherComposerOnEnter,
+  type DispatcherContextFile,
+} from "@/components/dispatcher/dispatcherComposerState";
+import {
+  applyOptimisticInterruptRecovery,
+  getDispatcherToolPresentation,
+  isExplicitThinkingEntry,
+  isDispatcherActiveStatus,
+  isPendingDispatcherEntryConfirmed,
+  mergePendingDispatcherEntry,
+  shouldClearLocalSessionStatus,
+  shouldReplaceFeedPayloadOnLoadError,
+  shouldShowDispatcherWorkingEntry,
+  type PendingDispatcherUserEntry,
+} from "@/components/dispatcher/dispatcherPresentation";
 import { Button } from "@/components/ui/Button";
+import { RunningDots } from "@/components/ui/RunningDots";
 import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -75,6 +108,12 @@ type DispatcherSessionPaneProps = {
   headerActions?: ReactNode;
   composerInsert?: TerminalInsertRequest | null;
   composerToolbar?: ReactNode;
+  composerSettings?: {
+    summary: string;
+    pending: boolean;
+    error: string | null;
+    content: ReactNode;
+  } | null;
   apiPaths: DispatcherSessionPaneApiPaths;
 };
 
@@ -88,6 +127,12 @@ type DispatcherSessionPaneApiPaths = {
   repositories?: string;
   /** PATCH OpenClaw (or other orchestrator) thread/session binding */
   integration?: string;
+};
+
+type LoadFeedOptions = {
+  showLoading?: boolean;
+  preserveExistingOnError?: boolean;
+  pendingEntry?: PendingDispatcherUserEntry | null;
 };
 
 type RepositoryPathHealth = {
@@ -648,59 +693,100 @@ function dispatcherLifecycleHeadline(operation: DispatcherLifecycleEvent["operat
 
 function SessionFeedMessage({
   entry,
-  session,
   assistantAgentLabel,
 }: {
   entry: SessionFeedEntry;
-  session: DashboardSession;
   assistantAgentLabel: string;
 }) {
   const timestamp = formatEntryTime(entry.createdAt);
-  const label = entry.kind === "assistant"
-    ? (entry.source === "runtime" ? "Thinking" : assistantAgentLabel)
-    : entry.label || "Session";
+  const label = entry.kind === "assistant" ? assistantAgentLabel : entry.label || "Session";
   const attachments = entry.attachments
     .map((attachment) => {
       const record = asRecord(attachment);
       return readString(record.name) ?? readString(record.path) ?? (typeof attachment === "string" ? attachment : null);
     })
     .filter((value): value is string => Boolean(value));
-  const toolTitle = readString(entry.metadata.toolTitle) ?? entry.text;
-  const toolKind = readString(entry.metadata.toolKind)?.toLowerCase() ?? null;
-  const toolContent = readStringArray(entry.metadata.toolContent);
-  const toolPrimary = toolContent[0] ?? null;
-  const toolSecondary = toolContent[1] ?? null;
-  const isRuntimeThinking = entry.kind === "assistant" && entry.source === "runtime";
+  const toolPresentation = getDispatcherToolPresentation(entry);
+  const isThinkingEntry = isExplicitThinkingEntry(entry);
   const isSessionStatus = entry.kind === "status" && entry.source === "session-status";
   const lifecycleEvent = readDispatcherLifecycleEvent(entry);
+  const [toolExpanded, setToolExpanded] = useState(false);
 
-  if (entry.kind === "tool") {
+  const streamingIndicator = entry.streaming ? (
+    <span
+      aria-hidden="true"
+      className="ml-1 inline-block h-4 w-[2px] rounded-full bg-[rgba(240,233,223,0.8)] align-middle animate-pulse"
+    />
+  ) : null;
+
+  if (toolPresentation) {
+    const toneClassName = toolPresentation.status === "error"
+      ? "border-[rgba(210,81,81,0.22)] bg-[rgba(70,24,24,0.42)]"
+      : toolPresentation.status === "success"
+        ? "border-[rgba(98,183,132,0.2)] bg-[rgba(17,40,28,0.36)]"
+        : isThinkingEntry
+          ? "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.035)]"
+          : "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)]";
+    const statusLabel = toolPresentation.status === "error"
+      ? "Error"
+      : toolPresentation.status === "success"
+        ? "Done"
+        : toolPresentation.status === "running"
+          ? "Running"
+          : "Pending";
+    const canExpandTool = toolPresentation.lines.length > 1;
+
     return (
-      <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
-        <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
-          <ToolGlyph toolKind={toolKind} toolTitle={toolTitle} className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-[var(--vk-text-normal)]">{toolTitle || "Tool call"}</span>
-            {toolPrimary ? (
-              <ExpandableInlineText
-                value={toolPrimary}
-                maxLength={72}
-                className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
-              />
+      <div className={cn("rounded-[16px] border px-3 py-2.5 text-[13px] text-[var(--vk-text-muted)]", toneClassName)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[rgba(0,0,0,0.18)] text-[var(--vk-text-muted)]">
+            <ToolGlyph
+              toolKind={toolPresentation.kind}
+              toolTitle={toolPresentation.title}
+              className="h-3.5 w-3.5"
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-[var(--vk-text-normal)]">
+                {toolPresentation.title || "Tool call"}
+              </span>
+              <span className="inline-flex items-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                {statusLabel}
+              </span>
+              {timestamp ? (
+                <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
+              ) : null}
+            </div>
+            {toolPresentation.preview ? (
+              <p className="mt-1 break-words font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]">
+                {toolPresentation.preview}
+              </p>
             ) : null}
-            {timestamp ? (
-              <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
+            {canExpandTool ? (
+              <button
+                type="button"
+                onClick={() => setToolExpanded((current) => !current)}
+                className="mt-2 inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] px-2 py-1 text-[11px] text-[var(--vk-text-muted)] transition hover:bg-[rgba(255,255,255,0.06)] hover:text-[var(--vk-text-normal)]"
+                aria-expanded={toolExpanded}
+              >
+                <span>{toolExpanded ? "Hide details" : `Show details (${toolPresentation.lines.length})`}</span>
+                {toolExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              </button>
+            ) : null}
+            {toolExpanded ? (
+              <div className="mt-2 space-y-1.5 rounded-[12px] border border-[rgba(255,255,255,0.06)] bg-[rgba(0,0,0,0.16)] px-3 py-2">
+                {toolPresentation.lines.map((line, index) => (
+                  <ExpandableInlineText
+                    key={`${entry.id}-${index}`}
+                    value={line}
+                    maxLength={160}
+                    className="block font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]"
+                  />
+                ))}
+              </div>
             ) : null}
           </div>
-          {toolSecondary ? (
-            <ExpandableInlineText
-              value={toolSecondary}
-              maxLength={140}
-              className="block rounded-[6px] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[12px] leading-5 text-[var(--vk-text-muted)]"
-            />
-          ) : null}
         </div>
       </div>
     );
@@ -750,7 +836,7 @@ function SessionFeedMessage({
     );
   }
 
-  if (isRuntimeThinking) {
+  if (isThinkingEntry) {
     return (
       <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
         <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
@@ -810,6 +896,7 @@ function SessionFeedMessage({
             <AttachmentCard key={`${entry.id}-${attachment}`} label={attachment} />
           ))}
           <MarkdownMessage text={entry.text} />
+          {streamingIndicator}
         </div>
         {timestamp ? <div className="text-[11px] text-[var(--vk-text-muted)]">{timestamp}</div> : null}
       </div>
@@ -1017,13 +1104,16 @@ export function DispatcherSessionPane({
   headerActions = null,
   composerInsert = null,
   composerToolbar = null,
+  composerSettings = null,
   apiPaths,
 }: DispatcherSessionPaneProps) {
   const router = useRouter();
   const [payload, setPayload] = useState<SessionFeedPayload>(EMPTY_FEED_PAYLOAD);
   const [loading, setLoading] = useState(true);
   const [loadingError, setLoadingError] = useState<string | null>(null);
+  const [loadingErrorBlocksFeed, setLoadingErrorBlocksFeed] = useState(false);
   const [composerValue, setComposerValue] = useState("");
+  const [draftAttachmentPaths, setDraftAttachmentPaths] = useState<string[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [repository, setRepository] = useState<RepositorySettingsPayload | null>(null);
@@ -1032,6 +1122,14 @@ export function DispatcherSessionPane({
   const [savingAgent, setSavingAgent] = useState(false);
   const { agents: fetchedAgents = [] } = useAgents(bridgeId);
   const [commandCopied, setCommandCopied] = useState(false);
+  const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const [contextSearch, setContextSearch] = useState("");
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [contextFiles, setContextFiles] = useState<DispatcherContextFile[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingUserEntry, setPendingUserEntry] = useState<PendingDispatcherUserEntry | null>(null);
+  const [localSessionStatus, setLocalSessionStatus] = useState<string | null>(null);
 
   const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const dispatcherSessionAgent = useMemo(
@@ -1069,6 +1167,17 @@ export function DispatcherSessionPane({
     setCommandCopied(false);
   }, [activeAgentName]);
 
+  useEffect(() => {
+    if (!settingsOpen) {
+      return undefined;
+    }
+
+    return watchDispatcherDesktopXl(() => {
+      setSettingsOpen(false);
+    });
+  }, [settingsOpen]);
+
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
@@ -1076,6 +1185,8 @@ export function DispatcherSessionPane({
   const [pageVisible, setPageVisible] = useState(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [newEntryCount, setNewEntryCount] = useState(0);
+  const payloadRef = useRef(payload);
+  const pendingUserEntryRef = useRef<PendingDispatcherUserEntry | null>(pendingUserEntry);
   const shouldRunLiveUpdates = active && pageVisible;
   const mountedAtRef = useRef(Date.now());
   const firstFeedLoadedAtRef = useRef<number | null>(null);
@@ -1091,6 +1202,14 @@ export function DispatcherSessionPane({
   const deltaPatchCountRef = useRef(0);
   const deltaReplaceCountRef = useRef(0);
   const liveUpdatePauseCountRef = useRef(0);
+  useEffect(() => {
+    payloadRef.current = payload;
+  }, [payload]);
+
+  useEffect(() => {
+    pendingUserEntryRef.current = pendingUserEntry;
+  }, [pendingUserEntry]);
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       setPageVisible(!document.hidden);
@@ -1120,6 +1239,13 @@ export function DispatcherSessionPane({
     previousEntryIdsRef.current = [];
     setShowJumpToLatest(false);
     setNewEntryCount(0);
+    setDraftAttachmentPaths([]);
+    setPendingUserEntry(null);
+    setLocalSessionStatus(null);
+    setLoadingErrorBlocksFeed(false);
+    setSettingsOpen(false);
+    setContextPickerOpen(false);
+    setContextSearch("");
   }, [session.id]);
 
   const sessionApiPaths = useMemo(() => ({
@@ -1148,23 +1274,33 @@ export function DispatcherSessionPane({
     ),
     [dispatcherSessionAgent, isDispatcher, repository?.agent],
   );
+  const presentedPayload = useMemo(
+    () => localSessionStatus && !isDispatcherActiveStatus(localSessionStatus) && isDispatcherActiveStatus(payload.sessionStatus)
+      ? applyOptimisticInterruptRecovery(payload)
+      : payload,
+    [localSessionStatus, payload],
+  );
   const statusLabel = useMemo(
-    () => payload.sessionStatus?.trim() || session.status,
-    [payload.sessionStatus, session.status],
+    () => localSessionStatus?.trim() || presentedPayload.sessionStatus?.trim() || session.status,
+    [localSessionStatus, presentedPayload.sessionStatus, session.status],
   );
   const normalizedStatusLabel = useMemo(
     () => statusLabel.trim().toLowerCase(),
     [statusLabel],
   );
-  const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
+  const visibleEntries = useMemo(
+    () => mergePendingDispatcherEntry(presentedPayload, pendingUserEntry),
+    [pendingUserEntry, presentedPayload],
+  );
+  const approvalState = presentedPayload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
   const awaitingApproval = useMemo(
     () => isDispatcher && shouldShowDispatcherApprovalBanner(
-      payload.entries,
+      visibleEntries,
       approvalState,
-      payload.sessionStatus ?? session.status,
-      payload.parserState,
+      statusLabel,
+      presentedPayload.parserState,
     ),
-    [approvalState, isDispatcher, payload.entries, payload.parserState, payload.sessionStatus, session.status],
+    [approvalState, isDispatcher, presentedPayload.parserState, statusLabel, visibleEntries],
   );
   const showInterruptAction = Boolean(sessionApiPaths.interrupt)
     && INTERRUPTIBLE_SESSION_STATUSES.has(normalizedStatusLabel);
@@ -1172,13 +1308,44 @@ export function DispatcherSessionPane({
   const showRowStopAction = showInterruptAction && !showComposerStopAction;
   const showMetaRow = !hideRepositoryControls || !hideSessionStatusBadge || showRowStopAction;
   const canContinue = session.status !== "archived" && !(isDispatcher && showInterruptAction);
+  const canSendCurrentDraft = useMemo(
+    () => canSendDispatcherDraft({
+      message: composerValue,
+      attachments: draftAttachmentPaths,
+      canContinue,
+      sending,
+      isActiveInstalled,
+    }),
+    [canContinue, composerValue, draftAttachmentPaths, isActiveInstalled, sending],
+  );
+  const showWorkingRow = useMemo(
+    () => shouldShowDispatcherWorkingEntry(visibleEntries, statusLabel),
+    [statusLabel, visibleEntries],
+  );
   const dispatcherRuntimeError = useMemo(() => {
     if (!isDispatcher || normalizedStatusLabel !== "errored") {
       return null;
     }
-    const message = payload.error?.trim();
+    const message = presentedPayload.error?.trim();
     return message ? message : null;
-  }, [isDispatcher, normalizedStatusLabel, payload.error]);
+  }, [isDispatcher, normalizedStatusLabel, presentedPayload.error]);
+  const contextFilesByPath = useMemo(
+    () => new Map(contextFiles.map((file) => [file.path, file])),
+    [contextFiles],
+  );
+  const filteredContextFiles = useMemo(
+    () => filterDispatcherContextFiles(contextFiles, contextSearch),
+    [contextFiles, contextSearch],
+  );
+  const draftAttachmentLabels = useMemo(
+    () => draftAttachmentPaths.map((path) => ({
+      path,
+      label: resolveDispatcherAttachmentLabel(path, contextFilesByPath.get(path)),
+    })),
+    [contextFilesByPath, draftAttachmentPaths],
+  );
+  const showBlockingLoadingError = Boolean(loadingError) && loadingErrorBlocksFeed;
+  const showInlineLoadingError = Boolean(loadingError) && !showBlockingLoadingError;
   const loadRepository = useCallback(async () => {
     if (hideRepositoryControls) {
       setRepository(null);
@@ -1211,13 +1378,18 @@ export function DispatcherSessionPane({
     }
   }, [bridgeId, hideRepositoryControls, session.projectId, sessionApiPaths.repositories]);
 
-  const loadFeed = useCallback(async (options: { showLoading?: boolean } = {}) => {
+  const loadFeed = useCallback(async (options: LoadFeedOptions = {}) => {
     const showLoading = options.showLoading ?? true;
+    const preserveExistingOnError = options.preserveExistingOnError === true;
+    const pendingEntry = options.pendingEntry === undefined
+      ? pendingUserEntryRef.current
+      : options.pendingEntry;
     loadFeedCountRef.current += 1;
     if (showLoading) {
       setLoading(true);
     }
     setLoadingError(null);
+    setLoadingErrorBlocksFeed(false);
     try {
       const response = await fetch(withBridgeQuery(sessionApiPaths.feed, bridgeId), { cache: "no-store" });
       const nextPayload = normalizeFeedPayload(await response.json().catch(() => null));
@@ -1229,10 +1401,15 @@ export function DispatcherSessionPane({
         firstFeedLoadedAtRef.current = now;
       }
       lastFeedLoadedAtRef.current = now;
+      payloadRef.current = nextPayload;
       setPayload(nextPayload);
     } catch (error) {
       loadFeedFailureCountRef.current += 1;
-      setLoadingError(error instanceof Error ? error.message : "Failed to load session feed");
+      const message = error instanceof Error ? error.message : "Failed to load session feed";
+      setLoadingErrorBlocksFeed(
+        shouldReplaceFeedPayloadOnLoadError(payloadRef.current, { preserveExistingOnError, pendingEntry }),
+      );
+      setLoadingError(message);
     } finally {
       if (showLoading) {
         setLoading(false);
@@ -1253,6 +1430,83 @@ export function DispatcherSessionPane({
     }
     void loadRepository();
   }, [active, hideRepositoryControls, loadRepository]);
+
+  useEffect(() => {
+    if (!active || !contextPickerOpen) {
+      return;
+    }
+
+    let cancelled = false;
+    const loadContextFiles = async () => {
+      setContextLoading(true);
+      setContextError(null);
+      try {
+        const response = await fetch(
+          withBridgeQuery(
+            `/api/context-files?projectId=${encodeURIComponent(session.projectId)}`,
+            bridgeId,
+          ),
+          { cache: "no-store" },
+        );
+        const body = asRecord(await response.json().catch(() => null));
+        if (!response.ok) {
+          throw new Error(readString(body.error) ?? `Failed to load context files (${response.status})`);
+        }
+        if (cancelled) {
+          return;
+        }
+        const files = Array.isArray(body.files)
+          ? body.files
+            .map((file): DispatcherContextFile | null => {
+              const record = asRecord(file);
+              const path = readString(record.path);
+              const name = readString(record.name);
+              const kind = readString(record.kind);
+              if (!path || !name || (kind !== "file" && kind !== "image")) {
+                return null;
+              }
+              return {
+                path,
+                displayPath: readString(record.displayPath) ?? undefined,
+                name,
+                kind,
+                source: readString(record.source) ?? undefined,
+                sizeBytes: typeof record.sizeBytes === "number" ? record.sizeBytes : null,
+              };
+            })
+            .filter((file): file is DispatcherContextFile => file !== null)
+          : [];
+        setContextFiles(files);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setContextFiles([]);
+        setContextError(error instanceof Error ? error.message : "Failed to load context files");
+      } finally {
+        if (!cancelled) {
+          setContextLoading(false);
+        }
+      }
+    };
+
+    void loadContextFiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [active, bridgeId, contextPickerOpen, session.projectId]);
+
+  useEffect(() => {
+    if (pendingUserEntry && isPendingDispatcherEntryConfirmed(presentedPayload, pendingUserEntry)) {
+      setPendingUserEntry(null);
+    }
+  }, [pendingUserEntry, presentedPayload]);
+
+  useEffect(() => {
+    if (shouldClearLocalSessionStatus(localSessionStatus, payload.sessionStatus)) {
+      setLocalSessionStatus(null);
+    }
+  }, [localSessionStatus, payload.sessionStatus]);
 
   useEffect(() => {
     if (!shouldRunLiveUpdates) {
@@ -1278,7 +1532,7 @@ export function DispatcherSessionPane({
         parsed = JSON.parse(raw) as unknown;
       } catch {
         streamFallbackReloadCountRef.current += 1;
-        void loadFeed();
+        void loadFeed({ showLoading: false, preserveExistingOnError: true });
         return;
       }
 
@@ -1291,18 +1545,20 @@ export function DispatcherSessionPane({
           projectId: session.projectId,
           reason: "dispatcher_feed_refresh",
         });
-        void loadFeed();
+        void loadFeed({ showLoading: false, preserveExistingOnError: true });
         return;
       }
 
       const delta = normalizeFeedDelta(parsed);
       if (!delta) {
         streamFallbackReloadCountRef.current += 1;
-        void loadFeed();
+        void loadFeed({ showLoading: false, preserveExistingOnError: true });
         return;
       }
 
       lastStreamEventAtRef.current = Date.now();
+      setLoadingError(null);
+      setLoadingErrorBlocksFeed(false);
       if (delta.type === "append") {
         deltaAppendCountRef.current += delta.entries.length;
       } else if (delta.type === "patch") {
@@ -1363,7 +1619,7 @@ export function DispatcherSessionPane({
         }
         if (!res.ok || !res.body) {
           streamFallbackReloadCountRef.current += 1;
-          void loadFeed();
+          void loadFeed({ showLoading: false, preserveExistingOnError: true });
           scheduleReconnect();
           return;
         }
@@ -1376,13 +1632,13 @@ export function DispatcherSessionPane({
         }
         if (isCurrentConnection()) {
           streamFallbackReloadCountRef.current += 1;
-          void loadFeed();
+          void loadFeed({ showLoading: false, preserveExistingOnError: true });
           scheduleReconnect();
         }
       } catch {
         if (isCurrentConnection() && !ac.signal.aborted) {
           streamFallbackReloadCountRef.current += 1;
-          void loadFeed();
+          void loadFeed({ showLoading: false, preserveExistingOnError: true });
           scheduleReconnect();
         }
       }
@@ -1448,7 +1704,7 @@ export function DispatcherSessionPane({
   }, [session.id]);
 
   useEffect(() => {
-    const nextIds = payload.entries.map((entry) => entry.id);
+    const nextIds = visibleEntries.map((entry) => entry.id);
     const previousIds = previousEntryIdsRef.current;
 
     if (previousIds.length > 0) {
@@ -1471,7 +1727,7 @@ export function DispatcherSessionPane({
     }
 
     previousEntryIdsRef.current = nextIds;
-  }, [payload.entries, session.id]);
+  }, [session.id, visibleEntries]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -1480,7 +1736,7 @@ export function DispatcherSessionPane({
     }
 
     if (!autoScrollEnabledRef.current) {
-      if (payload.entries.length > 0) {
+      if (visibleEntries.length > 0 || showWorkingRow) {
         setShowJumpToLatest(true);
       }
       return;
@@ -1498,7 +1754,7 @@ export function DispatcherSessionPane({
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [payload, payload.entries.length]);
+  }, [payload, showWorkingRow, visibleEntries.length]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -1516,7 +1772,7 @@ export function DispatcherSessionPane({
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [loading, loadingError, session.id]);
+  }, [loading, loadingError, session.id, showWorkingRow, visibleEntries.length]);
 
   const handleFeedScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const nearBottom = isDispatcherFeedNearBottom(event.currentTarget);
@@ -1547,11 +1803,38 @@ export function DispatcherSessionPane({
     });
   }, [composerInsert]);
 
-  const sendMessage = useCallback(async (message: string) => {
-    const trimmed = message.trim();
-    if (!trimmed || sending) {
+  useEffect(() => {
+    const node = composerTextareaRef.current;
+    if (!node) {
+      return;
+    }
+
+    node.style.height = "0px";
+    const nextHeight = Math.min(Math.max(node.scrollHeight, 24), 160);
+    node.style.height = `${nextHeight}px`;
+    node.style.overflowY = node.scrollHeight > 160 ? "auto" : "hidden";
+  }, [composerValue]);
+
+  const toggleDraftAttachment = useCallback((path: string) => {
+    setDraftAttachmentPaths((current) => {
+      const normalized = normalizeDispatcherAttachmentPaths(current);
+      return normalized.includes(path)
+        ? normalized.filter((entry) => entry !== path)
+        : [...normalized, path];
+    });
+  }, []);
+
+  const removeDraftAttachment = useCallback((path: string) => {
+    setDraftAttachmentPaths((current) => current.filter((entry) => entry !== path));
+  }, []);
+
+  const sendMessage = useCallback(async (message: string, attachments: readonly string[]) => {
+    const normalizedAttachments = normalizeDispatcherAttachmentPaths(attachments);
+    if ((message.trim().length === 0 && normalizedAttachments.length === 0) || sending) {
       return false;
     }
+    const feedBaselineTotalEntries = payload.totalEntries;
+    const feedBaselineLastEntryId = payload.entries[payload.entries.length - 1]?.id ?? null;
     setSending(true);
     setSendError(null);
     try {
@@ -1560,13 +1843,28 @@ export function DispatcherSessionPane({
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify(buildDispatcherSendBody(message, normalizedAttachments)),
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to send message (${response.status})`);
       }
-      void loadFeed({ showLoading: false });
+      const nextPendingUserEntry = {
+        id: `pending-${Date.now()}`,
+        text: message.trim(),
+        attachments: normalizedAttachments,
+        createdAt: new Date().toISOString(),
+        feedBaselineTotalEntries,
+        feedBaselineLastEntryId,
+      };
+      pendingUserEntryRef.current = nextPendingUserEntry;
+      setPendingUserEntry(nextPendingUserEntry);
+      setLocalSessionStatus("working");
+      void loadFeed({
+        showLoading: false,
+        preserveExistingOnError: true,
+        pendingEntry: nextPendingUserEntry,
+      });
       return true;
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to send message");
@@ -1574,23 +1872,26 @@ export function DispatcherSessionPane({
     } finally {
       setSending(false);
     }
-  }, [bridgeId, loadFeed, sending, sessionApiPaths.send]);
+  }, [bridgeId, loadFeed, payload.entries, payload.totalEntries, sending, sessionApiPaths.send]);
 
   const handleSend = useCallback(async () => {
-    const message = composerValue.trim();
-    if (!message) {
+    if (!canSendCurrentDraft) {
       return;
     }
-    const sent = await sendMessage(message);
+    const message = composerValue;
+    const attachments = draftAttachmentPaths;
+    const sent = await sendMessage(message, attachments);
     if (sent) {
       setComposerValue("");
+      setDraftAttachmentPaths([]);
+      setContextPickerOpen(false);
     }
-  }, [composerValue, sendMessage]);
+  }, [canSendCurrentDraft, composerValue, draftAttachmentPaths, sendMessage]);
 
   const handleApprovalAction = useCallback(async (action: "approve" | "reject") => {
     const approvalPath = action === "approve" ? sessionApiPaths.approve : sessionApiPaths.reject;
     if (!approvalPath) {
-      await sendMessage(action);
+      await sendMessage(action, []);
       return;
     }
 
@@ -1605,13 +1906,30 @@ export function DispatcherSessionPane({
         throw new Error(readString(payload.error) ?? `Failed to ${action} plan (${response.status})`);
       }
       setComposerValue("");
-      void loadFeed({ showLoading: false });
+      void loadFeed({ showLoading: false, preserveExistingOnError: true });
     } catch (err) {
       setSendError(err instanceof Error ? err.message : `Failed to ${action} plan`);
     } finally {
       setSending(false);
     }
   }, [bridgeId, loadFeed, sendMessage, sessionApiPaths.approve, sessionApiPaths.reject]);
+
+  const handleComposerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    const isDesktopXl = typeof window.matchMedia === "function"
+      && window.matchMedia(DISPATCHER_DESKTOP_XL_MEDIA_QUERY).matches;
+    if (!shouldSendDispatcherComposerOnEnter({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      isComposing: event.nativeEvent.isComposing,
+      isDesktopXl,
+    })) {
+      return;
+    }
+    event.preventDefault();
+    if (canSendCurrentDraft) {
+      void handleSend();
+    }
+  }, [canSendCurrentDraft, handleSend]);
 
   const handleAgentChange = useCallback(async (nextAgent: string) => {
     if (!repository || savingAgent || nextAgent === repository.agent) {
@@ -1655,6 +1973,7 @@ export function DispatcherSessionPane({
 
     setSending(true);
     setSendError(null);
+    let releaseSendingInFinally = true;
     try {
       const response = await fetch(withBridgeQuery(sessionApiPaths.interrupt, bridgeId), {
         method: "POST",
@@ -1663,138 +1982,159 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to interrupt session (${response.status})`);
       }
-      void loadFeed({ showLoading: false });
+      pendingUserEntryRef.current = null;
+      setPendingUserEntry(null);
+      setLocalSessionStatus("killed");
+      const reloadPromise = loadFeed({
+        showLoading: false,
+        preserveExistingOnError: true,
+        pendingEntry: null,
+      });
+      setSending(false);
+      releaseSendingInFinally = false;
+      await reloadPromise;
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to interrupt session");
     } finally {
-      setSending(false);
+      if (releaseSendingInFinally) {
+        setSending(false);
+      }
     }
   }, [bridgeId, loadFeed, sessionApiPaths.interrupt]);
 
   return (
-    <aside className={cn(
-      "flex h-full min-h-0 w-full min-w-0 shrink-0 flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:w-[405px] xl:border-l xl:border-t-0",
-      className,
-    )}>
-      <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)]">
-        <span className="min-w-0 flex-1 truncate">{sessionLabel}</span>
-        <span className={cn(
-          "inline-flex items-center rounded-[999px] px-2 py-0.5 text-[10px] uppercase tracking-wide",
-          shouldRunLiveUpdates
-            ? "bg-[color:color-mix(in_srgb,var(--vk-green)_18%,transparent)] text-[var(--vk-green)]"
-            : "bg-[color:color-mix(in_srgb,var(--vk-text-muted)_12%,transparent)] text-[var(--vk-text-muted)]",
-        )}>
-          {shouldRunLiveUpdates ? "live" : "paused"}
-        </span>
-        {headerActions}
-        {onToggleCollapse ? (
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            className="hidden h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:inline-flex"
-            aria-label="Collapse dispatcher"
-            title="Collapse dispatcher"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-        {!hideOpenSessionAction ? (
-          <button
-            type="button"
-            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: null }))}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Open full session"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-        {onClose ? (
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Close docked session"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
-      </div>
+    <>
+      <aside className={cn(
+        "flex min-h-0 w-full min-w-0 shrink-0 flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:w-[405px] xl:border-l xl:border-t-0",
+        DISPATCHER_CHAT_FRAME_CLASS_NAME,
+        className,
+      )}>
+        <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] pl-14 pr-3 text-[12px] text-[var(--vk-text-muted)] sm:px-3">
+          <span className="min-w-0 flex-1 truncate">{sessionLabel}</span>
+          <span className={cn(
+            "inline-flex items-center rounded-[999px] px-2 py-0.5 text-[10px] uppercase tracking-wide",
+            shouldRunLiveUpdates
+              ? "bg-[color:color-mix(in_srgb,var(--vk-green)_18%,transparent)] text-[var(--vk-green)]"
+              : "bg-[color:color-mix(in_srgb,var(--vk-text-muted)_12%,transparent)] text-[var(--vk-text-muted)]",
+          )}>
+            {shouldRunLiveUpdates ? "live" : "paused"}
+          </span>
+          {headerActions}
+          {onToggleCollapse ? (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="hidden h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:inline-flex"
+              aria-label="Collapse dispatcher"
+              title="Collapse dispatcher"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          {!hideOpenSessionAction ? (
+            <button
+              type="button"
+              onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: null }))}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              aria-label="Open full session"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+          {onClose ? (
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              aria-label="Close docked session"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </div>
 
-      <div
-        ref={feedRef}
-        onScroll={handleFeedScroll}
-        className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:px-4"
-      >
-        {loading ? (
-          <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Loading dispatcher activity...
-          </div>
-        ) : loadingError ? (
-          <div className="rounded-[3px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[13px] text-[var(--vk-red)]">
-            {loadingError}
-          </div>
-        ) : (
-          <div ref={feedContentRef} className="space-y-5">
-            {payload.parserState || payload.truncated ? (
-              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
-                {payload.parserState ? (
-                  <>
-                    <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
-                      <LoaderCircle className="h-3 w-3" />
-                      <span>{payload.parserState.kind}</span>
-                    </span>
-                    {payload.parserState.command ? (
-                      <ExpandableInlineText
-                        value={payload.parserState.command}
-                        maxLength={72}
-                        className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
-                      />
-                    ) : null}
-                  </>
-                ) : null}
-                {payload.truncated ? (
-                  <>
-                    {payload.parserState ? <span className="text-[var(--vk-text-dim)]">•</span> : null}
-                    <span>Showing latest {payload.windowLimit}</span>
-                  </>
-                ) : null}
-              </div>
-            ) : null}
+        <div
+          ref={feedRef}
+          onScroll={handleFeedScroll}
+          className={cn(DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME, "px-3 py-4 sm:px-4")}
+        >
+          {loading ? (
+            <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Loading dispatcher activity...
+            </div>
+          ) : showBlockingLoadingError ? (
+            <div className="rounded-[12px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[13px] text-[var(--vk-red)]">
+              {loadingError}
+            </div>
+          ) : (
+            <div ref={feedContentRef} className="space-y-5">
+              {showInlineLoadingError ? (
+                <div className="rounded-[12px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[13px] text-[var(--vk-red)]">
+                  {loadingError}
+                </div>
+              ) : null}
+              {payload.parserState || payload.truncated ? (
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
+                  {payload.parserState ? (
+                    <>
+                      <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
+                        <LoaderCircle className="h-3 w-3" />
+                        <span>{payload.parserState.kind}</span>
+                      </span>
+                      {payload.parserState.command ? (
+                        <ExpandableInlineText
+                          value={payload.parserState.command}
+                          maxLength={72}
+                          className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
+                        />
+                      ) : null}
+                    </>
+                  ) : null}
+                  {payload.truncated ? (
+                    <>
+                      {payload.parserState ? <span className="text-[var(--vk-text-dim)]">•</span> : null}
+                      <span>Showing latest {payload.windowLimit}</span>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
 
-            {payload.entries.length === 0 ? (
-              !isActiveInstalled ? (
-                <div className="rounded-[16px] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,rgba(255,255,255,0.06))] bg-[rgba(25,23,22,0.65)] backdrop-blur-md p-5 shadow-[0_15px_40px_rgba(0,0,0,0.35)] relative overflow-hidden transition-all duration-300 hover:border-[color:color-mix(in_srgb,var(--vk-orange)_40%,rgba(255,255,255,0.1))]">
-                  <div className="absolute top-0 right-0 h-40 w-40 bg-[radial-gradient(circle_at_top_right,color-mix(in_srgb,var(--vk-orange)_12%,transparent),transparent_70%)] pointer-events-none" />
-                  
-                  <div className="flex items-start gap-3">
-                    <div className="p-2 rounded-[10px] bg-[color:color-mix(in_srgb,var(--vk-orange)_15%,transparent)] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,transparent)] text-[var(--vk-orange)] shrink-0">
-                      <AlertCircle className="h-5 w-5 animate-pulse" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <h4 className="text-[14px] font-semibold text-[#f5ebd7] tracking-wide">
-                        Coding Agent Setup Required
-                      </h4>
-                      <p className="mt-1.5 text-[12px] leading-5 text-[rgba(255,255,255,0.7)]">
-                        The selected agent <strong className="text-white">{formatAgentName(activeAgentName)}</strong> is not installed or configured on your system. Conductor orchestrates tasks by dispatching them to this agent.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Install instruction section */}
-                  {activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint ? (
-                    <div className="mt-4">
-                      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--vk-text-muted)] mb-2">
-                        Installation Command
+              {visibleEntries.length === 0 && !showWorkingRow ? (
+                !isActiveInstalled ? (
+                  <div className="relative overflow-hidden rounded-[16px] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,rgba(255,255,255,0.06))] bg-[rgba(25,23,22,0.65)] p-5 shadow-[0_15px_40px_rgba(0,0,0,0.35)] backdrop-blur-md transition-all duration-300 hover:border-[color:color-mix(in_srgb,var(--vk-orange)_40%,rgba(255,255,255,0.1))]">
+                    <div className="pointer-events-none absolute right-0 top-0 h-40 w-40 bg-[radial-gradient(circle_at_top_right,color-mix(in_srgb,var(--vk-orange)_12%,transparent),transparent_70%)]" />
+                    <div className="flex items-start gap-3">
+                      <div className="shrink-0 rounded-[10px] border border-[color:color-mix(in_srgb,var(--vk-orange)_25%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-orange)_15%,transparent)] p-2 text-[var(--vk-orange)]">
+                        <AlertCircle className="h-5 w-5 animate-pulse" />
                       </div>
-                      <div className="flex items-center gap-2 rounded-[8px] border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.25)] p-2 font-mono text-[12px] text-[#e0dacb]">
-                        <Terminal className="h-3.5 w-3.5 text-[rgba(255,255,255,0.4)] shrink-0" />
-                        <span className="flex-1 truncate select-all">{activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const cmd = activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint;
-                            if (cmd) {
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-[14px] font-semibold tracking-wide text-[#f5ebd7]">
+                          Coding Agent Setup Required
+                        </h4>
+                        <p className="mt-1.5 text-[12px] leading-5 text-[rgba(255,255,255,0.7)]">
+                          The selected agent <strong className="text-white">{formatAgentName(activeAgentName)}</strong> is not installed or configured on your system. Conductor orchestrates tasks by dispatching them to this agent.
+                        </p>
+                      </div>
+                    </div>
+
+                    {activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint ? (
+                      <div className="mt-4">
+                        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                          Installation Command
+                        </div>
+                        <div className="flex items-center gap-2 rounded-[8px] border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.25)] p-2 font-mono text-[12px] text-[#e0dacb]">
+                          <Terminal className="h-3.5 w-3.5 shrink-0 text-[rgba(255,255,255,0.4)]" />
+                          <span className="flex-1 truncate select-all">
+                            {activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cmd = activeAgentInfo?.installHint || getKnownAgent(activeAgentName)?.installHint;
+                              if (!cmd) {
+                                return;
+                              }
                               navigator.clipboard.writeText(cmd)
                                 .then(() => {
                                   setCommandCopied(true);
@@ -1803,276 +2143,453 @@ export function DispatcherSessionPane({
                                 .catch((err) => {
                                   console.error("Failed to copy installation command to clipboard:", err);
                                 });
-                            }
-                          }}
-                          className="p-1 rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[rgba(255,255,255,0.06)] hover:text-white transition"
-                          title="Copy install command"
-                        >
-                          {commandCopied ? (
-                            <Check className="h-3.5 w-3.5 text-[var(--vk-green)]" />
-                          ) : (
-                            <Copy className="h-3.5 w-3.5" />
-                          )}
-                        </button>
+                            }}
+                            className="rounded-[4px] p-1 text-[var(--vk-text-muted)] transition hover:bg-[rgba(255,255,255,0.06)] hover:text-white"
+                            title="Copy install command"
+                          >
+                            {commandCopied ? (
+                              <Check className="h-3.5 w-3.5 text-[var(--vk-green)]" />
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
-
-                  {/* Help links */}
-                  <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-[rgba(255,255,255,0.06)] pt-3.5">
-                    {activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage ? (
-                      <a
-                        href={activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage || undefined}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
-                      >
-                        <span>Visit homepage</span>
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
                     ) : null}
-                    
-                    {activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl ? (
-                      <a
-                        href={activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl || undefined}
-                        target="_blank"
-rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
-                      >
-                        <span>Setup credentials</span>
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
+
+                    <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-[rgba(255,255,255,0.06)] pt-3.5">
+                      {activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage ? (
+                        <a
+                          href={activeAgentInfo?.homepage || getKnownAgent(activeAgentName)?.homepage || undefined}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
+                        >
+                          <span>Visit homepage</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : null}
+                      {activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl ? (
+                        <a
+                          href={activeAgentInfo?.setupUrl || getKnownAgent(activeAgentName)?.setupUrl || undefined}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-[11px] text-[var(--vk-accent)] hover:underline"
+                        >
+                          <span>Setup credentials</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ) : null}
+                    </div>
+
+                    {fetchedAgents.filter((agent) => agent.installed !== false && agent.name !== activeAgentName).length > 0 ? (
+                      <div className="mt-4 border-t border-[rgba(255,255,255,0.06)] pt-3">
+                        <div className="mb-2 text-[11px] text-[rgba(255,255,255,0.5)]">
+                          Or switch to an installed agent ready on your system:
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {fetchedAgents
+                            .filter((agent) => agent.installed !== false && agent.name !== activeAgentName)
+                            .map((agent) => (
+                              <button
+                                key={agent.name}
+                                type="button"
+                                onClick={() => void handleAgentChange(agent.name)}
+                                className="inline-flex items-center gap-1.5 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[11px] text-[#f3efea] transition hover:border-[rgba(255,255,255,0.15)] hover:bg-[rgba(255,255,255,0.08)]"
+                              >
+                                <AgentTileIcon seed={{ label: agent.name }} className="h-3.5 w-3.5 border-none bg-transparent" />
+                                <span>{agent.label || agent.name}</span>
+                                <ArrowRight className="ml-0.5 h-2.5 w-2.5 opacity-60" />
+                              </button>
+                            ))}
+                        </div>
+                      </div>
                     ) : null}
                   </div>
-
-                  {/* Quick switcher to ready/installed agents */}
-                  {fetchedAgents.filter(a => a.installed !== false && a.name !== activeAgentName).length > 0 ? (
-                    <div className="mt-4 border-t border-[rgba(255,255,255,0.06)] pt-3">
-                      <div className="text-[11px] text-[rgba(255,255,255,0.5)] mb-2">
-                        Or switch to an installed agent ready on your system:
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {fetchedAgents
-                          .filter(a => a.installed !== false && a.name !== activeAgentName)
-                          .map(a => (
-                            <button
-                              key={a.name}
-                              type="button"
-                              onClick={() => void handleAgentChange(a.name)}
-                              className="inline-flex items-center gap-1.5 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[11px] text-[#f3efea] transition hover:bg-[rgba(255,255,255,0.08)] hover:border-[rgba(255,255,255,0.15)]"
-                            >
-                              <AgentTileIcon seed={{ label: a.name }} className="h-3.5 w-3.5 border-none bg-transparent" />
-                              <span>{a.label || a.name}</span>
-                              <ArrowRight className="h-2.5 w-2.5 opacity-60 ml-0.5" />
-                            </button>
-                          ))}
-                      </div>
+                ) : (
+                  <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                    No dispatcher activity yet.
+                  </div>
+                )
+              ) : (
+                <>
+                  {visibleEntries.map((entry) => (
+                    <SessionFeedMessage
+                      key={entry.id}
+                      entry={entry}
+                      assistantAgentLabel={dispatcherAssistantLabel}
+                    />
+                  ))}
+                  {showWorkingRow ? (
+                    <div className="flex items-center gap-2 rounded-[14px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-[13px] text-[var(--vk-text-muted)]">
+                      <RunningDots />
+                      <span>Dispatcher is working…</span>
                     </div>
                   ) : null}
-                </div>
-              ) : (
-                <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                  No dispatcher activity yet.
-                </div>
-              )
-            ) : (
-              payload.entries.map((entry) => (
-                <SessionFeedMessage
-                  key={entry.id}
-                  entry={entry}
-                  session={session}
-                  assistantAgentLabel={dispatcherAssistantLabel}
-                />
-              ))
-            )}
-          </div>
-        )}
-      </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
 
-      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 sm:px-4 sm:pb-4">
-        {showMetaRow ? (
-          <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-            {!hideRepositoryControls ? (
-              <ProjectAgentSelect
-                project={repository}
-                disabled={repositoryLoading}
-                saving={savingAgent}
-                agents={fetchedAgents}
-                onChange={(value) => void handleAgentChange(value)}
-              />
-            ) : null}
-            {!hideSessionStatusBadge ? (
-              <div
-                className={cn(
-                  "inline-flex w-fit max-w-full items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)]",
-                  hideRepositoryControls ? null : "sm:ml-auto",
-                )}
-              >
-                <AgentTileIcon
-                  seed={{ label: agentLabel }}
-                  className="h-4 w-4 border-none bg-transparent"
+        <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 sm:px-4 sm:pb-4">
+          {showMetaRow ? (
+            <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              {!hideRepositoryControls ? (
+                <ProjectAgentSelect
+                  project={repository}
+                  disabled={repositoryLoading}
+                  saving={savingAgent}
+                  agents={fetchedAgents}
+                  onChange={(value) => void handleAgentChange(value)}
                 />
-                <span>{agentLabel}</span>
-                <span className="text-[var(--vk-text-dim)]">•</span>
-                <span>{statusLabel}</span>
+              ) : null}
+              {!hideSessionStatusBadge ? (
+                <div
+                  className={cn(
+                    "inline-flex w-fit max-w-full items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)]",
+                    hideRepositoryControls ? null : "sm:ml-auto",
+                  )}
+                >
+                  <AgentTileIcon
+                    seed={{ label: agentLabel }}
+                    className="h-4 w-4 border-none bg-transparent"
+                  />
+                  <span>{agentLabel}</span>
+                  <span className="text-[var(--vk-text-dim)]">•</span>
+                  <span>{statusLabel}</span>
+                </div>
+              ) : null}
+              {showRowStopAction ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={sending}
+                  onClick={() => void handleInterrupt()}
+                  className="h-[31px] rounded-[999px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
+                >
+                  {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                  <span>Stop</span>
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+
+          {showJumpToLatest ? (
+            <div className="mb-2 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const node = feedRef.current;
+                  if (!node) return;
+                  node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                  autoScrollEnabledRef.current = true;
+                  setShowJumpToLatest(false);
+                  setNewEntryCount(0);
+                }}
+                className="h-[30px] rounded-[999px] border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px]"
+              >
+                Jump to latest{newEntryCount > 0 ? ` · ${newEntryCount} new` : ""}
+              </Button>
+            </div>
+          ) : null}
+
+          {repositoryError ? (
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>{repositoryError}</span>
+            </div>
+          ) : null}
+
+          {sendError ? (
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>{sendError}</span>
+            </div>
+          ) : null}
+
+          {awaitingApproval ? (
+            <div className="mb-3 rounded-[12px] border border-[rgba(204,163,92,0.35)] bg-[rgba(64,49,27,0.58)] px-3 py-3 text-[12px] text-[#f1e3bf]">
+              <div className="flex items-center gap-2 text-[13px] font-medium text-[#f6ead0]">
+                <AlertCircle className="h-4 w-4" />
+                <span>Plan-only review ready</span>
               </div>
-            ) : null}
-            {showRowStopAction ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={sending}
-                onClick={() => void handleInterrupt()}
-                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
-              >
-                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                <span>Stop</span>
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {showJumpToLatest ? (
-          <div className="mb-2 flex justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                const node = feedRef.current;
-                if (!node) return;
-                node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-                autoScrollEnabledRef.current = true;
-                setShowJumpToLatest(false);
-                setNewEntryCount(0);
-              }}
-              className="h-[30px] rounded-[999px] border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px]"
-            >
-              Jump to latest{newEntryCount > 0 ? ` · ${newEntryCount} new` : ""}
-            </Button>
-          </div>
-        ) : null}
-
-        {repositoryError ? (
-          <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
-            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-            <span>{repositoryError}</span>
-          </div>
-        ) : null}
-
-        {sendError ? (
-          <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
-            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-            <span>{sendError}</span>
-          </div>
-        ) : null}
-
-        {awaitingApproval ? (
-          <div className="mb-3 rounded-[12px] border border-[rgba(204,163,92,0.35)] bg-[rgba(64,49,27,0.58)] px-3 py-3 text-[12px] text-[#f1e3bf]">
-            <div className="flex items-center gap-2 text-[13px] font-medium text-[#f6ead0]">
-              <AlertCircle className="h-4 w-4" />
-              <span>Plan-only review ready</span>
+              <p className="mt-2 leading-5 text-[#dccba1]">
+                The dispatcher is paused before mutating the board for this turn. Review the proposal above, then approve it or request changes.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!canContinue || sending}
+                  onClick={() => void handleApprovalAction("approve")}
+                  className="h-[31px] rounded-[999px] border-[rgba(255,255,255,0.08)] bg-[#e6c786] px-3 text-[13px] text-[#22170d] hover:bg-[#edd39d]"
+                >
+                  {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                  <span>Approve plan</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!canContinue || sending}
+                  onClick={() => void handleApprovalAction("reject")}
+                  className="h-[31px] rounded-[999px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  <span>Request changes</span>
+                </Button>
+              </div>
             </div>
-            <p className="mt-2 leading-5 text-[#dccba1]">
-              The dispatcher is paused before mutating the board for this turn. Review the proposal above, then approve it or request changes.
-            </p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                disabled={!canContinue || sending}
-                onClick={() => void handleApprovalAction("approve")}
-                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.08)] bg-[#e6c786] px-3 text-[13px] text-[#22170d] hover:bg-[#edd39d]"
-              >
-                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                <span>Approve plan</span>
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={!canContinue || sending}
-                onClick={() => void handleApprovalAction("reject")}
-                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
-              >
-                <X className="h-3.5 w-3.5" />
-                <span>Request changes</span>
-              </Button>
-            </div>
-          </div>
-        ) : null}
+          ) : null}
 
-        {dispatcherRuntimeError ? (
-          <div className="mb-3 rounded-[12px] border border-[rgba(210,81,81,0.35)] bg-[rgba(82,27,27,0.5)] px-3 py-3 text-[12px] text-[#f3c5c5]">
+          {dispatcherRuntimeError ? (
+            <div className="mb-3 rounded-[12px] border border-[rgba(210,81,81,0.35)] bg-[rgba(82,27,27,0.5)] px-3 py-3 text-[12px] text-[#f3c5c5]">
             <div className="flex items-center gap-2 text-[13px] font-medium text-[#ffd7d7]">
               <AlertCircle className="h-4 w-4" />
               <span>Dispatcher runtime exited</span>
             </div>
             <p className="mt-2 leading-5 text-[#f0bcbc]">
-              Change the runtime agent or model in the toolbar below, then retry your message.
+              Use the dispatcher settings below to change the runtime, then retry your message.
             </p>
             <p className="mt-2 rounded-[8px] bg-[rgba(0,0,0,0.18)] px-2.5 py-2 font-mono text-[11px] text-[#ffe4e4]">
               {dispatcherRuntimeError}
             </p>
-          </div>
-        ) : null}
+            </div>
+          ) : null}
 
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            void handleSend();
-          }}
-          className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-2.5 py-2.5 sm:px-3 sm:py-3"
-          style={{ paddingBottom: "calc(0.625rem + env(safe-area-inset-bottom))" }}
-        >
-          {composerToolbar ? <div className="mb-2.5 sm:mb-3">{composerToolbar}</div> : null}
-          <textarea
-            value={composerValue}
-            onChange={(event) => setComposerValue(event.target.value)}
-            placeholder={
-              !isActiveInstalled
-                ? `Please install ${formatAgentName(activeAgentName)} or switch agents to send messages...`
-                : "Ask the dispatcher to shape work, create tasks, or update the board..."
-            }
-            disabled={!canContinue || sending || !isActiveInstalled}
-            rows={2}
-            className="w-full resize-none bg-transparent text-[15px] leading-5 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60 sm:text-[16px] sm:leading-6"
-          />
-          <div className="mt-2.5 flex items-center justify-end sm:mt-3">
-            {showComposerStopAction ? (
-              <Button
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSend();
+            }}
+            className="rounded-[28px] border border-[rgba(255,255,255,0.08)] bg-[#141212]/95 px-3 py-3 shadow-[0_18px_48px_rgba(0,0,0,0.24)] backdrop-blur-sm"
+          >
+            {draftAttachmentLabels.length > 0 ? (
+              <div className="mb-2.5 flex flex-wrap gap-2">
+                {draftAttachmentLabels.map((attachment) => (
+                  <span
+                    key={attachment.path}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-[11px] text-[var(--vk-text-normal)]"
+                  >
+                    <FileText className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
+                    <span className="truncate">{attachment.label}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeDraftAttachment(attachment.path)}
+                      className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[var(--vk-text-muted)] hover:bg-[rgba(255,255,255,0.08)] hover:text-[var(--vk-text-normal)]"
+                      aria-label={`Remove attachment ${attachment.label}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {composerToolbar ? (
+              <div className="mb-2.5 hidden xl:block">
+                {composerToolbar}
+              </div>
+            ) : null}
+
+            <div className="flex items-end gap-2">
+              <button
                 type="button"
-                variant="outline"
-                size="sm"
+                onClick={() => setContextPickerOpen(true)}
                 disabled={sending}
-                onClick={() => void handleInterrupt()}
-                className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.08)] disabled:cursor-not-allowed disabled:opacity-60"
+                aria-label="Add workspace attachment"
               >
-                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-                <span>Stop</span>
-              </Button>
-            ) : (
-              <Button
-                type="submit"
-                variant="outline"
-                size="sm"
-                disabled={!canContinue || sending || composerValue.trim().length === 0 || !isActiveInstalled}
-                className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-              >
-                {sending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <Plus className="h-4 w-4" />
+              </button>
+
+              <div className="min-w-0 flex-1">
+                <textarea
+                  ref={composerTextareaRef}
+                  value={composerValue}
+                  onChange={(event) => setComposerValue(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder={
+                    !isActiveInstalled
+                      ? `Please install ${formatAgentName(activeAgentName)} or switch agents to send messages...`
+                      : "Ask the dispatcher to shape work, create tasks, or send attachments…"
+                  }
+                  disabled={!canContinue || sending || !isActiveInstalled}
+                  rows={1}
+                  className="max-h-[160px] w-full resize-none overflow-y-hidden bg-transparent text-[15px] leading-6 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60 sm:text-[16px]"
+                />
+                <div className="mt-2 flex min-w-0 items-center gap-2 xl:hidden">
+                  {composerSettings ? (
+                    <button
+                      type="button"
+                      onClick={() => setSettingsOpen(true)}
+                      className={cn(
+                        "inline-flex min-w-0 max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition",
+                        composerSettings.error
+                          ? "border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] text-[#ffd7d7]"
+                          : "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[var(--vk-text-normal)] hover:bg-[rgba(255,255,255,0.08)]",
+                      )}
+                      aria-label="Open dispatcher settings"
+                    >
+                      {composerSettings.pending ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : null}
+                      <span className="truncate">{composerSettings.summary}</span>
+                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+                    </button>
+                  ) : null}
+                  {composerSettings?.error ? (
+                    <span className="truncate text-[11px] text-[var(--vk-red)]">
+                      Fix runtime settings
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+
+              {showComposerStopAction ? (
+                <button
+                  type="button"
+                  disabled={sending}
+                  onClick={() => void handleInterrupt()}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.05)] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.1)] disabled:cursor-not-allowed disabled:opacity-60"
+                  aria-label="Stop dispatcher"
+                >
+                  {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!canSendCurrentDraft}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#f3e8da] text-[#1d1612] transition hover:bg-[#fff3e5] disabled:cursor-not-allowed disabled:bg-[rgba(255,255,255,0.12)] disabled:text-[rgba(255,255,255,0.45)]"
+                  aria-label="Send message"
+                >
+                  {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      </aside>
+
+      {composerSettings ? (
+        <Dialog.Root open={settingsOpen} onOpenChange={setSettingsOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className={DISPATCHER_SURFACE_OVERLAY_CLASS_NAME} />
+            <Dialog.Content className={DISPATCHER_SURFACE_CONTENT_CLASS_NAME}>
+              <Dialog.Title className="sr-only">Dispatcher settings</Dialog.Title>
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {composerSettings.content}
+                </div>
+                <div className="flex items-center justify-end border-t border-[var(--vk-border)] px-4 py-3">
+                  <Dialog.Close asChild>
+                    <button
+                      type="button"
+                      className="inline-flex h-9 items-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-4 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.08)]"
+                    >
+                      Done
+                    </button>
+                  </Dialog.Close>
+                </div>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      ) : null}
+
+      <Dialog.Root open={contextPickerOpen} onOpenChange={setContextPickerOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={DISPATCHER_SURFACE_OVERLAY_CLASS_NAME} />
+          <Dialog.Content className={DISPATCHER_SURFACE_CONTENT_CLASS_NAME}>
+            <Dialog.Title className="sr-only">Add workspace attachments</Dialog.Title>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="border-b border-[var(--vk-border)] px-4 py-3">
+                <p className="text-[14px] font-medium text-[var(--vk-text-strong)]">
+                  Add workspace attachments
+                </p>
+                <p className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">
+                  Search the current project context files and attach them directly to this dispatcher turn.
+                </p>
+              </div>
+              <div className="border-b border-[var(--vk-border)] px-4 py-3">
+                <label className="block text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                  Search
+                </label>
+                <div className="mt-2 flex items-center gap-2 rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2">
+                  <Search className="h-4 w-4 text-[var(--vk-text-muted)]" />
+                  <input
+                    value={contextSearch}
+                    onChange={(event) => setContextSearch(event.target.value)}
+                    placeholder="Filter workspace files"
+                    className="w-full bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                  />
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                {contextLoading ? (
+                  <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Loading workspace files...
+                  </div>
+                ) : contextError ? (
+                  <div className="rounded-[12px] border border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+                    {contextError}
+                  </div>
+                ) : filteredContextFiles.length === 0 ? (
+                  <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                    No matching workspace files.
+                  </div>
                 ) : (
-                  <>
-                    <span>Send</span>
-                    <Send className="h-3.5 w-3.5" />
-                  </>
+                  <div className="space-y-2">
+                    {filteredContextFiles.map((file) => {
+                      const selected = draftAttachmentPaths.includes(file.path);
+                      return (
+                        <button
+                          key={file.path}
+                          type="button"
+                          onClick={() => toggleDraftAttachment(file.path)}
+                          className={cn(
+                            "flex w-full items-start gap-3 rounded-[14px] border px-3 py-3 text-left transition",
+                            selected
+                              ? "border-[rgba(243,232,218,0.35)] bg-[rgba(243,232,218,0.08)]"
+                              : "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] hover:bg-[rgba(255,255,255,0.05)]",
+                          )}
+                          aria-pressed={selected}
+                        >
+                          <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] text-[var(--vk-text-normal)]">
+                            {selected ? <Check className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[13px] font-medium text-[var(--vk-text-normal)]">
+                              {resolveDispatcherAttachmentLabel(file.path, file)}
+                            </span>
+                            <span className="mt-1 block truncate text-[11px] text-[var(--vk-text-muted)]">
+                              {file.path}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 )}
-              </Button>
-            )}
-          </div>
-        </form>
-      </div>
-    </aside>
+              </div>
+              <div className="flex items-center justify-between border-t border-[var(--vk-border)] px-4 py-3">
+                <span className="text-[11px] text-[var(--vk-text-muted)]">
+                  {draftAttachmentPaths.length} attachment{draftAttachmentPaths.length === 1 ? "" : "s"} selected
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setContextPickerOpen(false)}
+                  className="inline-flex h-9 items-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-4 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.08)]"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
   );
 }

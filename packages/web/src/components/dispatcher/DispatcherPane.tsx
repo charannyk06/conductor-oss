@@ -4,7 +4,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
+import { Check, ChevronLeft, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
 import {
   DispatcherPreferenceChips,
 } from "@/components/dispatcher/DispatcherPreferenceChips";
@@ -16,6 +16,7 @@ import {
   resolveReasoningSelectionValue,
   type ModelSelectionState,
 } from "@/lib/agentModelSelection";
+import { buildDispatcherRuntimeSummary } from "@/components/dispatcher/dispatcherModelSummary";
 import {
   createSerializedDispatcherPreferencePatchQueue,
   dispatcherPreferencePatchScopeKey,
@@ -43,6 +44,7 @@ type DispatcherPaneProps = {
   onStartNewConversation?: () => void;
   creatingConversation?: boolean;
   onToggleCollapse?: () => void;
+  onBackToBoard?: () => void;
   className?: string;
 };
 
@@ -191,6 +193,7 @@ export function DispatcherPane({
   onStartNewConversation,
   creatingConversation = false,
   onToggleCollapse,
+  onBackToBoard,
   className,
 }: DispatcherPaneProps) {
   const preferredRuntimeAgent = useMemo(
@@ -519,6 +522,17 @@ export function DispatcherPane({
 
   const headerActions = (
     <>
+      {onBackToBoard ? (
+        <button
+          type="button"
+          onClick={onBackToBoard}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:hidden"
+          aria-label="Back to board"
+          title="Back to board"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+      ) : null}
       {showThreadMenu ? (
         <DropdownMenu.Root open={threadMenuOpen} onOpenChange={setThreadMenuOpen}>
           <DropdownMenu.Trigger asChild>
@@ -619,6 +633,15 @@ export function DispatcherPane({
     </>
   );
 
+  const runtimeSummary = useMemo(
+    () => buildDispatcherRuntimeSummary({
+      agent: runtimeAgent,
+      model: resolveModelSelectionValue(runtimeModelSelection) ?? runtimeModelSelection.catalogModel,
+      reasoningEffort: resolveReasoningSelectionValue(runtimeModelSelection) ?? runtimeModelSelection.reasoningEffort,
+    }),
+    [runtimeAgent, runtimeModelSelection],
+  );
+
   const composerToolbar = showPreferenceEditor ? (
     <div className="space-y-2">
       <div>
@@ -661,6 +684,82 @@ export function DispatcherPane({
     </div>
   ) : null;
 
+  const composerSettings = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-[var(--vk-border)] px-4 py-3">
+        <p className="text-[14px] font-medium text-[var(--vk-text-strong)]">
+          Dispatcher settings
+        </p>
+        <p className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">
+          Keep runtime changes close to the composer. Expand task handoff settings only when you need to change the default implementation agent.
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="rounded-[16px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                Dispatcher runtime
+              </p>
+              <p className="mt-1 text-[13px] text-[var(--vk-text-normal)]">
+                {runtimeSummary}
+              </p>
+            </div>
+            {updatingPreferences ? (
+              <span className="inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-2 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Saving
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-3">
+            <DispatcherPreferenceChips
+              agent={runtimeAgent}
+              agentOptions={DISPATCHER_RUNTIME_AGENT_OPTIONS}
+              agentLabel="Runtime agent"
+              modelSelection={runtimeModelSelection}
+              modelAccess={modelAccess}
+              runtimeModelCatalogs={runtimeModelCatalogs}
+              disabled={updatingPreferences}
+              onAgentChange={handleRuntimeAgentChange}
+              onModelSelectionChange={handleRuntimeModelSelectionChange}
+            />
+          </div>
+        </div>
+
+        <details className="mt-3 rounded-[16px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)]">
+          <summary className="cursor-pointer list-none px-4 py-3 text-[12px] font-medium text-[var(--vk-text-normal)] [&::-webkit-details-marker]:hidden">
+            <span className="flex items-center justify-between gap-3">
+              <span>Advanced task handoff</span>
+              <span className="text-[11px] text-[var(--vk-text-muted)]">
+                {implementationAgent}
+              </span>
+            </span>
+          </summary>
+          <div className="border-t border-[var(--vk-border)] px-4 py-4">
+            <DispatcherPreferenceChips
+              agent={implementationAgent}
+              agentOptions={DISPATCHER_HANDOFF_AGENT_OPTIONS}
+              agentLabel="Handoff agent"
+              modelSelection={implementationModelSelection}
+              modelAccess={modelAccess}
+              runtimeModelCatalogs={runtimeModelCatalogs}
+              disabled={updatingPreferences}
+              onAgentChange={handleImplementationAgentChange}
+              onModelSelectionChange={handleImplementationModelSelectionChange}
+            />
+          </div>
+        </details>
+
+        {preferenceError ? (
+          <div className="mt-3 rounded-[12px] border border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[#d25151]">
+            {preferenceError}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+
   return (
     <>
       <DispatcherSessionPane
@@ -674,6 +773,12 @@ export function DispatcherPane({
         hideSessionStatusBadge
         headerActions={headerActions}
         composerToolbar={composerToolbar}
+        composerSettings={showPreferenceEditor ? {
+          summary: runtimeSummary,
+          pending: updatingPreferences,
+          error: preferenceError,
+          content: composerSettings,
+        } : null}
         apiPaths={{
           feed: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed?limit=120&${threadQuery}`,
           stream: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed/stream?limit=120&${threadQuery}`,

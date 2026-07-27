@@ -2302,6 +2302,7 @@ export default function DashboardClient({
       const showBoardPane = !boardSinglePane || boardMobilePane === "board";
       const showChatPane = !boardSinglePane || boardMobilePane === "chat";
       const showMobileBoardPaneToggle = boardSinglePane && selectedSessionId === null;
+      const showMobileBoardHeader = boardSinglePane && showBoardPane;
       const dispatcherCollapsedOnWide = wideBoardViewport && dispatcherCollapsed && selectedSessionId === null;
       const showBoardSidePaneResizeHandle = selectedSessionId !== null || !dispatcherCollapsed;
 
@@ -2310,7 +2311,7 @@ export default function DashboardClient({
           style={boardPaneStyle}
           className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden"
         >
-          {boardSinglePane ? (
+          {showMobileBoardHeader ? (
             <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 xl:hidden">
               <div className="flex flex-col gap-1.5">
                 {renderWorkspaceViewToggle({ fullWidth: true, compact: true })}
@@ -2394,6 +2395,9 @@ export default function DashboardClient({
                   runtimeModelCatalogs={runtimeModelCatalogs}
                   collapsed={dispatcherCollapsedOnWide}
                   onToggleCollapsed={handleToggleDispatcherCollapsed}
+                  onBackToBoard={boardSinglePane && boardMobilePane === "chat"
+                    ? () => setBoardMobilePane("board")
+                    : undefined}
                 />
               )}
             </div>
