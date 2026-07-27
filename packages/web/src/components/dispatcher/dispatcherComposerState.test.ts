@@ -78,6 +78,39 @@ test("canSendDispatcherDraft allows either text or attachments", () => {
   );
 });
 
+test("canSendDispatcherDraft blocks sends when the session cannot continue, is already sending, or the agent is inactive", () => {
+  assert.equal(
+    canSendDispatcherDraft({
+      message: "Review this",
+      attachments: [],
+      canContinue: false,
+      sending: false,
+      isActiveInstalled: true,
+    }),
+    false,
+  );
+  assert.equal(
+    canSendDispatcherDraft({
+      message: "Review this",
+      attachments: [],
+      canContinue: true,
+      sending: true,
+      isActiveInstalled: true,
+    }),
+    false,
+  );
+  assert.equal(
+    canSendDispatcherDraft({
+      message: "Review this",
+      attachments: [],
+      canContinue: true,
+      sending: false,
+      isActiveInstalled: false,
+    }),
+    false,
+  );
+});
+
 test("resolveDispatcherAttachmentLabel prefers display paths", () => {
   assert.equal(
     resolveDispatcherAttachmentLabel("docs/spec.md", FILES[0]),

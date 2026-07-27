@@ -26,6 +26,7 @@ import {
   resolveDispatcherActiveAgentName,
   sendDispatcherPreferencePatchRequest,
 } from "@/lib/dispatcherPreferences";
+import { getKnownAgent } from "@/lib/knownAgents";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
 
@@ -732,7 +733,7 @@ export function DispatcherPane({
             <span className="flex items-center justify-between gap-3">
               <span>Advanced task handoff</span>
               <span className="text-[11px] text-[var(--vk-text-muted)]">
-                {implementationAgent}
+                {getKnownAgent(implementationAgent)?.label ?? implementationAgent}
               </span>
             </span>
           </summary>

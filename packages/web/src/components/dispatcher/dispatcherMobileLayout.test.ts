@@ -127,3 +127,11 @@ test("dispatcher session pane closes the mobile settings sheet once the xl break
   assert.match(source, /return watchDispatcherDesktopXl\(\(\) => \{\s*setSettingsOpen\(false\);\s*\}\);/);
   assert.match(source, /window\.matchMedia\(DISPATCHER_DESKTOP_XL_MEDIA_QUERY\)\.matches/);
 });
+
+test("dashboard client reuses the shared dispatcher xl media query", () => {
+  const source = readFileSync(new URL("../../features/dashboard/DashboardClient.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /import \{ DISPATCHER_DESKTOP_XL_MEDIA_QUERY \} from "@\/components\/dispatcher\/dispatcherMobileLayout";/);
+  assert.match(source, /window\.matchMedia\(DISPATCHER_DESKTOP_XL_MEDIA_QUERY\)/);
+  assert.doesNotMatch(source, /window\.matchMedia\("\(min-width: 1280px\)"\)/);
+});

@@ -113,7 +113,7 @@ export function getDispatcherToolPresentation(entry: SessionFeedEntry): Dispatch
 
   return {
     kind: readString(entry.metadata.toolKind)?.toLowerCase() ?? null,
-    title: readString(entry.metadata.toolTitle) ?? entry.text.trim() ?? "Tool call",
+    title: readString(entry.metadata.toolTitle)?.trim() || entry.text.trim() || "Tool call",
     status,
     lines,
     preview: lines[0] ?? null,
@@ -158,6 +158,7 @@ export function applyOptimisticInterruptRecovery(payload: SessionFeedPayload): S
   return {
     ...payload,
     entries,
+    parserState: null,
     sessionStatus,
   };
 }

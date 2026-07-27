@@ -74,6 +74,7 @@ import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
+import { DISPATCHER_DESKTOP_XL_MEDIA_QUERY } from "@/components/dispatcher/dispatcherMobileLayout";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { archiveSession } from "@/lib/sessionArchive";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
@@ -1069,7 +1070,7 @@ export default function DashboardClient({
     }
 
     const mediaQuery = typeof window.matchMedia === "function"
-      ? window.matchMedia("(min-width: 1280px)")
+      ? window.matchMedia(DISPATCHER_DESKTOP_XL_MEDIA_QUERY)
       : null;
     const syncWideBoardViewport = () => {
       setWideBoardViewport(mediaQuery?.matches ?? window.innerWidth >= 1280);

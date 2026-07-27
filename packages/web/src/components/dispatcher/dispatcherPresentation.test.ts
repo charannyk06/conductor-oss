@@ -185,6 +185,29 @@ test("getDispatcherToolPresentation preserves full tool detail lines and status"
   });
 });
 
+test("getDispatcherToolPresentation falls back from blank tool titles to entry text or a generic label", () => {
+  assert.equal(
+    getDispatcherToolPresentation(makeEntry({
+      kind: "tool",
+      text: "  Bash  ",
+      metadata: {
+        toolTitle: "   ",
+      },
+    }))?.title,
+    "Bash",
+  );
+  assert.equal(
+    getDispatcherToolPresentation(makeEntry({
+      kind: "tool",
+      text: "   ",
+      metadata: {
+        toolTitle: "   ",
+      },
+    }))?.title,
+    "Tool call",
+  );
+});
+
 test("applyOptimisticInterruptRecovery stops streaming entries and marks running tools as interrupted", () => {
   const payload = applyOptimisticInterruptRecovery({
     entries: [
@@ -209,7 +232,11 @@ test("applyOptimisticInterruptRecovery stops streaming entries and marks running
     truncated: false,
     sessionStatus: "working",
     approvalState: null,
-    parserState: null,
+    parserState: {
+      kind: "command",
+      message: "Running tool",
+      command: "bun test",
+    },
     runtimeStatus: null,
     source: "session",
     error: null,
@@ -221,6 +248,7 @@ test("applyOptimisticInterruptRecovery stops streaming entries and marks running
   assert.equal(payload.entries[2]?.streaming, false);
   assert.equal(payload.entries[2]?.metadata.toolStatus, "error");
   assert.equal(payload.entries[3]?.streaming, false);
+  assert.equal(payload.parserState, null);
 });
 
 test("shouldReplaceFeedPayloadOnLoadError only preserves meaningful feed state when explicitly requested", () => {

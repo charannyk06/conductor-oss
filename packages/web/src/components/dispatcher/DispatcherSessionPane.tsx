@@ -124,6 +124,7 @@ type DispatcherSessionPaneApiPaths = {
   interrupt?: string | null;
   approve?: string | null;
   reject?: string | null;
+  contextFiles?: string;
   repositories?: string;
   /** PATCH OpenClaw (or other orchestrator) thread/session binding */
   integration?: string;
@@ -186,6 +187,18 @@ function readStringArray(value: unknown): string[] {
       .map((item) => readString(item))
       .filter((item): item is string => item !== null)
     : [];
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
+}
+
+function buildDispatcherContextFilesRequestPath(path: string, projectId: string): string {
+  const url = new URL(path, "http://localhost");
+  url.searchParams.set("projectId", projectId);
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 function normalizeFeedEntry(value: unknown): SessionFeedEntry | null {
@@ -1192,6 +1205,7 @@ export function DispatcherSessionPane({
   const firstFeedLoadedAtRef = useRef<number | null>(null);
   const lastFeedLoadedAtRef = useRef<number | null>(null);
   const lastStreamEventAtRef = useRef<number | null>(null);
+  const loadFeedGenerationRef = useRef(0);
   const loadFeedCountRef = useRef(0);
   const loadFeedFailureCountRef = useRef(0);
   const streamConnectCountRef = useRef(0);
@@ -1226,6 +1240,7 @@ export function DispatcherSessionPane({
     firstFeedLoadedAtRef.current = null;
     lastFeedLoadedAtRef.current = null;
     lastStreamEventAtRef.current = null;
+    loadFeedGenerationRef.current += 1;
     loadFeedCountRef.current = 0;
     loadFeedFailureCountRef.current = 0;
     streamConnectCountRef.current = 0;
@@ -1255,8 +1270,13 @@ export function DispatcherSessionPane({
     interrupt: apiPaths.interrupt ?? null,
     approve: apiPaths.approve ?? null,
     reject: apiPaths.reject ?? null,
+    contextFiles: apiPaths.contextFiles ?? "/api/context-files",
     repositories: apiPaths.repositories ?? "/api/repositories",
   }), [apiPaths]);
+  const contextFilesRequestPath = useMemo(
+    () => buildDispatcherContextFilesRequestPath(sessionApiPaths.contextFiles, session.projectId),
+    [session.projectId, sessionApiPaths.contextFiles],
+  );
 
   const sessionLabel = useMemo(() => {
     if (session.metadata.sessionKind === "project_dispatcher") {
@@ -1384,6 +1404,9 @@ export function DispatcherSessionPane({
     const pendingEntry = options.pendingEntry === undefined
       ? pendingUserEntryRef.current
       : options.pendingEntry;
+    const requestGeneration = loadFeedGenerationRef.current + 1;
+    loadFeedGenerationRef.current = requestGeneration;
+    const isLatestRequest = () => loadFeedGenerationRef.current === requestGeneration;
     loadFeedCountRef.current += 1;
     if (showLoading) {
       setLoading(true);
@@ -1396,6 +1419,9 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(nextPayload.error ?? `Failed to load session feed (${response.status})`);
       }
+      if (!isLatestRequest()) {
+        return;
+      }
       const now = Date.now();
       if (firstFeedLoadedAtRef.current === null) {
         firstFeedLoadedAtRef.current = now;
@@ -1405,13 +1431,16 @@ export function DispatcherSessionPane({
       setPayload(nextPayload);
     } catch (error) {
       loadFeedFailureCountRef.current += 1;
+      if (!isLatestRequest()) {
+        return;
+      }
       const message = error instanceof Error ? error.message : "Failed to load session feed";
       setLoadingErrorBlocksFeed(
         shouldReplaceFeedPayloadOnLoadError(payloadRef.current, { preserveExistingOnError, pendingEntry }),
       );
       setLoadingError(message);
     } finally {
-      if (showLoading) {
+      if (isLatestRequest()) {
         setLoading(false);
       }
     }
@@ -1436,24 +1465,25 @@ export function DispatcherSessionPane({
       return;
     }
 
-    let cancelled = false;
+    const abortController = new AbortController();
+    const signal = abortController.signal;
     const loadContextFiles = async () => {
       setContextLoading(true);
       setContextError(null);
       try {
         const response = await fetch(
-          withBridgeQuery(
-            `/api/context-files?projectId=${encodeURIComponent(session.projectId)}`,
-            bridgeId,
-          ),
-          { cache: "no-store" },
+          withBridgeQuery(contextFilesRequestPath, bridgeId),
+          {
+            cache: "no-store",
+            signal,
+          },
         );
         const body = asRecord(await response.json().catch(() => null));
+        if (signal.aborted) {
+          return;
+        }
         if (!response.ok) {
           throw new Error(readString(body.error) ?? `Failed to load context files (${response.status})`);
-        }
-        if (cancelled) {
-          return;
         }
         const files = Array.isArray(body.files)
           ? body.files
@@ -1476,15 +1506,18 @@ export function DispatcherSessionPane({
             })
             .filter((file): file is DispatcherContextFile => file !== null)
           : [];
+        if (signal.aborted) {
+          return;
+        }
         setContextFiles(files);
       } catch (error) {
-        if (cancelled) {
+        if (signal.aborted || isAbortError(error)) {
           return;
         }
         setContextFiles([]);
         setContextError(error instanceof Error ? error.message : "Failed to load context files");
       } finally {
-        if (!cancelled) {
+        if (!signal.aborted) {
           setContextLoading(false);
         }
       }
@@ -1492,9 +1525,9 @@ export function DispatcherSessionPane({
 
     void loadContextFiles();
     return () => {
-      cancelled = true;
+      abortController.abort();
     };
-  }, [active, bridgeId, contextPickerOpen, session.projectId]);
+  }, [active, bridgeId, contextFilesRequestPath, contextPickerOpen]);
 
   useEffect(() => {
     if (pendingUserEntry && isPendingDispatcherEntryConfirmed(presentedPayload, pendingUserEntry)) {
@@ -2074,27 +2107,27 @@ export function DispatcherSessionPane({
                   {loadingError}
                 </div>
               ) : null}
-              {payload.parserState || payload.truncated ? (
+              {presentedPayload.parserState || presentedPayload.truncated ? (
                 <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
-                  {payload.parserState ? (
+                  {presentedPayload.parserState ? (
                     <>
                       <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
                         <LoaderCircle className="h-3 w-3" />
-                        <span>{payload.parserState.kind}</span>
+                        <span>{presentedPayload.parserState.kind}</span>
                       </span>
-                      {payload.parserState.command ? (
+                      {presentedPayload.parserState.command ? (
                         <ExpandableInlineText
-                          value={payload.parserState.command}
+                          value={presentedPayload.parserState.command}
                           maxLength={72}
                           className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
                         />
                       ) : null}
                     </>
                   ) : null}
-                  {payload.truncated ? (
+                  {presentedPayload.truncated ? (
                     <>
-                      {payload.parserState ? <span className="text-[var(--vk-text-dim)]">•</span> : null}
-                      <span>Showing latest {payload.windowLimit}</span>
+                      {presentedPayload.parserState ? <span className="text-[var(--vk-text-dim)]">•</span> : null}
+                      <span>Showing latest {presentedPayload.windowLimit}</span>
                     </>
                   ) : null}
                 </div>
@@ -2478,6 +2511,9 @@ export function DispatcherSessionPane({
             <Dialog.Overlay className={DISPATCHER_SURFACE_OVERLAY_CLASS_NAME} />
             <Dialog.Content className={DISPATCHER_SURFACE_CONTENT_CLASS_NAME}>
               <Dialog.Title className="sr-only">Dispatcher settings</Dialog.Title>
+              <Dialog.Description className="sr-only">
+                Review and adjust the dispatcher runtime and default task handoff preferences for this conversation.
+              </Dialog.Description>
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="min-h-0 flex-1 overflow-hidden">
                   {composerSettings.content}
@@ -2503,6 +2539,9 @@ export function DispatcherSessionPane({
           <Dialog.Overlay className={DISPATCHER_SURFACE_OVERLAY_CLASS_NAME} />
           <Dialog.Content className={DISPATCHER_SURFACE_CONTENT_CLASS_NAME}>
             <Dialog.Title className="sr-only">Add workspace attachments</Dialog.Title>
+            <Dialog.Description className="sr-only">
+              Search project context files and select workspace attachments to add to the next dispatcher message.
+            </Dialog.Description>
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="border-b border-[var(--vk-border)] px-4 py-3">
                 <p className="text-[14px] font-medium text-[var(--vk-text-strong)]">

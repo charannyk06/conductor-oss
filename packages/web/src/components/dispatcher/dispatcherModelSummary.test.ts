@@ -8,6 +8,7 @@ import {
 
 test("formatDispatcherReasoningLabel normalizes common reasoning levels", () => {
   assert.equal(formatDispatcherReasoningLabel("low"), "Low");
+  assert.equal(formatDispatcherReasoningLabel("very_low"), "Very Low");
   assert.equal(formatDispatcherReasoningLabel("xhigh"), "Max");
   assert.equal(formatDispatcherReasoningLabel(""), null);
 });
