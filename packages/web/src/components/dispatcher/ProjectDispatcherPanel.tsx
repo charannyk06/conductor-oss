@@ -11,6 +11,7 @@ import {
   upsertDispatcherThread,
 } from "@/components/dispatcher/threadState";
 import { Button } from "@/components/ui/Button";
+import { cn } from "@/lib/cn";
 import {
   buildModelSelection,
   type ModelSelectionState,
@@ -32,6 +33,7 @@ type ProjectDispatcherPanelProps = {
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+  onBackToBoard?: () => void;
 };
 
 type CreateDispatcherConversationDialogProps = {
@@ -139,6 +141,7 @@ export function ProjectDispatcherPanel({
   runtimeModelCatalogs,
   collapsed = false,
   onToggleCollapsed,
+  onBackToBoard,
 }: ProjectDispatcherPanelProps) {
   const [dispatcherThreads, setDispatcherThreads] = useState<DashboardSession[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -331,6 +334,21 @@ export function ProjectDispatcherPanel({
     }
   }, [bridgeId, projectId]);
 
+  const rootClassName = cn(
+    "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]",
+  );
+  const mobileBackButton = onBackToBoard ? (
+    <button
+      type="button"
+      onClick={onBackToBoard}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:hidden"
+      aria-label="Back to board"
+      title="Back to board"
+    >
+      <ChevronLeft className="h-4 w-4" />
+    </button>
+  ) : null;
+
   if (collapsed) {
     return (
       <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-panel)]">
@@ -351,8 +369,15 @@ export function ProjectDispatcherPanel({
 
   if (loadingThreads && !dispatcherSession) {
     return (
-      <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-        <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+      <section className={rootClassName}>
+        {mobileBackButton ? (
+          <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 text-[12px] text-[var(--vk-text-muted)] xl:hidden">
+            {mobileBackButton}
+            <Bot className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">Dispatcher</span>
+          </div>
+        ) : null}
+        <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           Loading dispatcher...
         </div>
@@ -362,8 +387,9 @@ export function ProjectDispatcherPanel({
 
   if (!dispatcherSession) {
     return (
-      <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+      <section className={rootClassName}>
         <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 text-[12px] text-[var(--vk-text-muted)]">
+          {mobileBackButton}
           <Bot className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">Dispatcher</span>
           {onToggleCollapsed ? (
@@ -445,7 +471,7 @@ export function ProjectDispatcherPanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+    <section className={rootClassName}>
       {error ? (
         <div className="border-b border-[var(--vk-border)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[#d25151]">
           {error}
@@ -468,6 +494,7 @@ export function ProjectDispatcherPanel({
           onStartNewConversation={handleOpenCreateDialog}
           creatingConversation={creating}
           onToggleCollapse={onToggleCollapsed}
+          onBackToBoard={onBackToBoard}
           className="w-full border-l-0 border-t-0 xl:w-full"
         />
       </div>

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { EMPTY_FEED_PAYLOAD, applyFeedDelta } from "./dispatcherFeedState.js";
 
 function makeEntry(id: string, text: string, streaming = false) {
@@ -98,4 +99,38 @@ test("applyFeedDelta keeps dispatcher runtime errors in sync with feed updates",
   });
 
   assert.equal(next.error, null);
+});
+
+test("dispatcher session pane derives context-file requests from apiPaths and cancels stale requests", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /contextFiles\?: string;/);
+  assert.match(source, /contextFiles: apiPaths\.contextFiles \?\? "\/api\/context-files"/);
+  assert.match(source, /function buildDispatcherContextFilesRequestPath\(path: string, projectId: string\): string/);
+  assert.match(source, /url\.searchParams\.set\("projectId", projectId\)/);
+  assert.match(source, /const abortController = new AbortController\(\);/);
+  assert.match(source, /signal,\s*\n\s*}\s*,?\s*\n\s*\)/);
+  assert.match(source, /if \(signal\.aborted \|\| isAbortError\(error\)\) \{\s*return;\s*\}/);
+  assert.match(source, /if \(!signal\.aborted\) \{\s*setContextLoading\(false\);\s*\}/);
+});
+
+test("dispatcher session pane keeps loadFeed last-request-wins and renders banners from presented payload", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /const loadFeedGenerationRef = useRef\(0\);/);
+  assert.match(source, /loadFeedGenerationRef\.current \+= 1;/);
+  assert.match(source, /const requestGeneration = loadFeedGenerationRef\.current \+ 1;/);
+  assert.match(source, /const isLatestRequest = \(\) => loadFeedGenerationRef\.current === requestGeneration;/);
+  assert.match(source, /if \(!isLatestRequest\(\)\) \{\s*return;\s*\}/);
+  assert.match(source, /if \(isLatestRequest\(\)\) \{\s*setLoading\(false\);\s*\}/);
+  assert.match(source, /presentedPayload\.parserState \|\| presentedPayload\.truncated/);
+  assert.match(source, /presentedPayload\.parserState\.command/);
+  assert.match(source, /presentedPayload\.windowLimit/);
+});
+
+test("dispatcher session pane dialogs expose sr-only descriptions", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /<Dialog\.Description className="sr-only">\s*Review and adjust the dispatcher runtime and default task handoff preferences for this conversation\.\s*<\/Dialog\.Description>/);
+  assert.match(source, /<Dialog\.Description className="sr-only">\s*Search project context files and select workspace attachments to add to the next dispatcher message\.\s*<\/Dialog\.Description>/);
 });
