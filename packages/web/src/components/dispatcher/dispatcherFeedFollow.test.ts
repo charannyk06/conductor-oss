@@ -83,6 +83,58 @@ test("momentum reaching bottom after the gesture deadline restores follow-latest
   assert.deepEqual(next, resetDispatcherFeedFollowState());
 });
 
+test("unchanged reference-equal rows skip serialization and are not counted as changes", () => {
+  const sharedEntry = makeEntry("assistant-1", "hello", true);
+  const originalStringify = JSON.stringify;
+  let stringifyCalls = 0;
+
+  JSON.stringify = ((...args: Parameters<typeof JSON.stringify>) => {
+    stringifyCalls += 1;
+    return originalStringify(...args);
+  }) as typeof JSON.stringify;
+
+  try {
+    const changedEntryIds = collectDispatcherChangedFeedEntryIds([sharedEntry], [sharedEntry]);
+    assert.deepEqual(changedEntryIds, []);
+    assert.equal(stringifyCalls, 0);
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+});
+
+test("new rows are detected as changed entries", () => {
+  const existingEntry = makeEntry("assistant-1", "hello", true);
+  const changedEntryIds = collectDispatcherChangedFeedEntryIds(
+    [existingEntry],
+    [existingEntry, makeEntry("assistant-2", "world")],
+  );
+
+  assert.deepEqual(changedEntryIds, ["assistant-2"]);
+});
+
+test("replacement rows with semantic changes are detected", () => {
+  const previousEntries = [makeEntry("assistant-1", "hello", true)];
+  const changedEntryIds = collectDispatcherChangedFeedEntryIds(previousEntries, [
+    {
+      ...previousEntries[0],
+      text: "hello world",
+    },
+  ]);
+
+  assert.deepEqual(changedEntryIds, ["assistant-1"]);
+});
+
+test("replacement rows with identical semantics are not counted as changes", () => {
+  const previousEntries = [makeEntry("assistant-1", "hello", true)];
+  const changedEntryIds = collectDispatcherChangedFeedEntryIds(previousEntries, [
+    {
+      ...previousEntries[0],
+    },
+  ]);
+
+  assert.deepEqual(changedEntryIds, []);
+});
+
 test("patch-only updates count each changed row once while follow-latest is disabled", () => {
   const previousEntries = [makeEntry("assistant-1", "hello", true)];
   const patchedEntries = [makeEntry("assistant-1", "hello world", true)];

@@ -79,15 +79,26 @@ export function collectDispatcherChangedFeedEntryIds(
     return [];
   }
 
-  const previousById = new Map<string, string>();
+  const previousById = new Map<string, SessionFeedEntry>();
   for (const entry of previousEntries) {
-    previousById.set(entry.id, buildDispatcherFeedEntrySignature(entry));
+    previousById.set(entry.id, entry);
   }
 
   const changedEntryIds: string[] = [];
   for (const entry of nextEntries) {
+    const previousEntry = previousById.get(entry.id);
+    if (!previousEntry) {
+      changedEntryIds.push(entry.id);
+      continue;
+    }
+
+    if (previousEntry === entry) {
+      continue;
+    }
+
+    const previousSignature = buildDispatcherFeedEntrySignature(previousEntry);
     const nextSignature = buildDispatcherFeedEntrySignature(entry);
-    if (previousById.get(entry.id) !== nextSignature) {
+    if (previousSignature !== nextSignature) {
       changedEntryIds.push(entry.id);
     }
   }
