@@ -128,6 +128,44 @@ test("dispatcher session pane keeps loadFeed last-request-wins and renders banne
   assert.match(source, /presentedPayload\.windowLimit/);
 });
 
+test("dispatcher session pane restores follow-latest on thread changes and new sends", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /const \[feedFollowState, setFeedFollowState\] = useState<DispatcherFeedFollowState>/);
+  assert.match(source, /const restoreFeedFollowState = useCallback\(\(\) => \{/);
+  assert.match(source, /restoreFeedFollowState\(\);\s*lastFeedScrollTopRef\.current = 0;\s*ignoredFeedScrollEventsRef\.current = 0;\s*recentFeedGestureIntentDeadlineRef\.current = 0;/);
+  assert.match(source, /const nextPendingUserEntry = \{/);
+  assert.match(source, /restoreFeedFollowState\(\);\s*pendingUserEntryRef\.current = nextPendingUserEntry;/);
+});
+
+test("dispatcher session pane distinguishes user scroll intent from programmatic follow-to-bottom work", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /ref=\{feedRef\}\s+role="region"\s+aria-label="Dispatcher conversation"\s+tabIndex=\{0\}/);
+  assert.match(source, /ignoredFeedScrollEventsRef\.current \+= 1;/);
+  assert.match(source, /const markFeedGestureIntent = useCallback\(\(\) => \{/);
+  assert.match(source, /createDispatcherFeedGestureIntentDeadline\(performance\.now\(\)\)/);
+  assert.match(source, /reduceDispatcherFeedFollowOnScroll\(current, \{/);
+  assert.match(source, /isUserInitiated: false/);
+  assert.match(source, /hasDispatcherFeedGestureIntent\(recentFeedGestureIntentDeadlineRef\.current, now\)/);
+  assert.match(source, /onWheelCapture=\{markFeedGestureIntent\}/);
+  assert.match(source, /onTouchStartCapture=\{markFeedGestureIntent\}/);
+  assert.match(source, /onTouchMoveCapture=\{markFeedGestureIntent\}/);
+  assert.match(source, /onPointerDownCapture=\{markFeedGestureIntent\}/);
+  assert.match(source, /onKeyDownCapture=\{handleFeedKeyDownCapture\}/);
+  assert.match(source, /visualViewport\.addEventListener\("resize", handleViewportChange\)/);
+  assert.match(source, /visualViewport\.addEventListener\("scroll", handleViewportChange\)/);
+  assert.match(source, /onFocus=\{\(\) => \{\s*if \(!feedFollowStateRef\.current\.followLatest\)/);
+});
+
+test("dispatcher session pane keeps an accessible live working indicator at the bottom while active", () => {
+  const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /role="status"/);
+  assert.match(source, /aria-live="polite"/);
+  assert.match(source, /Dispatcher is working…/);
+});
+
 test("dispatcher session pane dialogs expose sr-only descriptions", () => {
   const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
 

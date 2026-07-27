@@ -57,6 +57,37 @@ test("shouldShowDispatcherWorkingEntry fills the dead interval after the latest 
       [...entries, makeEntry({ id: "assistant-1", kind: "assistant", text: "On it", streaming: true })],
       "working",
     ),
+    true,
+  );
+  assert.equal(
+    shouldShowDispatcherWorkingEntry(
+      [...entries, makeEntry({
+        id: "tool-1",
+        kind: "tool",
+        text: "Bash",
+        metadata: { toolStatus: "completed" },
+      })],
+      "running",
+    ),
+    true,
+  );
+});
+
+test("shouldShowDispatcherWorkingEntry disappears once the session becomes idle or terminal", () => {
+  const entries = [
+    makeEntry({ id: "user-1", kind: "user", text: "Ship it", source: "chat" }),
+    makeEntry({ id: "assistant-1", kind: "assistant", text: "Done", source: "runtime" }),
+  ];
+
+  assert.equal(shouldShowDispatcherWorkingEntry(entries, "idle"), false);
+  assert.equal(shouldShowDispatcherWorkingEntry(entries, "completed"), false);
+  assert.equal(shouldShowDispatcherWorkingEntry(entries, "failed"), false);
+  assert.equal(shouldShowDispatcherWorkingEntry([], "working"), false);
+  assert.equal(
+    shouldShowDispatcherWorkingEntry(
+      [makeEntry({ id: "assistant-only", kind: "assistant", text: "No prompt yet" })],
+      "working",
+    ),
     false,
   );
 });

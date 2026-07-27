@@ -1,10 +1,11 @@
 import {
   KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_MAX_BOTTOM_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_SHEET_CLASS_NAME,
 } from "@/components/layout/keyboardSafeViewport";
 
 export const DISPATCHER_CHAT_FRAME_CLASS_NAME =
-  "min-h-0 flex-1 h-full max-h-[var(--oc-visual-viewport-height,100dvh)] sm:h-full";
+  `min-h-0 flex-1 h-full ${KEYBOARD_SAFE_VIEWPORT_MAX_BOTTOM_CLASS_NAME} sm:h-full`;
 
 export const DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME =
   "min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch]";
