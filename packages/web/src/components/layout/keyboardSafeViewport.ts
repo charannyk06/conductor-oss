@@ -9,6 +9,8 @@ export const KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VALUE = "var(--oc-visu
 // Keep these as complete string literals so Tailwind can detect every arbitrary-value class.
 export const KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME =
   "inset-x-0 top-[var(--oc-visual-viewport-offset-top,0px)] h-[var(--oc-visual-viewport-height,100dvh)]";
+export const KEYBOARD_SAFE_VIEWPORT_MAX_BOTTOM_CLASS_NAME =
+  "max-h-[var(--oc-safe-viewport-height,100dvh)]";
 export const KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME =
   "h-[var(--oc-visual-viewport-height,100dvh)]";
 export const KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME =

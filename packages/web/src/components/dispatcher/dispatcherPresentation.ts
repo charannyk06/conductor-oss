@@ -196,35 +196,12 @@ export function findLastUserEntryIndex(entries: readonly SessionFeedEntry[]): nu
   return -1;
 }
 
-export function hasRuntimeActivityAfterLatestUser(entries: readonly SessionFeedEntry[]): boolean {
-  const lastUserIndex = findLastUserEntryIndex(entries);
-  if (lastUserIndex < 0) {
-    return false;
-  }
-
-  for (let index = lastUserIndex + 1; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (!entry || entry.kind === "user") {
-      continue;
-    }
-    if (entry.kind === "assistant" || entry.kind === "tool" || entry.kind === "system") {
-      return true;
-    }
-    if (entry.kind === "status" && (entry.text.trim().length > 0 || entry.streaming)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 export function shouldShowDispatcherWorkingEntry(
   entries: readonly SessionFeedEntry[],
   sessionStatus: string | null | undefined,
 ): boolean {
   return isDispatcherActiveStatus(sessionStatus)
-    && findLastUserEntryIndex(entries) >= 0
-    && !hasRuntimeActivityAfterLatestUser(entries);
+    && findLastUserEntryIndex(entries) >= 0;
 }
 
 function getAbsoluteFeedIndex(feed: Pick<SessionFeedPayload, "entries" | "totalEntries">, index: number): number {

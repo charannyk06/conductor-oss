@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -63,6 +63,15 @@ import {
   shouldShowDispatcherWorkingEntry,
   type PendingDispatcherUserEntry,
 } from "@/components/dispatcher/dispatcherPresentation";
+import {
+  applyDispatcherFeedEntryUpdates,
+  collectDispatcherChangedFeedEntryIds,
+  createDispatcherFeedGestureIntentDeadline,
+  hasDispatcherFeedGestureIntent,
+  reduceDispatcherFeedFollowOnScroll,
+  resetDispatcherFeedFollowState,
+  type DispatcherFeedFollowState,
+} from "@/components/dispatcher/dispatcherFeedFollow";
 import { Button } from "@/components/ui/Button";
 import { RunningDots } from "@/components/ui/RunningDots";
 import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
@@ -1055,6 +1064,16 @@ const DISPATCHER_APPROVAL_READY_PROMPT_MARKERS = [
   "ask for explicit approval",
   "explicit approval",
 ];
+const DISPATCHER_FEED_SCROLL_NAVIGATION_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+  " ",
+  "Spacebar",
+]);
 
 function looksLikeDispatcherApprovalProposal(text: string): boolean {
   const normalized = text.trim().toLowerCase();
@@ -1143,6 +1162,9 @@ export function DispatcherSessionPane({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingUserEntry, setPendingUserEntry] = useState<PendingDispatcherUserEntry | null>(null);
   const [localSessionStatus, setLocalSessionStatus] = useState<string | null>(null);
+  const [feedFollowState, setFeedFollowState] = useState<DispatcherFeedFollowState>(() =>
+    resetDispatcherFeedFollowState(),
+  );
 
   const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const dispatcherSessionAgent = useMemo(
@@ -1193,11 +1215,12 @@ export function DispatcherSessionPane({
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
-  const autoScrollEnabledRef = useRef(true);
-  const previousEntryIdsRef = useRef<string[]>([]);
+  const previousVisibleEntriesRef = useRef<SessionFeedEntry[]>([]);
   const [pageVisible, setPageVisible] = useState(true);
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const [newEntryCount, setNewEntryCount] = useState(0);
+  const feedFollowStateRef = useRef<DispatcherFeedFollowState>(resetDispatcherFeedFollowState());
+  const lastFeedScrollTopRef = useRef(0);
+  const ignoredFeedScrollEventsRef = useRef(0);
+  const recentFeedGestureIntentDeadlineRef = useRef(0);
   const payloadRef = useRef(payload);
   const pendingUserEntryRef = useRef<PendingDispatcherUserEntry | null>(pendingUserEntry);
   const shouldRunLiveUpdates = active && pageVisible;
@@ -1223,6 +1246,60 @@ export function DispatcherSessionPane({
   useEffect(() => {
     pendingUserEntryRef.current = pendingUserEntry;
   }, [pendingUserEntry]);
+
+  const updateFeedFollowState = useCallback((
+    updater: DispatcherFeedFollowState | ((current: DispatcherFeedFollowState) => DispatcherFeedFollowState),
+  ) => {
+    setFeedFollowState((current) => {
+      const next = typeof updater === "function"
+        ? updater(current)
+        : updater;
+      feedFollowStateRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const restoreFeedFollowState = useCallback(() => {
+    const nextState = resetDispatcherFeedFollowState();
+    feedFollowStateRef.current = nextState;
+    setFeedFollowState(nextState);
+  }, []);
+
+  const markFeedGestureIntent = useCallback(() => {
+    recentFeedGestureIntentDeadlineRef.current = createDispatcherFeedGestureIntentDeadline(performance.now());
+  }, []);
+
+  const scrollFeedToLatest = useCallback((behavior?: ScrollBehavior) => {
+    const node = feedRef.current;
+    if (!node) {
+      return;
+    }
+
+    const previousScrollTop = lastFeedScrollTopRef.current;
+    ignoredFeedScrollEventsRef.current += 1;
+    if (behavior) {
+      node.scrollTo({ top: node.scrollHeight, behavior });
+    } else {
+      node.scrollTo({ top: node.scrollHeight });
+    }
+
+    window.requestAnimationFrame(() => {
+      const nextNode = feedRef.current;
+      if (!nextNode) {
+        ignoredFeedScrollEventsRef.current = Math.max(0, ignoredFeedScrollEventsRef.current - 1);
+        return;
+      }
+
+      updateFeedFollowState((current) => reduceDispatcherFeedFollowOnScroll(current, {
+        nearBottom: isDispatcherFeedNearBottom(nextNode),
+        previousScrollTop,
+        scrollTop: nextNode.scrollTop,
+        isUserInitiated: false,
+      }));
+      lastFeedScrollTopRef.current = nextNode.scrollTop;
+      ignoredFeedScrollEventsRef.current = Math.max(0, ignoredFeedScrollEventsRef.current - 1);
+    });
+  }, [updateFeedFollowState]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -1251,9 +1328,11 @@ export function DispatcherSessionPane({
     deltaPatchCountRef.current = 0;
     deltaReplaceCountRef.current = 0;
     liveUpdatePauseCountRef.current = 0;
-    previousEntryIdsRef.current = [];
-    setShowJumpToLatest(false);
-    setNewEntryCount(0);
+    previousVisibleEntriesRef.current = [];
+    restoreFeedFollowState();
+    lastFeedScrollTopRef.current = 0;
+    ignoredFeedScrollEventsRef.current = 0;
+    recentFeedGestureIntentDeadlineRef.current = 0;
     setDraftAttachmentPaths([]);
     setPendingUserEntry(null);
     setLocalSessionStatus(null);
@@ -1261,7 +1340,7 @@ export function DispatcherSessionPane({
     setSettingsOpen(false);
     setContextPickerOpen(false);
     setContextSearch("");
-  }, [session.id]);
+  }, [restoreFeedFollowState, session.id]);
 
   const sessionApiPaths = useMemo(() => ({
     feed: apiPaths.feed,
@@ -1733,34 +1812,16 @@ export function DispatcherSessionPane({
   }, [active, loading, loadingError, pageVisible, payload.entries.length, session.id, shouldRunLiveUpdates]);
 
   useEffect(() => {
-    autoScrollEnabledRef.current = true;
-  }, [session.id]);
-
-  useEffect(() => {
-    const nextIds = visibleEntries.map((entry) => entry.id);
-    const previousIds = previousEntryIdsRef.current;
-
-    if (previousIds.length > 0) {
-      const previousIdSet = new Set(previousIds);
-      let appendedCount = 0;
-      for (const id of nextIds) {
-        if (!previousIdSet.has(id)) {
-          appendedCount += 1;
-        }
-      }
-
-      if (appendedCount > 0) {
-        if (autoScrollEnabledRef.current) {
-          setNewEntryCount(0);
-        } else {
-          setNewEntryCount((current) => current + appendedCount);
-          setShowJumpToLatest(true);
-        }
+    const previousEntries = previousVisibleEntriesRef.current;
+    if (previousEntries.length > 0) {
+      const changedEntryIds = collectDispatcherChangedFeedEntryIds(previousEntries, visibleEntries);
+      if (changedEntryIds.length > 0) {
+        updateFeedFollowState((current) => applyDispatcherFeedEntryUpdates(current, changedEntryIds));
       }
     }
 
-    previousEntryIdsRef.current = nextIds;
-  }, [session.id, visibleEntries]);
+    previousVisibleEntriesRef.current = visibleEntries;
+  }, [session.id, updateFeedFollowState, visibleEntries]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -1768,26 +1829,19 @@ export function DispatcherSessionPane({
       return;
     }
 
-    if (!autoScrollEnabledRef.current) {
-      if (visibleEntries.length > 0 || showWorkingRow) {
-        setShowJumpToLatest(true);
-      }
+    if (!feedFollowStateRef.current.followLatest) {
       return;
     }
 
     const frame = window.requestAnimationFrame(() => {
-      const nextNode = feedRef.current;
-      if (!nextNode || !autoScrollEnabledRef.current) {
+      if (!feedFollowStateRef.current.followLatest) {
         return;
       }
-      nextNode.scrollTo({ top: nextNode.scrollHeight });
-      autoScrollEnabledRef.current = isDispatcherFeedNearBottom(nextNode);
-      setShowJumpToLatest(false);
-      setNewEntryCount(0);
+      scrollFeedToLatest();
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [payload, showWorkingRow, visibleEntries.length]);
+  }, [payload, scrollFeedToLatest, showWorkingRow, visibleEntries.length]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -1797,24 +1851,66 @@ export function DispatcherSessionPane({
     }
 
     const observer = new ResizeObserver(() => {
-      if (!autoScrollEnabledRef.current) {
+      if (!feedFollowStateRef.current.followLatest) {
         return;
       }
-      node.scrollTo({ top: node.scrollHeight });
-      autoScrollEnabledRef.current = isDispatcherFeedNearBottom(node);
+      scrollFeedToLatest();
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [loading, loadingError, session.id, showWorkingRow, visibleEntries.length]);
+  }, [loading, loadingError, scrollFeedToLatest, session.id, showWorkingRow, visibleEntries.length]);
 
   const handleFeedScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    const nearBottom = isDispatcherFeedNearBottom(event.currentTarget);
-    autoScrollEnabledRef.current = nearBottom;
-    setShowJumpToLatest(!nearBottom);
-    if (nearBottom) {
-      setNewEntryCount(0);
+    const previousScrollTop = lastFeedScrollTopRef.current;
+    const nextNode = event.currentTarget;
+    lastFeedScrollTopRef.current = nextNode.scrollTop;
+    if (ignoredFeedScrollEventsRef.current > 0) {
+      return;
     }
-  }, []);
+    const now = performance.now();
+    updateFeedFollowState((current) => reduceDispatcherFeedFollowOnScroll(current, {
+      nearBottom: isDispatcherFeedNearBottom(nextNode),
+      previousScrollTop,
+      scrollTop: nextNode.scrollTop,
+      isUserInitiated: hasDispatcherFeedGestureIntent(recentFeedGestureIntentDeadlineRef.current, now),
+    }));
+  }, [updateFeedFollowState]);
+
+  const handleFeedPointerMoveCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.buttons > 0) {
+      markFeedGestureIntent();
+    }
+  }, [markFeedGestureIntent]);
+
+  const handleFeedKeyDownCapture = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+    if (DISPATCHER_FEED_SCROLL_NAVIGATION_KEYS.has(event.key)) {
+      markFeedGestureIntent();
+    }
+  }, [markFeedGestureIntent]);
+
+  useEffect(() => {
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) {
+      return;
+    }
+
+    const handleViewportChange = () => {
+      if (!feedFollowStateRef.current.followLatest) {
+        return;
+      }
+      scrollFeedToLatest();
+    };
+
+    visualViewport.addEventListener("resize", handleViewportChange);
+    visualViewport.addEventListener("scroll", handleViewportChange);
+    return () => {
+      visualViewport.removeEventListener("resize", handleViewportChange);
+      visualViewport.removeEventListener("scroll", handleViewportChange);
+    };
+  }, [scrollFeedToLatest, session.id]);
 
   useEffect(() => {
     if (!composerInsert) {
@@ -1890,6 +1986,7 @@ export function DispatcherSessionPane({
         feedBaselineTotalEntries,
         feedBaselineLastEntryId,
       };
+      restoreFeedFollowState();
       pendingUserEntryRef.current = nextPendingUserEntry;
       setPendingUserEntry(nextPendingUserEntry);
       setLocalSessionStatus("working");
@@ -1905,7 +2002,7 @@ export function DispatcherSessionPane({
     } finally {
       setSending(false);
     }
-  }, [bridgeId, loadFeed, payload.entries, payload.totalEntries, sending, sessionApiPaths.send]);
+  }, [bridgeId, loadFeed, payload.entries, payload.totalEntries, restoreFeedFollowState, sending, sessionApiPaths.send]);
 
   const handleSend = useCallback(async () => {
     if (!canSendCurrentDraft) {
@@ -2088,7 +2185,16 @@ export function DispatcherSessionPane({
 
         <div
           ref={feedRef}
+          role="region"
+          aria-label="Dispatcher conversation"
+          tabIndex={0}
           onScroll={handleFeedScroll}
+          onWheelCapture={markFeedGestureIntent}
+          onTouchStartCapture={markFeedGestureIntent}
+          onTouchMoveCapture={markFeedGestureIntent}
+          onPointerDownCapture={markFeedGestureIntent}
+          onPointerMoveCapture={handleFeedPointerMoveCapture}
+          onKeyDownCapture={handleFeedKeyDownCapture}
           className={cn(DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME, "px-3 py-4 sm:px-4")}
         >
           {loading ? (
@@ -2254,7 +2360,11 @@ export function DispatcherSessionPane({
                     />
                   ))}
                   {showWorkingRow ? (
-                    <div className="flex items-center gap-2 rounded-[14px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-[13px] text-[var(--vk-text-muted)]">
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="flex items-center gap-2 rounded-[14px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-[13px] text-[var(--vk-text-muted)]"
+                    >
                       <RunningDots />
                       <span>Dispatcher is working…</span>
                     </div>
@@ -2309,23 +2419,19 @@ export function DispatcherSessionPane({
             </div>
           ) : null}
 
-          {showJumpToLatest ? (
+          {feedFollowState.showJumpToLatest ? (
             <div className="mb-2 flex justify-end">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  const node = feedRef.current;
-                  if (!node) return;
-                  node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-                  autoScrollEnabledRef.current = true;
-                  setShowJumpToLatest(false);
-                  setNewEntryCount(0);
+                  restoreFeedFollowState();
+                  scrollFeedToLatest("smooth");
                 }}
                 className="h-[30px] rounded-[999px] border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px]"
               >
-                Jump to latest{newEntryCount > 0 ? ` · ${newEntryCount} new` : ""}
+                Jump to latest{feedFollowState.unseenCount > 0 ? ` · ${feedFollowState.unseenCount} new` : ""}
               </Button>
             </div>
           ) : null}
@@ -2445,6 +2551,12 @@ export function DispatcherSessionPane({
                   value={composerValue}
                   onChange={(event) => setComposerValue(event.target.value)}
                   onKeyDown={handleComposerKeyDown}
+                  onFocus={() => {
+                    if (!feedFollowStateRef.current.followLatest) {
+                      return;
+                    }
+                    scrollFeedToLatest();
+                  }}
                   placeholder={
                     !isActiveInstalled
                       ? `Please install ${formatAgentName(activeAgentName)} or switch agents to send messages...`

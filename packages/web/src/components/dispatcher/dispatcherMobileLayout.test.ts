@@ -12,7 +12,7 @@ import {
 } from "./dispatcherMobileLayout";
 
 test("dispatcher chat frame uses the shared visual viewport contract", () => {
-  assert.match(DISPATCHER_CHAT_FRAME_CLASS_NAME, /oc-visual-viewport-height/);
+  assert.match(DISPATCHER_CHAT_FRAME_CLASS_NAME, /oc-safe-viewport-height/);
   assert.match(DISPATCHER_CHAT_FRAME_CLASS_NAME, /sm:h-full/);
 });
 
@@ -30,11 +30,13 @@ test("dispatcher surfaces reuse the app sheet and dialog keyboard-safe helpers",
 
 test("dispatcher session pane uses the shared mobile feed and surface classes", () => {
   const source = readFileSync(new URL("./DispatcherSessionPane.tsx", import.meta.url), "utf8");
+  const layoutSource = readFileSync(new URL("./dispatcherMobileLayout.ts", import.meta.url), "utf8");
 
   assert.match(source, /DISPATCHER_CHAT_FRAME_CLASS_NAME/);
   assert.match(source, /DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME/);
   assert.match(source, /DISPATCHER_SURFACE_CONTENT_CLASS_NAME/);
   assert.match(source, /DISPATCHER_SURFACE_OVERLAY_CLASS_NAME/);
+  assert.match(layoutSource, /KEYBOARD_SAFE_VIEWPORT_MAX_BOTTOM_CLASS_NAME/);
 });
 
 test("dispatcher session header offsets the mobile workspace toggle and resets to desktop spacing", () => {
