@@ -489,7 +489,7 @@ fn parse_output_handles_representative_agent_formats() {
     };
     assert!(matches!(
         qwen_events.first(),
-        Some(ExecutorOutput::Stdout(text)) if text == "Qwen delta"
+        Some(ExecutorOutput::AssistantDelta(text)) if text == "Qwen delta"
     ));
 
     let letta = LettaExecutor::new(PathBuf::from("/usr/bin/letta")).parse_output("Letta line");

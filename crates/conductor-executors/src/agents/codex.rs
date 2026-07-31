@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use conductor_core::types::AgentKind;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -13,6 +14,8 @@ use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutp
 use crate::process::{
     spawn_process, spawn_process_no_stdin_with_clean_env, spawn_process_with_env_removals,
 };
+
+mod app_server;
 
 /// OpenAI Codex CLI executor.
 #[derive(Clone)]
@@ -390,6 +393,28 @@ impl CodexExecutor {
     }
 }
 
+async fn codex_app_server_or_legacy<T, F, Fut>(
+    binary: &Path,
+    app_server_result: Result<T>,
+    spawn_legacy: F,
+) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    match app_server_result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            tracing::warn!(
+                binary = %binary.display(),
+                error = %error,
+                "Codex app-server failed before the turn started; falling back to legacy codex exec --json"
+            );
+            spawn_legacy().await
+        }
+    }
+}
+
 #[async_trait]
 impl Executor for CodexExecutor {
     fn kind(&self) -> AgentKind {
@@ -418,7 +443,6 @@ impl Executor for CodexExecutor {
     }
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
-        let args = self.build_args(&options);
         let mut env = build_codex_spawn_env(&options.env);
         let headless_home = if options.structured_output {
             let headless_home = prepare_headless_codex_home()?;
@@ -429,6 +453,77 @@ impl Executor for CodexExecutor {
         } else {
             None
         };
+
+        // `codex exec --json` only reports completed assistant messages on
+        // current Codex releases. Prefer app-server for structured dispatcher
+        // turns so the runtime receives true assistant token deltas and stable
+        // tool lifecycle IDs. Older Codex binaries keep the legacy path below.
+        if options.structured_output && app_server::is_supported(&self.binary).await {
+            let app_server_home = headless_home.clone();
+            let legacy_home = headless_home.clone();
+            return codex_app_server_or_legacy(
+                &self.binary,
+                app_server::spawn(&self.binary, options.clone(), env.clone())
+                    .await
+                    .map(|handle| {
+                        let (pid, kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
+                            handle.into_parts();
+                        let output_rx =
+                            wrap_codex_output_with_home_cleanup(app_server_home, output_rx);
+                        ExecutorHandle::new(pid, kind, output_rx, input_tx, kill_tx)
+                            .with_terminal_io(terminal_rx, resize_tx)
+                    }),
+                || async {
+                    let args = self.build_args(&options);
+                    let needs_stdin =
+                        options.structured_output && args.iter().any(|arg| arg == "-");
+                    let spawn_result = if options.structured_output && !needs_stdin {
+                        spawn_process_no_stdin_with_clean_env(
+                            &self.binary,
+                            &args,
+                            &options.cwd,
+                            &env,
+                        )
+                        .await
+                    } else if options.structured_output {
+                        let env_remove = codex_clean_env_removals(&env);
+                        spawn_process_with_env_removals(
+                            &self.binary,
+                            &args,
+                            &options.cwd,
+                            &env,
+                            &env_remove,
+                        )
+                        .await
+                    } else {
+                        spawn_process(&self.binary, &args, &options.cwd, &env).await
+                    };
+                    let handle = match spawn_result {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            if let Some(headless_home) = legacy_home.clone() {
+                                let _ = tokio::fs::remove_dir_all(headless_home).await;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
+                    let output_rx = wrap_codex_output_with_home_cleanup(legacy_home, output_rx);
+
+                    Ok(ExecutorHandle::new(
+                        handle.pid,
+                        self.kind(),
+                        output_rx,
+                        handle.input_tx,
+                        handle.kill_tx,
+                    )
+                    .with_terminal_io(handle.terminal_rx, handle.resize_tx))
+                },
+            )
+            .await;
+        }
+
+        let args = self.build_args(&options);
         let needs_stdin = options.structured_output && args.iter().any(|arg| arg == "-");
         let spawn_result = if options.structured_output && !needs_stdin {
             spawn_process_no_stdin_with_clean_env(&self.binary, &args, &options.cwd, &env).await
@@ -571,8 +666,8 @@ impl Executor for CodexExecutor {
                         return ExecutorOutput::Stdout(String::new());
                     }
                     "agent_message_delta" => {
-                        if let Some(text) = extract_text(&value) {
-                            return ExecutorOutput::Stdout(text);
+                        if let Some(text) = extract_text_delta(&value) {
+                            return ExecutorOutput::AssistantDelta(text);
                         }
                         return ExecutorOutput::Stdout(String::new());
                     }
@@ -604,48 +699,16 @@ impl Executor for CodexExecutor {
                     }
                     "item.started" => {
                         if let Some(item) = value.get("item") {
-                            match item.get("type").and_then(|v| v.as_str()) {
-                                Some("command_execution") => {
-                                    if let Some(command) = item
-                                        .get("command")
-                                        .and_then(|v| v.as_str())
-                                        .map(str::trim)
-                                        .filter(|v| !v.is_empty())
-                                    {
-                                        return ExecutorOutput::StructuredStatus {
-                                            text: "Command".to_string(),
-                                            metadata: tool_metadata(
-                                                "command",
-                                                "Command",
-                                                "running",
-                                                vec![command.to_string()],
-                                            ),
-                                        };
-                                    }
-                                }
-                                Some("reasoning") => {
-                                    return ExecutorOutput::StructuredStatus {
-                                        text: "Thinking".to_string(),
-                                        metadata: tool_metadata(
-                                            "thinking",
-                                            "Thinking",
-                                            "running",
-                                            Vec::new(),
-                                        ),
-                                    };
-                                }
-                                Some("mcp_tool_call") => {
-                                    return ExecutorOutput::StructuredStatus {
-                                        text: tool_title_from_item(item),
-                                        metadata: tool_metadata(
-                                            &tool_kind_from_item(item),
-                                            &tool_title_from_item(item),
-                                            "running",
-                                            tool_content_from_item(item),
-                                        ),
-                                    };
-                                }
-                                _ => {}
+                            if let Some(event) = item_status_event(item, "running") {
+                                return event;
+                            }
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "item.updated" => {
+                        if let Some(item) = value.get("item") {
+                            if let Some(event) = item_status_event(item, "running") {
+                                return event;
                             }
                         }
                         return ExecutorOutput::Stdout(String::new());
@@ -658,14 +721,11 @@ impl Executor for CodexExecutor {
                                         return ExecutorOutput::Stdout(text);
                                     }
                                 }
-                                Some("reasoning") => return ExecutorOutput::Stdout(String::new()),
-                                Some("command_execution") => {
-                                    return ExecutorOutput::Stdout(String::new())
+                                _ => {
+                                    if let Some(event) = item_status_event(item, "success") {
+                                        return event;
+                                    }
                                 }
-                                Some("mcp_tool_call") => {
-                                    return ExecutorOutput::Stdout(String::new())
-                                }
-                                _ => {}
                             }
                         }
                         return ExecutorOutput::Stdout(String::new());
@@ -833,7 +893,89 @@ fn tool_content_from_item(item: &Value) -> Vec<String> {
             }
         }
     }
+    for key in ["aggregated_output", "output", "result", "error"] {
+        if let Some(summary) = item.get(key).and_then(compact_value) {
+            content.push(summary);
+        }
+    }
     content
+}
+
+fn compact_value(value: &Value) -> Option<String> {
+    let raw = value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| serde_json::to_string(value).ok())?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" || trimmed == "[]" {
+        return None;
+    }
+    const MAX_CHARS: usize = 4_000;
+    if trimmed.chars().count() <= MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let mut clipped = trimmed.chars().take(MAX_CHARS).collect::<String>();
+    clipped.push('…');
+    Some(clipped)
+}
+
+fn item_tool_call_id(item: &Value) -> Option<&str> {
+    ["id", "tool_call_id", "call_id"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn resolved_item_status(item: &Value, default_status: &str) -> &'static str {
+    if item
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .is_some_and(|exit_code| exit_code != 0)
+        || item.get("error").is_some_and(|error| !error.is_null())
+    {
+        return "error";
+    }
+
+    match item
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("failed" | "error" | "cancelled" | "canceled") => "error",
+        Some("completed" | "success" | "succeeded") => "success",
+        _ if default_status == "success" => "success",
+        _ => "running",
+    }
+}
+
+fn item_status_event(item: &Value, default_status: &str) -> Option<ExecutorOutput> {
+    let (kind, title) = match item.get("type").and_then(Value::as_str) {
+        Some("command_execution") => ("command".to_string(), "Command".to_string()),
+        Some("reasoning") => ("thinking".to_string(), "Thinking".to_string()),
+        Some("mcp_tool_call") => (tool_kind_from_item(item), tool_title_from_item(item)),
+        _ => return None,
+    };
+    let status = resolved_item_status(item, default_status);
+    let mut content = tool_content_from_item(item);
+    if kind == "thinking" {
+        if let Some(detail) = extract_text(item) {
+            content.push(detail);
+        }
+    }
+    let mut metadata = tool_metadata(&kind, &title, status, content);
+    if let Some(tool_call_id) = item_tool_call_id(item) {
+        metadata.insert(
+            "toolCallId".to_string(),
+            Value::String(tool_call_id.to_string()),
+        );
+    }
+    Some(ExecutorOutput::StructuredStatus {
+        text: title,
+        metadata,
+    })
 }
 
 fn tool_metadata(
@@ -893,6 +1035,38 @@ fn extract_text(value: &Value) -> Option<String> {
     } else {
         Some(text)
     }
+}
+
+fn extract_text_delta(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+
+    if let Some(message) = value.get("message") {
+        if let Some(text) = extract_text_delta(message) {
+            return Some(text);
+        }
+    }
+    if let Some(item) = value.get("item") {
+        if let Some(text) = extract_text_delta(item) {
+            return Some(text);
+        }
+    }
+
+    if let Some(content) = value.get("content") {
+        if let Some(text) = content.as_str() {
+            return (!text.is_empty()).then(|| text.to_string());
+        }
+        if let Some(parts) = content.as_array() {
+            let text = parts
+                .iter()
+                .filter_map(extract_text_delta)
+                .collect::<String>();
+            return (!text.is_empty()).then_some(text);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1070,7 +1244,7 @@ mod tests {
     #[test]
     fn parse_started_mcp_tool_call_emits_structured_status() {
         let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
-        let line = r#"{"type":"item.started","item":{"type":"mcp_tool_call","tool":"read_text_file","server":"filesystem","arguments":{"path":"/tmp/demo.txt"}}}"#;
+        let line = r#"{"type":"item.started","item":{"id":"call-1","type":"mcp_tool_call","tool":"read_text_file","server":"filesystem","arguments":{"path":"/tmp/demo.txt"}}}"#;
 
         let output = executor.parse_output(line);
         let ExecutorOutput::StructuredStatus { text, metadata } = output else {
@@ -1081,6 +1255,46 @@ mod tests {
             metadata.get("toolKind").and_then(Value::as_str),
             Some("read_text_file")
         );
+        assert_eq!(
+            metadata.get("toolCallId").and_then(Value::as_str),
+            Some("call-1")
+        );
+    }
+
+    #[test]
+    fn parse_completed_command_emits_correlated_success() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let line = r#"{"type":"item.completed","item":{"id":"cmd-1","type":"command_execution","command":"pwd","aggregated_output":"/tmp/demo\n","exit_code":0,"status":"completed"}}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::StructuredStatus { text, metadata } = output else {
+            panic!("expected structured command completion");
+        };
+        assert_eq!(text, "Command");
+        assert_eq!(
+            metadata.get("toolCallId").and_then(Value::as_str),
+            Some("cmd-1")
+        );
+        assert_eq!(
+            metadata.get("toolStatus").and_then(Value::as_str),
+            Some("success")
+        );
+        assert!(metadata
+            .get("toolContent")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item == "/tmp/demo")));
+    }
+
+    #[test]
+    fn parse_agent_message_delta_preserves_boundary_whitespace() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let output =
+            executor.parse_output(r#"{"type":"agent_message_delta","item":{"text":" world\n"}}"#);
+
+        let ExecutorOutput::AssistantDelta(text) = output else {
+            panic!("expected assistant delta");
+        };
+        assert_eq!(text, " world\n");
     }
 
     #[test]
@@ -1250,6 +1464,32 @@ mod tests {
             panic!("expected stdout suppression");
         };
         assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_server_handshake_failure_falls_back_to_legacy_result() {
+        let result = codex_app_server_or_legacy(
+            Path::new("/tmp/fake-codex"),
+            Err(anyhow::anyhow!("pre-turn handshake failed")),
+            || async { Ok::<_, anyhow::Error>("legacy".to_string()) },
+        )
+        .await
+        .expect("legacy result should be returned");
+
+        assert_eq!(result, "legacy");
+    }
+
+    #[tokio::test]
+    async fn app_server_success_skips_legacy_fallback() {
+        let result = codex_app_server_or_legacy(
+            Path::new("/tmp/fake-codex"),
+            Ok::<_, anyhow::Error>("app-server".to_string()),
+            || async { Ok::<_, anyhow::Error>("legacy".to_string()) },
+        )
+        .await
+        .expect("app-server result should be returned");
+
+        assert_eq!(result, "app-server");
     }
 
     #[tokio::test]

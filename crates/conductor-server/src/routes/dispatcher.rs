@@ -136,6 +136,8 @@ struct FeedQuery {
     bridge_id: Option<String>,
     #[serde(rename = "threadId", alias = "thread_id")]
     thread_id: Option<String>,
+    #[serde(rename = "streamProtocol", alias = "stream_protocol")]
+    stream_protocol: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -947,62 +949,46 @@ fn dispatcher_integration_payload(dispatcher: &SessionRecord, project_id: &str) 
     })
 }
 
-fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> Option<Value> {
+fn single_streaming_entry_patch(
+    previous_entries: &[Value],
+    next_entries: &[Value],
+    compact_text_patch: bool,
+) -> Option<Value> {
     if previous_entries.len() != next_entries.len() || previous_entries.is_empty() {
         return None;
     }
 
-    let shared_prefix_len = previous_entries.len().saturating_sub(1);
-    if !previous_entries
-        .iter()
-        .take(shared_prefix_len)
-        .zip(next_entries.iter().take(shared_prefix_len))
-        .all(|(left, right)| {
-            left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
-        })
+    let mut changed_index = None;
+    for (index, (left, right)) in previous_entries.iter().zip(next_entries.iter()).enumerate() {
+        if left.get("id").and_then(Value::as_str) != right.get("id").and_then(Value::as_str) {
+            return None;
+        }
+
+        if feed_entry_patch_signature(left) == feed_entry_patch_signature(right) && left == right {
+            continue;
+        }
+
+        if changed_index.replace(index).is_some() {
+            return None;
+        }
+    }
+
+    let changed_index = changed_index?;
+    let previous_entry = previous_entries.get(changed_index)?;
+    let next_entry = next_entries.get(changed_index)?;
+
+    let entry_id = next_entry.get("id").and_then(Value::as_str)?.to_string();
+    if previous_entry.get("kind") != next_entry.get("kind")
+        || previous_entry.get("source") != next_entry.get("source")
     {
         return None;
     }
 
-    if !previous_entries
-        .iter()
-        .take(shared_prefix_len)
-        .zip(next_entries.iter().take(shared_prefix_len))
-        .all(|(left, right)| feed_entry_patch_signature(left) == feed_entry_patch_signature(right))
-    {
-        return None;
-    }
-
-    if !previous_entries
-        .iter()
-        .take(shared_prefix_len)
-        .zip(next_entries.iter().take(shared_prefix_len))
-        .all(|(left, right)| left == right)
-    {
-        return None;
-    }
-
-    let previous_last = previous_entries.last()?;
-    let next_last = next_entries.last()?;
-    if previous_last == next_last {
-        return None;
-    }
-
-    let entry_id = next_last.get("id").and_then(Value::as_str)?.to_string();
-    if previous_last.get("id").and_then(Value::as_str) != Some(entry_id.as_str()) {
-        return None;
-    }
-    if previous_last.get("kind") != next_last.get("kind")
-        || previous_last.get("source") != next_last.get("source")
-    {
-        return None;
-    }
-
-    let previous_streaming = previous_last
+    let previous_streaming = previous_entry
         .get("streaming")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let next_streaming = next_last
+    let next_streaming = next_entry
         .get("streaming")
         .and_then(Value::as_bool)
         .unwrap_or(false);
@@ -1010,21 +996,44 @@ fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> O
         return None;
     }
 
-    let text_delta = match (
-        previous_last.get("text").and_then(Value::as_str),
-        next_last.get("text").and_then(Value::as_str),
+    let (text_delta, text_offset) = match (
+        previous_entry.get("text").and_then(Value::as_str),
+        next_entry.get("text").and_then(Value::as_str),
     ) {
-        (Some(previous_text), Some(next_text)) => {
-            next_text.strip_prefix(previous_text).map(str::to_string)
-        }
-        _ => None,
+        (Some(previous_text), Some(next_text)) => (
+            next_text.strip_prefix(previous_text).map(str::to_string),
+            Some(previous_text.encode_utf16().count()),
+        ),
+        _ => (None, None),
     };
+
+    // Token-only patches are the common hot path. Do not resend the full,
+    // ever-growing assistant entry on every frame: that turns a long answer
+    // into quadratic JSON/network work. `textOffset` lets the client apply the
+    // compact continuation idempotently and detect an out-of-order fragment.
+    let compact_entry = compact_text_patch
+        .then_some(())
+        .and(text_delta.as_ref())
+        .and_then(|_| {
+            let mut previous_without_text = previous_entry.clone();
+            let mut next_without_text = next_entry.clone();
+            for entry in [&mut previous_without_text, &mut next_without_text] {
+                if let Some(object) = entry.as_object_mut() {
+                    object.remove("text");
+                    // The runtime timestamp may advance while the same logical
+                    // assistant row streams. It is not needed to apply a token.
+                    object.remove("createdAt");
+                }
+            }
+            (previous_without_text == next_without_text).then_some(Value::Null)
+        });
 
     Some(json!({
         "type": "patch",
         "entryId": entry_id,
-        "entry": next_last,
+        "entry": compact_entry.unwrap_or_else(|| next_entry.clone()),
         "textDelta": text_delta,
+        "textOffset": text_offset,
     }))
 }
 
@@ -1049,7 +1058,7 @@ fn feed_entry_patch_signature(entry: &Value) -> u64 {
     hasher.finish()
 }
 
-fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
+fn build_feed_delta_event(previous: &Value, next: &Value, compact_text_patch: bool) -> Value {
     let previous_entries = previous
         .get("entries")
         .and_then(Value::as_array)
@@ -1092,7 +1101,9 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
         });
     }
 
-    if let Some(mut patch) = streaming_tail_patch(&previous_entries, &next_entries) {
+    if let Some(mut patch) =
+        single_streaming_entry_patch(&previous_entries, &next_entries, compact_text_patch)
+    {
         patch["totalEntries"] = next.get("totalEntries").cloned().unwrap_or(Value::Null);
         patch["windowLimit"] = next.get("windowLimit").cloned().unwrap_or(Value::Null);
         patch["truncated"] = next.get("truncated").cloned().unwrap_or(Value::Null);
@@ -1136,6 +1147,10 @@ async fn feed_stream(
     Query(query): Query<FeedQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
     let window_limit = resolve_feed_window_limit(query.limit);
+    // Protocol 2 opts into compact, offset-checked token patches. Older
+    // hosted dashboards omit this parameter and continue receiving complete
+    // entries, preserving paired-device compatibility across rolling updates.
+    let compact_text_patch = query.stream_protocol.unwrap_or_default() >= 2;
     let bridge_id = query.bridge_id.clone();
     let thread_id = query.thread_id.clone();
     let initial_dispatcher = resolve_project_dispatcher(
@@ -1194,7 +1209,11 @@ async fn feed_stream(
                         let next_payload =
                             dispatcher_feed_payload(&state, &dispatcher, window_limit).await;
                         let mut feed_state = feed_state.lock().await;
-                        let delta = build_feed_delta_event(&feed_state.1, &next_payload);
+                        let delta = build_feed_delta_event(
+                            &feed_state.1,
+                            &next_payload,
+                            compact_text_patch,
+                        );
                         feed_state.0 = Some(dispatcher.id.clone());
                         feed_state.1 = next_payload;
                         Some(Ok(SseEvent::default().data(delta.to_string())))
@@ -1673,7 +1692,7 @@ mod tests {
             "integration": Value::Null,
         });
 
-        let delta = super::build_feed_delta_event(&previous, &next);
+        let delta = super::build_feed_delta_event(&previous, &next, true);
 
         assert_eq!(
             delta.get("type").and_then(|value| value.as_str()),
@@ -1687,6 +1706,162 @@ mod tests {
             delta.get("textDelta").and_then(|value| value.as_str()),
             Some(" on it")
         );
+        assert_eq!(
+            delta.get("textOffset").and_then(|value| value.as_u64()),
+            Some(7)
+        );
+        assert!(delta.get("entry").is_some_and(Value::is_null));
+
+        let legacy_delta = super::build_feed_delta_event(&previous, &next, false);
+        assert_eq!(
+            legacy_delta
+                .get("entry")
+                .and_then(|entry| entry.get("text"))
+                .and_then(Value::as_str),
+            Some("Working on it")
+        );
+    }
+
+    #[test]
+    fn compact_feed_patch_uses_utf16_offsets_for_unicode_text() {
+        let previous = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Hi 👋", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 1,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+        let next = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Hi 👋 there", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 1,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+
+        let delta = super::build_feed_delta_event(&previous, &next, true);
+
+        assert_eq!(
+            delta.get("textDelta").and_then(Value::as_str),
+            Some(" there")
+        );
+        assert_eq!(delta.get("textOffset").and_then(Value::as_u64), Some(5));
+    }
+
+    #[test]
+    fn feed_delta_patch_updates_non_tail_streaming_entry_with_interleaved_tool_card() {
+        let previous = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working", "source": "runtime", "streaming": true, "createdAt": "2026-07-28T12:00:00Z", "metadata": {} },
+                { "id": "3", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "running", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 3,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+        let next = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working on it", "source": "runtime", "streaming": true, "createdAt": "2026-07-28T12:00:01Z", "metadata": {} },
+                { "id": "3", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "running", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 3,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+
+        let delta = super::build_feed_delta_event(&previous, &next, true);
+
+        assert_eq!(delta.get("type").and_then(Value::as_str), Some("patch"));
+        assert_eq!(delta.get("entryId").and_then(Value::as_str), Some("2"));
+        assert_eq!(
+            delta.get("textDelta").and_then(Value::as_str),
+            Some(" on it")
+        );
+        assert_eq!(delta.get("textOffset").and_then(Value::as_u64), Some(7));
+        assert!(delta.get("entry").is_some_and(Value::is_null));
+
+        let legacy_delta = super::build_feed_delta_event(&previous, &next, false);
+        assert_eq!(
+            legacy_delta.get("type").and_then(Value::as_str),
+            Some("patch")
+        );
+        assert_eq!(
+            legacy_delta
+                .get("entry")
+                .and_then(|entry| entry.get("text"))
+                .and_then(Value::as_str),
+            Some("Working on it")
+        );
+    }
+
+    #[test]
+    fn feed_delta_patch_rejects_multi_entry_changes_even_with_non_tail_streaming_row() {
+        let previous = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Working", "source": "runtime", "streaming": true, "metadata": {} },
+                { "id": "2", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "running", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+        let next = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Working on it", "source": "runtime", "streaming": true, "metadata": {} },
+                { "id": "2", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "success", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+
+        let delta = super::build_feed_delta_event(&previous, &next, true);
+        assert_eq!(delta.get("type").and_then(Value::as_str), Some("replace"));
+    }
+
+    #[test]
+    fn feed_delta_patch_rejects_non_streaming_entry_changes() {
+        let previous = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Done", "source": "runtime", "streaming": false, "metadata": {} },
+                { "id": "2", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "running", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "idle",
+            "integration": Value::Null,
+        });
+        let next = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "assistant", "text": "Done!", "source": "runtime", "streaming": false, "metadata": {} },
+                { "id": "2", "kind": "tool", "text": "Bash", "source": "runtime", "streaming": false, "metadata": { "toolCallId": "call-1", "toolStatus": "running", "toolTitle": "Bash" } }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "idle",
+            "integration": Value::Null,
+        });
+
+        let delta = super::build_feed_delta_event(&previous, &next, true);
+        assert_eq!(delta.get("type").and_then(Value::as_str), Some("replace"));
     }
 
     #[test]

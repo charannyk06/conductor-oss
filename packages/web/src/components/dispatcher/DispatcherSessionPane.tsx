@@ -3,8 +3,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
+import ReactMarkdown, { type Components as MarkdownComponents } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
@@ -96,6 +96,9 @@ import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
 import {
   EMPTY_FEED_PAYLOAD,
   applyFeedDelta,
+  compactFeedPatchNeedsRefresh,
+  shouldStartCompactFeedResync,
+  updateDispatcherReconnectAttemptAfterConnection,
   type DispatcherFeedIntegration,
   type FeedDeltaEvent,
   type FeedEntryKind,
@@ -178,6 +181,62 @@ type RepositorySettingsPayload = {
   archiveScript: string;
   copyFiles: string;
   pathHealth: RepositoryPathHealth;
+};
+
+const DISPATCHER_SEND_STREAM_FALLBACK_MS = 1_500;
+
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+
+const MARKDOWN_COMPONENTS: MarkdownComponents = {
+  h1: ({ children }) => (
+    <h1 className="mb-5 text-[22px] font-semibold tracking-[-0.03em] text-[var(--vk-text-strong)] last:mb-0 sm:text-[28px] lg:text-[36px]">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mb-4 mt-8 text-[20px] font-semibold tracking-[-0.02em] text-[var(--vk-text-strong)] first:mt-0 last:mb-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mb-3 mt-6 text-[16px] font-semibold text-[var(--vk-text-normal)] first:mt-0 last:mb-0">
+      {children}
+    </h3>
+  ),
+  p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+  hr: () => <hr className="my-8 border-0 border-t border-[var(--vk-border)]" />,
+  pre: ({ children }) => (
+    <pre className="mb-4 overflow-x-auto rounded-[10px] border border-[var(--vk-border)] bg-[#151413] p-3 text-[12px] text-[var(--vk-text-normal)] last:mb-0">
+      {children}
+    </pre>
+  ),
+  code: ({ children, className }) => (
+    <code
+      className={cn(
+        "rounded-[6px] bg-[#171615] px-1.5 py-0.5 font-mono text-[12px] text-[var(--vk-text-normal)]",
+        className,
+      )}
+    >
+      {children}
+    </code>
+  ),
+  ul: ({ children }) => <ul className="mb-3 list-disc pl-5 last:mb-0">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-3 list-decimal pl-5 last:mb-0">{children}</ol>,
+  li: ({ children }) => <li className="mb-1 last:mb-0">{children}</li>,
+  table: ({ children }) => (
+    <div className="mb-4 overflow-x-auto rounded-[12px] border border-[var(--vk-border)]">
+      <table className="min-w-full border-collapse text-left text-[13px]">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-[rgba(255,255,255,0.03)]">{children}</thead>,
+  tbody: ({ children }) => <tbody>{children}</tbody>,
+  tr: ({ children }) => <tr className="border-b border-[var(--vk-border)] last:border-b-0">{children}</tr>,
+  th: ({ children }) => (
+    <th className="px-4 py-3 text-[12px] font-medium text-[var(--vk-text-normal)]">{children}</th>
+  ),
+  td: ({ children }) => (
+    <td className="px-4 py-3 align-top text-[13px] text-[var(--vk-text-muted)]">{children}</td>
+  ),
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -345,6 +404,7 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
       entryId,
       entry: normalizeFeedEntry(record.entry),
       textDelta: typeof record.textDelta === "string" ? record.textDelta : null,
+      textOffset: typeof record.textOffset === "number" ? record.textOffset : null,
       totalEntries: typeof record.totalEntries === "number" ? record.totalEntries : 0,
       windowLimit: typeof record.windowLimit === "number" ? record.windowLimit : 120,
       truncated: record.truncated === true,
@@ -504,67 +564,17 @@ function formatModelChip(agentName: string, modelValue: string | null): string |
   return trimmed;
 }
 
-function MarkdownMessage({ text }: { text: string }) {
+const MarkdownMessage = memo(function MarkdownMessage({ text }: { text: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
       className="min-w-0 break-words [overflow-wrap:anywhere]"
-      components={{
-        h1: ({ children }) => (
-          <h1 className="mb-5 text-[22px] font-semibold tracking-[-0.03em] text-[var(--vk-text-strong)] last:mb-0 sm:text-[28px] lg:text-[36px]">
-            {children}
-          </h1>
-        ),
-        h2: ({ children }) => (
-          <h2 className="mb-4 mt-8 text-[20px] font-semibold tracking-[-0.02em] text-[var(--vk-text-strong)] first:mt-0 last:mb-0">
-            {children}
-          </h2>
-        ),
-        h3: ({ children }) => (
-          <h3 className="mb-3 mt-6 text-[16px] font-semibold text-[var(--vk-text-normal)] first:mt-0 last:mb-0">
-            {children}
-          </h3>
-        ),
-        p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
-        hr: () => <hr className="my-8 border-0 border-t border-[var(--vk-border)]" />,
-        pre: ({ children }) => (
-          <pre className="mb-4 overflow-x-auto rounded-[10px] border border-[var(--vk-border)] bg-[#151413] p-3 text-[12px] text-[var(--vk-text-normal)] last:mb-0">
-            {children}
-          </pre>
-        ),
-        code: ({ children, className }) => (
-          <code
-            className={cn(
-              "rounded-[6px] bg-[#171615] px-1.5 py-0.5 font-mono text-[12px] text-[var(--vk-text-normal)]",
-              className,
-            )}
-          >
-            {children}
-          </code>
-        ),
-        ul: ({ children }) => <ul className="mb-3 list-disc pl-5 last:mb-0">{children}</ul>,
-        ol: ({ children }) => <ol className="mb-3 list-decimal pl-5 last:mb-0">{children}</ol>,
-        li: ({ children }) => <li className="mb-1 last:mb-0">{children}</li>,
-        table: ({ children }) => (
-          <div className="mb-4 overflow-x-auto rounded-[12px] border border-[var(--vk-border)]">
-            <table className="min-w-full border-collapse text-left text-[13px]">{children}</table>
-          </div>
-        ),
-        thead: ({ children }) => <thead className="bg-[rgba(255,255,255,0.03)]">{children}</thead>,
-        tbody: ({ children }) => <tbody>{children}</tbody>,
-        tr: ({ children }) => <tr className="border-b border-[var(--vk-border)] last:border-b-0">{children}</tr>,
-        th: ({ children }) => (
-          <th className="px-4 py-3 text-[12px] font-medium text-[var(--vk-text-normal)]">{children}</th>
-        ),
-        td: ({ children }) => (
-          <td className="px-4 py-3 align-top text-[13px] text-[var(--vk-text-muted)]">{children}</td>
-        ),
-      }}
+      components={MARKDOWN_COMPONENTS}
     >
       {text}
     </ReactMarkdown>
   );
-}
+});
 
 function AttachmentCard({
   label,
@@ -713,7 +723,7 @@ function dispatcherLifecycleHeadline(operation: DispatcherLifecycleEvent["operat
   }
 }
 
-function SessionFeedMessage({
+const SessionFeedMessage = memo(function SessionFeedMessage({
   entry,
   assistantAgentLabel,
 }: {
@@ -741,14 +751,57 @@ function SessionFeedMessage({
     />
   ) : null;
 
+  if (isThinkingEntry) {
+    const thinkingLines = toolPresentation?.lines.length
+      ? toolPresentation.lines
+      : entry.text.trim().toLowerCase() === "thinking" || entry.text.trim().length === 0
+        ? []
+        : [entry.text.trim()];
+    const thinkingRunning = toolPresentation?.status === "running" || entry.streaming;
+    const canExpandThinking = thinkingLines.length > 0;
+
+    return (
+      <div
+        role={thinkingRunning ? "status" : undefined}
+        aria-live={thinkingRunning ? "polite" : undefined}
+        className="min-w-0 py-1 text-[12px] text-[var(--vk-text-muted)]"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <Braces className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-normal)]" />
+          <span className="font-medium text-[var(--vk-text-normal)]">
+            {thinkingRunning ? "Thinking" : "Thought"}
+          </span>
+          {thinkingRunning ? <RunningDots /> : <Check className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />}
+          {canExpandThinking ? (
+            <button
+              type="button"
+              onClick={() => setToolExpanded((current) => !current)}
+              className="ml-auto inline-flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11px] text-[var(--vk-text-muted)] transition-colors hover:bg-[rgba(255,255,255,0.05)] hover:text-[var(--vk-text-normal)]"
+              aria-expanded={toolExpanded}
+              aria-label={toolExpanded ? "Hide thinking details" : "Show thinking details"}
+            >
+              <span>{toolExpanded ? "Hide" : "Details"}</span>
+              {toolExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            </button>
+          ) : null}
+        </div>
+        {toolExpanded ? (
+          <div className="ml-5 mt-1 space-y-1 border-l border-[var(--vk-border)] pl-3">
+            {thinkingLines.map((line, index) => (
+              <ExpandableInlineText
+                key={`${entry.id}-thinking-${index}`}
+                value={line}
+                maxLength={220}
+                className="block font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]"
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   if (toolPresentation) {
-    const toneClassName = toolPresentation.status === "error"
-      ? "border-[rgba(210,81,81,0.22)] bg-[rgba(70,24,24,0.42)]"
-      : toolPresentation.status === "success"
-        ? "border-[rgba(98,183,132,0.2)] bg-[rgba(17,40,28,0.36)]"
-        : isThinkingEntry
-          ? "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.035)]"
-          : "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)]";
     const statusLabel = toolPresentation.status === "error"
       ? "Error"
       : toolPresentation.status === "success"
@@ -756,60 +809,71 @@ function SessionFeedMessage({
         : toolPresentation.status === "running"
           ? "Running"
           : "Pending";
-    const canExpandTool = toolPresentation.lines.length > 1;
+    const statusToneClassName = toolPresentation.status === "error"
+      ? "text-[var(--vk-red)]"
+      : toolPresentation.status === "success"
+        ? "text-[var(--vk-green)]"
+        : "text-[var(--vk-text-muted)]";
+    const statusIcon = toolPresentation.status === "error"
+      ? <AlertCircle className="h-3.5 w-3.5" />
+      : toolPresentation.status === "success"
+        ? <Check className="h-3.5 w-3.5" />
+        : toolPresentation.status === "running"
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          : <LoaderCircle className="h-3.5 w-3.5" />;
+    const canExpandTool = toolPresentation.lines.length > 0;
+    const compactPreview = toolPresentation.preview
+      ? truncateInline(toolPresentation.preview, 96)
+      : null;
 
     return (
-      <div className={cn("rounded-[16px] border px-3 py-2.5 text-[13px] text-[var(--vk-text-muted)]", toneClassName)}>
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[rgba(0,0,0,0.18)] text-[var(--vk-text-muted)]">
-            <ToolGlyph
-              toolKind={toolPresentation.kind}
-              toolTitle={toolPresentation.title}
-              className="h-3.5 w-3.5"
-            />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-medium text-[var(--vk-text-normal)]">
-                {toolPresentation.title || "Tool call"}
-              </span>
-              <span className="inline-flex items-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                {statusLabel}
-              </span>
-              {timestamp ? (
-                <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
-              ) : null}
-            </div>
-            {toolPresentation.preview ? (
-              <p className="mt-1 break-words font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]">
-                {toolPresentation.preview}
-              </p>
-            ) : null}
-            {canExpandTool ? (
-              <button
-                type="button"
-                onClick={() => setToolExpanded((current) => !current)}
-                className="mt-2 inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.02)] px-2 py-1 text-[11px] text-[var(--vk-text-muted)] transition hover:bg-[rgba(255,255,255,0.06)] hover:text-[var(--vk-text-normal)]"
-                aria-expanded={toolExpanded}
-              >
-                <span>{toolExpanded ? "Hide details" : `Show details (${toolPresentation.lines.length})`}</span>
-                {toolExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-              </button>
-            ) : null}
-            {toolExpanded ? (
-              <div className="mt-2 space-y-1.5 rounded-[12px] border border-[rgba(255,255,255,0.06)] bg-[rgba(0,0,0,0.16)] px-3 py-2">
-                {toolPresentation.lines.map((line, index) => (
-                  <ExpandableInlineText
-                    key={`${entry.id}-${index}`}
-                    value={line}
-                    maxLength={160}
-                    className="block font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]"
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
+      <div
+        role={toolPresentation.status === "running" ? "status" : undefined}
+        aria-live={toolPresentation.status === "running" ? "polite" : undefined}
+        className="min-w-0 py-1 text-[12px] text-[var(--vk-text-muted)]"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <ToolGlyph
+            toolKind={toolPresentation.kind}
+            toolTitle={toolPresentation.title}
+            className="h-3.5 w-3.5 shrink-0"
+          />
+          <span className="max-w-[9rem] shrink-0 truncate font-medium text-[var(--vk-text-normal)]">
+            {toolPresentation.title || "Tool call"}
+          </span>
+          {compactPreview ? (
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--vk-text-muted)]">
+              {compactPreview}
+            </span>
+          ) : <span className="min-w-0 flex-1" />}
+          <span className={cn("inline-flex shrink-0 items-center gap-1 text-[11px]", statusToneClassName)}>
+            {statusIcon}
+            <span>{statusLabel}</span>
+          </span>
+          {canExpandTool ? (
+            <button
+              type="button"
+              onClick={() => setToolExpanded((current) => !current)}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] transition-colors hover:bg-[rgba(255,255,255,0.05)] hover:text-[var(--vk-text-normal)]"
+              aria-expanded={toolExpanded}
+              aria-label={toolExpanded ? "Hide tool details" : "Show tool details"}
+            >
+              {toolExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
+          ) : null}
         </div>
+        {toolExpanded ? (
+          <div className="ml-5 mt-1 max-h-56 space-y-1 overflow-y-auto border-l border-[var(--vk-border)] pl-3 pr-1">
+            {toolPresentation.lines.map((line, index) => (
+              <ExpandableInlineText
+                key={`${entry.id}-${index}`}
+                value={line}
+                maxLength={220}
+                className="block font-mono text-[11px] leading-5 text-[var(--vk-text-muted)]"
+              />
+            ))}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -851,31 +915,6 @@ function SessionFeedMessage({
               <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2.5 py-1">
                 {lifecycleEvent.taskType}
               </span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (isThinkingEntry) {
-    return (
-      <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
-        <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
-          <Braces className="h-4 w-4 text-[var(--vk-text-normal)]" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-[var(--vk-text-normal)]">Thinking</span>
-            {entry.text.trim().length > 0 ? (
-              <ExpandableInlineText
-                value={entry.text}
-                maxLength={96}
-                className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
-              />
-            ) : null}
-            {timestamp ? (
-              <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
             ) : null}
           </div>
         </div>
@@ -945,7 +984,7 @@ function SessionFeedMessage({
       </div>
     </div>
   );
-}
+});
 
 function ProjectAgentSelect({
   project,
@@ -1235,6 +1274,9 @@ export function DispatcherSessionPane({
   const streamReconnectCountRef = useRef(0);
   const streamFallbackReloadCountRef = useRef(0);
   const streamConnectGenerationRef = useRef(0);
+  const streamRevisionRef = useRef(0);
+  const sendInFlightRef = useRef(false);
+  const sendFallbackRefreshTimerRef = useRef<number | null>(null);
   const deltaAppendCountRef = useRef(0);
   const deltaPatchCountRef = useRef(0);
   const deltaReplaceCountRef = useRef(0);
@@ -1254,8 +1296,14 @@ export function DispatcherSessionPane({
       const next = typeof updater === "function"
         ? updater(current)
         : updater;
-      feedFollowStateRef.current = next;
-      return next;
+      const unchanged = current.followLatest === next.followLatest
+        && current.showJumpToLatest === next.showJumpToLatest
+        && current.unseenCount === next.unseenCount
+        && current.unseenEntryIds.length === next.unseenEntryIds.length
+        && current.unseenEntryIds.every((entryId, index) => entryId === next.unseenEntryIds[index]);
+      const resolved = unchanged ? current : next;
+      feedFollowStateRef.current = resolved;
+      return resolved;
     });
   }, []);
 
@@ -1263,6 +1311,13 @@ export function DispatcherSessionPane({
     const nextState = resetDispatcherFeedFollowState();
     feedFollowStateRef.current = nextState;
     setFeedFollowState(nextState);
+  }, []);
+
+  const clearSendFallbackRefresh = useCallback(() => {
+    if (sendFallbackRefreshTimerRef.current !== null) {
+      window.clearTimeout(sendFallbackRefreshTimerRef.current);
+      sendFallbackRefreshTimerRef.current = null;
+    }
   }, []);
 
   const markFeedGestureIntent = useCallback(() => {
@@ -1324,6 +1379,8 @@ export function DispatcherSessionPane({
     streamReconnectCountRef.current = 0;
     streamFallbackReloadCountRef.current = 0;
     streamConnectGenerationRef.current += 1;
+    streamRevisionRef.current = 0;
+    clearSendFallbackRefresh();
     deltaAppendCountRef.current = 0;
     deltaPatchCountRef.current = 0;
     deltaReplaceCountRef.current = 0;
@@ -1340,7 +1397,9 @@ export function DispatcherSessionPane({
     setSettingsOpen(false);
     setContextPickerOpen(false);
     setContextSearch("");
-  }, [restoreFeedFollowState, session.id]);
+  }, [clearSendFallbackRefresh, restoreFeedFollowState, session.id]);
+
+  useEffect(() => clearSendFallbackRefresh, [clearSendFallbackRefresh]);
 
   const sessionApiPaths = useMemo(() => ({
     feed: apiPaths.feed,
@@ -1380,8 +1439,10 @@ export function DispatcherSessionPane({
     [localSessionStatus, payload],
   );
   const statusLabel = useMemo(
-    () => localSessionStatus?.trim() || presentedPayload.sessionStatus?.trim() || session.status,
-    [localSessionStatus, presentedPayload.sessionStatus, session.status],
+    () => pendingUserEntry || sending
+      ? "working"
+      : localSessionStatus?.trim() || presentedPayload.sessionStatus?.trim() || session.status,
+    [localSessionStatus, pendingUserEntry, presentedPayload.sessionStatus, sending, session.status],
   );
   const normalizedStatusLabel = useMemo(
     () => statusLabel.trim().toLowerCase(),
@@ -1486,6 +1547,8 @@ export function DispatcherSessionPane({
     const requestGeneration = loadFeedGenerationRef.current + 1;
     loadFeedGenerationRef.current = requestGeneration;
     const isLatestRequest = () => loadFeedGenerationRef.current === requestGeneration;
+    const streamRevisionAtRequest = streamRevisionRef.current;
+    const streamHasNotAdvanced = () => streamRevisionRef.current === streamRevisionAtRequest;
     loadFeedCountRef.current += 1;
     if (showLoading) {
       setLoading(true);
@@ -1495,11 +1558,11 @@ export function DispatcherSessionPane({
     try {
       const response = await fetch(withBridgeQuery(sessionApiPaths.feed, bridgeId), { cache: "no-store" });
       const nextPayload = normalizeFeedPayload(await response.json().catch(() => null));
+      if (!isLatestRequest() || !streamHasNotAdvanced()) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(nextPayload.error ?? `Failed to load session feed (${response.status})`);
-      }
-      if (!isLatestRequest()) {
-        return;
       }
       const now = Date.now();
       if (firstFeedLoadedAtRef.current === null) {
@@ -1510,7 +1573,7 @@ export function DispatcherSessionPane({
       setPayload(nextPayload);
     } catch (error) {
       loadFeedFailureCountRef.current += 1;
-      if (!isLatestRequest()) {
+      if (!isLatestRequest() || !streamHasNotAdvanced()) {
         return;
       }
       const message = error instanceof Error ? error.message : "Failed to load session feed";
@@ -1610,6 +1673,7 @@ export function DispatcherSessionPane({
 
   useEffect(() => {
     if (pendingUserEntry && isPendingDispatcherEntryConfirmed(presentedPayload, pendingUserEntry)) {
+      pendingUserEntryRef.current = null;
       setPendingUserEntry(null);
     }
   }, [pendingUserEntry, presentedPayload]);
@@ -1629,6 +1693,8 @@ export function DispatcherSessionPane({
     let cancelled = false;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
+    let compactPatchResyncPending = false;
+    let compactPatchAbortGeneration: number | null = null;
     const streamAbortRef = { current: null as AbortController | null };
 
     const clearReconnect = () => {
@@ -1638,14 +1704,14 @@ export function DispatcherSessionPane({
       }
     };
 
-    const applySseData = (raw: string) => {
+    const applySseData = (raw: string): boolean => {
       let parsed: unknown = null;
       try {
         parsed = JSON.parse(raw) as unknown;
       } catch {
         streamFallbackReloadCountRef.current += 1;
         void loadFeed({ showLoading: false, preserveExistingOnError: true });
-        return;
+        return false;
       }
 
       const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -1658,17 +1724,38 @@ export function DispatcherSessionPane({
           reason: "dispatcher_feed_refresh",
         });
         void loadFeed({ showLoading: false, preserveExistingOnError: true });
-        return;
+        return false;
       }
 
       const delta = normalizeFeedDelta(parsed);
       if (!delta) {
         streamFallbackReloadCountRef.current += 1;
         void loadFeed({ showLoading: false, preserveExistingOnError: true });
-        return;
+        return false;
+      }
+
+      const patchNeedsRefresh = compactFeedPatchNeedsRefresh(payloadRef.current, delta);
+      if (patchNeedsRefresh) {
+        if (shouldStartCompactFeedResync(compactPatchResyncPending, patchNeedsRefresh)) {
+          // A reconnect always begins with a complete feed snapshot. Abort the
+          // gapped stream once instead of starting a GET for every subsequent
+          // token frame while the client is behind.
+          compactPatchResyncPending = true;
+          compactPatchAbortGeneration = streamConnectGenerationRef.current;
+          streamFallbackReloadCountRef.current += 1;
+          streamAbortRef.current?.abort();
+          scheduleReconnect();
+        }
+        return false;
+      }
+
+      if (delta.type === "replace") {
+        compactPatchResyncPending = false;
       }
 
       lastStreamEventAtRef.current = Date.now();
+      streamRevisionRef.current += 1;
+      setLoading(false);
       setLoadingError(null);
       setLoadingErrorBlocksFeed(false);
       if (delta.type === "append") {
@@ -1689,7 +1776,12 @@ export function DispatcherSessionPane({
         });
       }
 
-      setPayload((current) => applyFeedDelta(current, delta));
+      // Advance the protocol state synchronously. React may batch state
+      // updaters, but the next SSE frame must validate against this frame.
+      const nextPayload = applyFeedDelta(payloadRef.current, delta);
+      payloadRef.current = nextPayload;
+      setPayload(nextPayload);
+      return true;
     };
 
     const scheduleReconnect = () => {
@@ -1714,12 +1806,19 @@ export function DispatcherSessionPane({
         return;
       }
       const myGeneration = streamConnectGenerationRef.current + 1;
+      const connectedAt = Date.now();
+      let validFeedFrameCount = 0;
       streamConnectGenerationRef.current = myGeneration;
       const isCurrentConnection = () => !cancelled && streamConnectGenerationRef.current === myGeneration;
       streamAbortRef.current?.abort();
       const ac = new AbortController();
       streamAbortRef.current = ac;
-      const streamUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
+      const streamUrlValue = new URL(
+        withBridgeQuery(sessionApiPaths.stream, bridgeId),
+        "http://127.0.0.1",
+      );
+      streamUrlValue.searchParams.set("streamProtocol", "2");
+      const streamUrl = `${streamUrlValue.pathname}${streamUrlValue.search}${streamUrlValue.hash}`;
       try {
         streamConnectCountRef.current += 1;
         const res = await fetch(streamUrl, {
@@ -1735,20 +1834,38 @@ export function DispatcherSessionPane({
           scheduleReconnect();
           return;
         }
-        reconnectAttempt = 0;
         for await (const frame of iterateSseFrames(res.body, ac.signal)) {
           if (!isCurrentConnection()) {
             return;
           }
-          applySseData(frame.data);
+          if (frame.event === "ping") {
+            lastStreamEventAtRef.current = Date.now();
+            continue;
+          }
+          if (applySseData(frame.data)) {
+            validFeedFrameCount += 1;
+          }
         }
         if (isCurrentConnection()) {
+          if (compactPatchAbortGeneration === myGeneration) {
+            return;
+          }
+          reconnectAttempt = updateDispatcherReconnectAttemptAfterConnection(
+            reconnectAttempt,
+            validFeedFrameCount,
+            Date.now() - connectedAt,
+          );
           streamFallbackReloadCountRef.current += 1;
           void loadFeed({ showLoading: false, preserveExistingOnError: true });
           scheduleReconnect();
         }
       } catch {
         if (isCurrentConnection() && !ac.signal.aborted) {
+          reconnectAttempt = updateDispatcherReconnectAttemptAfterConnection(
+            reconnectAttempt,
+            validFeedFrameCount,
+            Date.now() - connectedAt,
+          );
           streamFallbackReloadCountRef.current += 1;
           void loadFeed({ showLoading: false, preserveExistingOnError: true });
           scheduleReconnect();
@@ -1959,11 +2076,28 @@ export function DispatcherSessionPane({
 
   const sendMessage = useCallback(async (message: string, attachments: readonly string[]) => {
     const normalizedAttachments = normalizeDispatcherAttachmentPaths(attachments);
-    if ((message.trim().length === 0 && normalizedAttachments.length === 0) || sending) {
+    if (
+      (message.trim().length === 0 && normalizedAttachments.length === 0)
+      || sending
+      || sendInFlightRef.current
+    ) {
       return false;
     }
-    const feedBaselineTotalEntries = payload.totalEntries;
-    const feedBaselineLastEntryId = payload.entries[payload.entries.length - 1]?.id ?? null;
+    sendInFlightRef.current = true;
+    const feedAtSend = payloadRef.current;
+    const nextPendingUserEntry = {
+      id: `pending-${Date.now()}`,
+      text: message.trim(),
+      attachments: normalizedAttachments,
+      createdAt: new Date().toISOString(),
+      feedBaselineTotalEntries: feedAtSend.totalEntries,
+      feedBaselineLastEntryId: feedAtSend.entries[feedAtSend.entries.length - 1]?.id ?? null,
+    };
+
+    clearSendFallbackRefresh();
+    restoreFeedFollowState();
+    pendingUserEntryRef.current = nextPendingUserEntry;
+    setPendingUserEntry(nextPendingUserEntry);
     setSending(true);
     setSendError(null);
     try {
@@ -1978,31 +2112,35 @@ export function DispatcherSessionPane({
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to send message (${response.status})`);
       }
-      const nextPendingUserEntry = {
-        id: `pending-${Date.now()}`,
-        text: message.trim(),
-        attachments: normalizedAttachments,
-        createdAt: new Date().toISOString(),
-        feedBaselineTotalEntries,
-        feedBaselineLastEntryId,
-      };
-      restoreFeedFollowState();
-      pendingUserEntryRef.current = nextPendingUserEntry;
-      setPendingUserEntry(nextPendingUserEntry);
-      setLocalSessionStatus("working");
-      void loadFeed({
-        showLoading: false,
-        preserveExistingOnError: true,
-        pendingEntry: nextPendingUserEntry,
-      });
+      const streamRevisionAtAcknowledgement = streamRevisionRef.current;
+      sendFallbackRefreshTimerRef.current = window.setTimeout(() => {
+        sendFallbackRefreshTimerRef.current = null;
+        if (pendingUserEntryRef.current?.id !== nextPendingUserEntry.id) {
+          return;
+        }
+        if (streamRevisionRef.current !== streamRevisionAtAcknowledgement) {
+          return;
+        }
+        void loadFeed({
+          showLoading: false,
+          preserveExistingOnError: true,
+          pendingEntry: nextPendingUserEntry,
+        });
+      }, DISPATCHER_SEND_STREAM_FALLBACK_MS);
       return true;
     } catch (error) {
+      clearSendFallbackRefresh();
+      if (pendingUserEntryRef.current?.id === nextPendingUserEntry.id) {
+        pendingUserEntryRef.current = null;
+      }
+      setPendingUserEntry((current) => current?.id === nextPendingUserEntry.id ? null : current);
       setSendError(error instanceof Error ? error.message : "Failed to send message");
       return false;
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
-  }, [bridgeId, loadFeed, payload.entries, payload.totalEntries, restoreFeedFollowState, sending, sessionApiPaths.send]);
+  }, [bridgeId, clearSendFallbackRefresh, loadFeed, restoreFeedFollowState, sending, sessionApiPaths.send]);
 
   const handleSend = useCallback(async () => {
     if (!canSendCurrentDraft) {
@@ -2353,17 +2491,18 @@ export function DispatcherSessionPane({
               ) : (
                 <>
                   {visibleEntries.map((entry) => (
-                    <SessionFeedMessage
-                      key={entry.id}
-                      entry={entry}
-                      assistantAgentLabel={dispatcherAssistantLabel}
-                    />
+                    <div key={entry.id} className={entry.kind === "tool" ? "!mt-1.5" : undefined}>
+                      <SessionFeedMessage
+                        entry={entry}
+                        assistantAgentLabel={dispatcherAssistantLabel}
+                      />
+                    </div>
                   ))}
                   {showWorkingRow ? (
                     <div
                       role="status"
                       aria-live="polite"
-                      className="flex items-center gap-2 rounded-[14px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-[13px] text-[var(--vk-text-muted)]"
+                      className="flex items-center gap-2 py-1.5 text-[12px] text-[var(--vk-text-muted)]"
                     >
                       <RunningDots />
                       <span>Dispatcher is working…</span>

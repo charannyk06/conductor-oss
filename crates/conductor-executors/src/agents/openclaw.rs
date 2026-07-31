@@ -262,6 +262,14 @@ struct ChatPayload {
     state: String,
     #[serde(default)]
     message: Option<GatewayMessage>,
+    /// Incremental text emitted by current OpenClaw gateways. `message` is a
+    /// cumulative snapshot and must not be appended on every delta event.
+    #[serde(default)]
+    delta_text: Option<String>,
+    /// A replacement delta means the cumulative message snapshot supersedes
+    /// the text already rendered for this run.
+    #[serde(default)]
+    replace: bool,
     #[serde(default)]
     error_message: Option<String>,
 }
@@ -713,7 +721,11 @@ async fn handle_runtime_frame(
             // Track the payload for cost/usage extraction on completion
             *latest_payload = Some(payload.clone());
             match convert_chat_event(&payload, client_run_id) {
-                Some(ChatConversion::Stdout(text)) => {
+                Some(ChatConversion::AssistantDelta(text)) => {
+                    let _ = output_tx.send(ExecutorOutput::AssistantDelta(text)).await;
+                    ControlFlow::Continue
+                }
+                Some(ChatConversion::AssistantSnapshot(text)) => {
                     let _ = output_tx.send(ExecutorOutput::Stdout(text)).await;
                     ControlFlow::Continue
                 }
@@ -861,7 +873,8 @@ fn websocket_text(message: Message) -> Option<String> {
 }
 
 enum ChatConversion {
-    Stdout(String),
+    AssistantDelta(String),
+    AssistantSnapshot(String),
     Completed(Option<String>),
     Failed {
         error: String,
@@ -876,7 +889,19 @@ fn convert_chat_event(payload: &Value, client_run_id: &str) -> Option<ChatConver
     }
 
     match payload.state.as_str() {
-        "delta" => extract_message_text(payload.message.as_ref()).map(ChatConversion::Stdout),
+        "delta" if payload.replace => {
+            extract_message_text(payload.message.as_ref()).map(ChatConversion::AssistantSnapshot)
+        }
+        "delta" => payload
+            .delta_text
+            .filter(|text| !text.is_empty())
+            .map(ChatConversion::AssistantDelta)
+            // Compatibility with older gateways that only sent cumulative
+            // `message` snapshots.
+            .or_else(|| {
+                extract_message_text(payload.message.as_ref())
+                    .map(ChatConversion::AssistantSnapshot)
+            }),
         "final" => Some(ChatConversion::Completed(extract_message_text(
             payload.message.as_ref(),
         ))),
@@ -1841,11 +1866,50 @@ mod tests {
     }
 
     #[test]
-    fn convert_chat_delta_emits_stdout() {
+    fn convert_chat_delta_uses_byte_exact_increment() {
         let payload = json!({
             "runId": "run-1",
             "sessionKey": "session-1",
             "seq": 1,
+            "state": "delta",
+            "deltaText": " world",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "hello world" }]
+            }
+        });
+
+        let Some(ChatConversion::AssistantDelta(text)) = convert_chat_event(&payload, "run-1")
+        else {
+            panic!("expected assistant delta conversion");
+        };
+        assert_eq!(text, " world");
+    }
+
+    #[test]
+    fn convert_chat_replace_uses_cumulative_snapshot() {
+        let payload = json!({
+            "runId": "run-1",
+            "state": "delta",
+            "deltaText": "ignored",
+            "replace": true,
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "replacement" }]
+            }
+        });
+
+        let Some(ChatConversion::AssistantSnapshot(text)) = convert_chat_event(&payload, "run-1")
+        else {
+            panic!("expected assistant snapshot conversion");
+        };
+        assert_eq!(text, "replacement");
+    }
+
+    #[test]
+    fn convert_legacy_chat_delta_uses_cumulative_snapshot() {
+        let payload = json!({
+            "runId": "run-1",
             "state": "delta",
             "message": {
                 "role": "assistant",
@@ -1853,8 +1917,9 @@ mod tests {
             }
         });
 
-        let Some(ChatConversion::Stdout(text)) = convert_chat_event(&payload, "run-1") else {
-            panic!("expected stdout conversion");
+        let Some(ChatConversion::AssistantSnapshot(text)) = convert_chat_event(&payload, "run-1")
+        else {
+            panic!("expected legacy assistant snapshot conversion");
         };
         assert_eq!(text, "hello world");
     }
@@ -1888,6 +1953,10 @@ mod tests {
         assert_eq!(
             metadata.get("toolStatus").and_then(Value::as_str),
             Some("running")
+        );
+        assert_eq!(
+            metadata.get("toolCallId").and_then(Value::as_str),
+            Some("tool-1")
         );
     }
 

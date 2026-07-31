@@ -26,8 +26,10 @@ use super::acp_memory::{
     ACP_MAX_NOTE_CHARS, ACP_MEMORY_VERSION, ACP_RECENT_BOARD_ACTIVITY_LIMIT, ACP_SHORT_TERM_LIMIT,
 };
 use super::helpers::{
-    apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
-    resolve_board_file, runtime_tool_metadata, sanitize_terminal_text,
+    append_runtime_assistant_snapshot, append_streamed_runtime_assistant_delta,
+    apply_openclaw_runtime_env, is_runtime_status_line, latest_turn_runtime_assistant_text,
+    resolve_board_file, sanitize_terminal_text, settle_runtime_tool_statuses,
+    upsert_runtime_status_entry,
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{
@@ -891,75 +893,19 @@ fn append_runtime_status_entry_with_metadata(
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
 ) -> bool {
-    let sanitized = sanitize_terminal_text(text);
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if let Some(last) = session.conversation.last() {
-        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
-        {
-            return false;
-        }
-    }
-
-    let mut metadata = explicit_metadata.unwrap_or_default();
-    if metadata.is_empty() {
-        if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
-            if let Some(object) = tool_metadata.as_object() {
-                for (key, value) in object {
-                    metadata.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "status_message".to_string(),
-        source: "runtime".to_string(),
-        text: trimmed.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
-    true
+    upsert_runtime_status_entry(session, text, explicit_metadata)
 }
 
 fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) -> bool {
     append_runtime_status_entry_with_metadata(session, text, None)
 }
 
+fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) -> bool {
+    append_streamed_runtime_assistant_delta(session, delta)
+}
+
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bool {
-    let sanitized = sanitize_terminal_text(text);
-    let normalized = sanitized.trim_end();
-    if normalized.trim().is_empty() {
-        return false;
-    }
-
-    if let Some(last) = session.conversation.last_mut() {
-        if last.kind == "assistant_message" && last.source == "runtime" {
-            if merge_assistant_fragment(&mut last.text, normalized) {
-                last.created_at = Utc::now().to_rfc3339();
-                return true;
-            }
-            return false;
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: normalized.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata: HashMap::new(),
-    });
-    enforce_conversation_limit(session);
-    true
+    append_runtime_assistant_snapshot(session, text)
 }
 
 fn append_runtime_assistant_break(session: &mut SessionRecord) -> bool {
@@ -3774,6 +3720,18 @@ impl AppState {
         touch_acp_dispatcher_heartbeat(thread);
 
         match event {
+            ExecutorOutput::AssistantDelta(delta) => {
+                clear_dispatcher_runtime_error(thread);
+                if !thread.status.is_terminal() {
+                    if thread.status != SessionStatus::Working {
+                        thread.status = SessionStatus::Working;
+                    }
+                    thread.activity = Some("active".to_string());
+                }
+                if append_runtime_assistant_delta(thread, &delta) {
+                    feed_dirty = true;
+                }
+            }
             ExecutorOutput::Stdout(line) => {
                 clear_dispatcher_runtime_error(thread);
                 if apply_dispatcher_stdout_event(thread, &line) {
@@ -3800,13 +3758,6 @@ impl AppState {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .or_else(|| {
-                        metadata
-                            .get("codexThreadId")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                    })
                 {
                     thread.metadata.insert(
                         ACP_RESUME_TARGET_METADATA_KEY.to_string(),
@@ -3861,6 +3812,10 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
+                if let Some(summary) = latest_turn_runtime_assistant_text(thread) {
+                    thread.summary = Some(summary.clone());
+                    thread.metadata.insert("summary".to_string(), summary);
+                }
                 if clear_parser_state(thread) {
                     feed_dirty = true;
                 }
@@ -3986,6 +3941,17 @@ impl AppState {
             feed_dirty = true;
         }
         if parser_state_signature(thread) != parser_state_before {
+            feed_dirty = true;
+        }
+        if clear_runtime
+            && settle_runtime_tool_statuses(
+                thread,
+                matches!(
+                    thread.status,
+                    SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated
+                ),
+            )
+        {
             feed_dirty = true;
         }
 
@@ -4330,7 +4296,7 @@ mod tests {
     use conductor_executors::executor::{
         Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
@@ -4688,7 +4654,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_dispatchers_rebuild_state_instead_of_reusing_native_resume_targets() {
+    fn headless_dispatchers_ignore_persisted_resume_targets_including_codex() {
         let mut thread = SessionRecord::new(
             "session-1".to_string(),
             "demo".to_string(),
@@ -4712,10 +4678,130 @@ mod tests {
             dispatcher_resume_target(&thread, &AgentKind::QwenCode),
             None
         );
+        assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Gemini), None);
         assert_eq!(
             dispatcher_resume_target(&thread, &AgentKind::ClaudeCode),
             Some("session-123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn codex_thread_started_metadata_stays_telemetry_only() {
+        let (root, state) = build_test_state("acp-codex-thread-started-telemetry").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.agent = "codex".to_string();
+        thread.metadata.insert(
+            ACP_RESUME_TARGET_METADATA_KEY.to_string(),
+            "stale-thread".to_string(),
+        );
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "eventKind".to_string(),
+            Value::String("thread_started".to_string()),
+        );
+        metadata.insert(
+            "codexThreadId".to_string(),
+            Value::String("thread-live".to_string()),
+        );
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &runtime.runtime_id,
+                ExecutorOutput::StructuredStatus {
+                    text: String::new(),
+                    metadata,
+                },
+            )
+            .await
+            .expect("thread started metadata should apply");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(
+            updated.metadata.get("codexThreadId").map(String::as_str),
+            Some("thread-live")
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_RESUME_TARGET_METADATA_KEY)
+                .map(String::as_str),
+            Some("stale-thread")
+        );
+        assert_eq!(dispatcher_resume_target(&updated, &AgentKind::Codex), None);
+        assert!(updated.conversation.iter().all(|entry| {
+            !entry.metadata.contains_key("codexThreadId")
+                && !entry.metadata.contains_key("nativeResumeTarget")
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn completed_dispatcher_turn_summary_ignores_older_assistant_messages() {
+        let (root, state) = build_test_state("acp-complete-summary-scope").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.agent = "codex".to_string();
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "assistant_message".to_string(),
+            source: "runtime".to_string(),
+            text: "older assistant".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "user_message".to_string(),
+            source: "chat".to_string(),
+            text: "latest prompt".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        thread.summary = None;
+        thread.metadata.remove("summary");
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &runtime.runtime_id,
+                ExecutorOutput::Completed { exit_code: 0 },
+            )
+            .await
+            .expect("completion should apply");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(
+            updated.summary.as_deref(),
+            Some("Dispatcher ready for the next turn")
+        );
+        assert_ne!(updated.summary.as_deref(), Some("older assistant"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

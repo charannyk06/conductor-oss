@@ -13,8 +13,9 @@ use super::bridge_registry::{
     BridgeConnectionRecord, BridgeConnectionStatus, BRIDGE_HEARTBEAT_TIMEOUT_SECS,
 };
 use super::helpers::{
-    append_output, apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
-    runtime_tool_metadata, sanitize_terminal_text,
+    append_output, append_runtime_assistant_snapshot, append_streamed_runtime_assistant_delta,
+    apply_openclaw_runtime_env, is_runtime_status_line, sanitize_terminal_text,
+    settle_runtime_tool_statuses, upsert_runtime_status_entry,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::types::{
@@ -584,31 +585,11 @@ fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
 }
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
-    let sanitized = sanitize_terminal_text(text);
-    let normalized = sanitized.trim_end();
-    if normalized.trim().is_empty() {
-        return;
-    }
+    let _ = append_runtime_assistant_snapshot(session, text);
+}
 
-    if let Some(last) = session.conversation.last_mut() {
-        if last.kind == "assistant_message" && last.source == "runtime" {
-            if merge_assistant_fragment(&mut last.text, normalized) {
-                last.created_at = Utc::now().to_rfc3339();
-            }
-            return;
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: normalized.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata: HashMap::new(),
-    });
-    enforce_conversation_limit(session);
+fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) {
+    let _ = append_streamed_runtime_assistant_delta(session, delta);
 }
 
 fn append_runtime_assistant_break(session: &mut SessionRecord) {
@@ -670,40 +651,7 @@ fn append_runtime_status_entry_with_metadata(
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
 ) {
-    let sanitized = sanitize_terminal_text(text);
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    if let Some(last) = session.conversation.last() {
-        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
-        {
-            return;
-        }
-    }
-
-    let mut metadata = HashMap::new();
-    if let Some(explicit_metadata) = explicit_metadata {
-        metadata = explicit_metadata;
-    } else if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
-        if let Some(object) = tool_metadata.as_object() {
-            for (key, value) in object {
-                metadata.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "status_message".to_string(),
-        source: "runtime".to_string(),
-        text: trimmed.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
+    let _ = upsert_runtime_status_entry(session, text, explicit_metadata);
 }
 
 fn clear_parser_state(session: &mut SessionRecord) {
@@ -1679,6 +1627,10 @@ impl AppState {
                     self.append_and_apply(session_id, persisted.as_deref(), output)
                         .await?;
                 }
+                ExecutorOutput::AssistantDelta(delta) => {
+                    self.append_and_apply(session_id, None, ExecutorOutput::AssistantDelta(delta))
+                        .await?;
+                }
                 ExecutorOutput::StructuredStatus { text, metadata } => {
                     self.append_and_apply(
                         session_id,
@@ -1738,6 +1690,13 @@ impl AppState {
 
         // Apply event (inline from apply_runtime_event logic)
         match event {
+            ExecutorOutput::AssistantDelta(ref delta) => {
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_assistant_delta(session, delta);
+            }
             ExecutorOutput::Stdout(ref stdout_line) => {
                 apply_stdout_event(session, stdout_line, is_live);
             }
@@ -1828,6 +1787,13 @@ impl AppState {
         );
 
         match event {
+            ExecutorOutput::AssistantDelta(delta) => {
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_assistant_delta(session, &delta);
+            }
             ExecutorOutput::Stdout(line) => {
                 apply_stdout_event(session, &line, is_live);
             }
@@ -1969,6 +1935,14 @@ impl AppState {
                 }
             }
             ExecutorOutput::Composite(_) => {}
+        }
+
+        if clear_live_handle {
+            let failed = matches!(
+                session.status,
+                SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated
+            );
+            settle_runtime_tool_statuses(session, failed);
         }
 
         let dispatcher_thread_id = linked_dispatcher_thread_id(session);
@@ -2721,7 +2695,8 @@ mod tests {
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
     use conductor_executors::process::{spawn_process, PtyDimensions};
-    use std::collections::BTreeMap;
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command as StdCommand};
@@ -3094,6 +3069,50 @@ mod tests {
 
         maybe_update_session_branch_from_output(&mut session, "git branch -m release/1.0.0");
         assert_eq!(session.branch.as_deref(), Some("release/1.0.0"));
+    }
+
+    #[test]
+    fn assistant_delta_after_interleaved_status_updates_one_canonical_row() {
+        let mut session = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+
+        append_runtime_assistant_delta(&mut session, "hello");
+        append_runtime_status_entry_with_metadata(
+            &mut session,
+            "Bash",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("tool-1")),
+                ("toolTitle".to_string(), json!("Bash")),
+                ("toolStatus".to_string(), json!("running")),
+            ])),
+        );
+        append_runtime_assistant_delta(&mut session, " world");
+
+        let assistant_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_entries.len(), 1);
+        assert_eq!(assistant_entries[0].text, "hello world");
+        assert_eq!(
+            session
+                .conversation
+                .iter()
+                .filter(|entry| entry.kind == "status_message")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
