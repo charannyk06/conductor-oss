@@ -234,6 +234,34 @@ test("compact token patches use UTF-16 offsets so emoji prefixes stay aligned", 
   );
 });
 
+test("applyFeedDelta ignores compact token patches when the offset mismatches", () => {
+  const current = {
+    ...EMPTY_FEED_PAYLOAD,
+    entries: [makeEntry("assistant-1", "hello", true)],
+  };
+  const delta = {
+    type: "patch" as const,
+    entryId: "assistant-1",
+    entry: null,
+    textDelta: " world",
+    textOffset: 4,
+    totalEntries: 1,
+    windowLimit: 120,
+    truncated: false,
+    sessionStatus: "working",
+    approvalState: null,
+    parserState: null,
+    runtimeStatus: null,
+    source: "runtime",
+    error: null,
+    integration: null,
+  };
+
+  const next = applyFeedDelta(current, delta);
+  assert.equal(next.entries[0]?.text, "hello");
+  assert.equal(compactFeedPatchNeedsRefresh(current, delta), true);
+});
+
 test("rapid compact patch mismatches start only one stream resync", () => {
   assert.equal(shouldStartCompactFeedResync(false, true), true);
   assert.equal(shouldStartCompactFeedResync(true, true), false);

@@ -4,11 +4,11 @@
 
 Dispatcher replies do not arrive like Codex or ChatGPT. They pause, then dump large chunks. Tool activity can also make the active assistant response flicker or split into multiple rows.
 
-The currently installed Conductor 0.62.1 process is running from `~/.conductor/npm/...`, not from the dirty source branch that contains prior streaming work. Main still launches Codex with `codex exec --json`, whose normal output is item-oriented and often exposes completed assistant items rather than byte-exact live text deltas. Main already has dispatcher SSE and a 50 ms per-thread publication debounce, so adding another timer is not the answer.
+The currently installed Conductor process is not running from the dirty source branch that contains prior streaming work. Main still launches Codex with `codex exec --json`, whose normal output is item-oriented and often exposes completed assistant items rather than byte-exact live text deltas. Main already has dispatcher SSE and a 50 ms per-thread publication debounce, so adding another timer is not the answer.
 
 ## Scope
 
-Implement and ship a focused streaming change from `origin/main`. The dirty checkout at `/Users/charannsrinivas/.openclaw/projects/conductor-oss` is reference-only and must not be modified or cleaned. It contains prior streaming experiments plus unrelated mobile and notes work. Reuse only grounded streaming code.
+Implement and ship a focused streaming change from `origin/main`. Any separate dirty checkout used as reference-only must not be modified or cleaned. Reuse only grounded streaming code.
 
 ## Required behavior
 
@@ -44,3 +44,18 @@ Implement and ship a focused streaming change from `origin/main`. The dirty chec
 ## Delivery
 
 Commit only focused files, push the branch, open a PR using the repository's required release-note and type-of-change sections, and update the locally running app only after the exact built source has passed the checks above.
+
+## PR Sections
+
+Required `## User-Facing Release Notes` section:
+
+- Use 1-3 plain-English bullets, or `N/A - internal maintenance only`
+
+Required `## Type of Change` section:
+
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [ ] Agent or integration addition / modification
+- [ ] Documentation update
+- [ ] Refactor / chore

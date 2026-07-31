@@ -720,11 +720,283 @@ pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) -> 
     true
 }
 
+fn current_turn_start_index(session: &SessionRecord) -> usize {
+    session
+        .conversation
+        .iter()
+        .rposition(|entry| entry.kind == "user_message")
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+pub(crate) fn latest_turn_runtime_assistant_text(session: &SessionRecord) -> Option<String> {
+    session
+        .conversation
+        .iter()
+        .rev()
+        .take_while(|entry| entry.kind != "user_message")
+        .find(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+        .map(|entry| entry.text.trim())
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn find_streamed_runtime_assistant_anchor(
+    session: &SessionRecord,
+) -> Option<(usize, Vec<usize>)> {
+    let turn_start = current_turn_start_index(session);
+    let mut canonical_index = None;
+    let mut duplicate_indexes = Vec::new();
+
+    for index in turn_start..session.conversation.len() {
+        let Some(entry) = session.conversation.get(index) else {
+            continue;
+        };
+        let is_streamed_runtime_assistant = entry.kind == "assistant_message"
+            && entry.source == "runtime"
+            && entry
+                .metadata
+                .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
+                .and_then(Value::as_bool)
+                == Some(true);
+        if !is_streamed_runtime_assistant {
+            continue;
+        }
+        if canonical_index.is_none() {
+            canonical_index = Some(index);
+        } else {
+            duplicate_indexes.push(index);
+        }
+    }
+
+    canonical_index.map(|index| (index, duplicate_indexes))
+}
+
+pub(crate) fn merge_runtime_assistant_snapshot_text(current: &mut String, incoming: &str) -> bool {
+    if incoming.is_empty() {
+        return false;
+    }
+    if current.is_empty() {
+        current.push_str(incoming);
+        return true;
+    }
+    if current == incoming || current.ends_with(incoming) {
+        return false;
+    }
+    if incoming.starts_with(current.as_str()) {
+        current.clear();
+        current.push_str(incoming);
+        return true;
+    }
+
+    current.push_str(incoming);
+    true
+}
+
+pub(crate) fn fold_streamed_runtime_assistant_duplicates(
+    session: &mut SessionRecord,
+    canonical_index: usize,
+    duplicate_indexes: &[usize],
+) -> bool {
+    let duplicate_texts = duplicate_indexes
+        .iter()
+        .filter_map(|index| {
+            session
+                .conversation
+                .get(*index)
+                .map(|entry| entry.text.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    if let Some(canonical) = session.conversation.get_mut(canonical_index) {
+        canonical.metadata.insert(
+            ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+            Value::Bool(true),
+        );
+        for text in duplicate_texts {
+            if merge_runtime_assistant_snapshot_text(&mut canonical.text, &text) {
+                changed = true;
+            }
+        }
+    }
+    for index in duplicate_indexes.iter().rev() {
+        session.conversation.remove(*index);
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn append_runtime_assistant_snapshot(session: &mut SessionRecord, text: &str) -> bool {
+    let sanitized = sanitize_terminal_text(text);
+    if let Some((canonical_index, duplicate_indexes)) =
+        find_streamed_runtime_assistant_anchor(session)
+    {
+        let mut changed = fold_streamed_runtime_assistant_duplicates(
+            session,
+            canonical_index,
+            &duplicate_indexes,
+        );
+        if sanitized.trim().is_empty() {
+            return changed;
+        }
+        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
+            if sanitized != streamed.text && !streamed.text.starts_with(&sanitized) {
+                if sanitized.starts_with(&streamed.text) {
+                    streamed.text = sanitized;
+                    changed = true;
+                } else if merge_runtime_assistant_snapshot_text(&mut streamed.text, &sanitized) {
+                    changed = true;
+                }
+            }
+            if changed {
+                streamed.created_at = Utc::now().to_rfc3339();
+            }
+        }
+        return changed;
+    }
+
+    let normalized = sanitized.trim_end();
+    if normalized.trim().is_empty() {
+        return false;
+    }
+
+    if let Some(last) = session.conversation.last_mut() {
+        if last.kind == "assistant_message" && last.source == "runtime" {
+            if merge_assistant_fragment(&mut last.text, normalized) {
+                last.created_at = Utc::now().to_rfc3339();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    session.conversation.push(ConversationEntry {
+        id: Uuid::new_v4().to_string(),
+        kind: "assistant_message".to_string(),
+        source: "runtime".to_string(),
+        text: normalized.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        attachments: Vec::new(),
+        metadata: HashMap::new(),
+    });
+    if session.conversation.len() > DEFAULT_SESSION_HISTORY_LIMIT {
+        let excess = session.conversation.len() - DEFAULT_SESSION_HISTORY_LIMIT;
+        session.conversation.drain(..excess);
+    }
+    true
+}
+
+pub(crate) fn append_streamed_runtime_assistant_delta(
+    session: &mut SessionRecord,
+    delta: &str,
+) -> bool {
+    if delta.is_empty() {
+        return false;
+    }
+
+    if let Some((canonical_index, duplicate_indexes)) =
+        find_streamed_runtime_assistant_anchor(session)
+    {
+        let mut changed = fold_streamed_runtime_assistant_duplicates(
+            session,
+            canonical_index,
+            &duplicate_indexes,
+        );
+        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
+            streamed.text.push_str(delta);
+            streamed.created_at = Utc::now().to_rfc3339();
+            streamed.metadata.insert(
+                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+                Value::Bool(true),
+            );
+            changed = true;
+        }
+        return changed;
+    }
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    session.conversation.push(ConversationEntry {
+        id: Uuid::new_v4().to_string(),
+        kind: "assistant_message".to_string(),
+        source: "runtime".to_string(),
+        text: delta.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        attachments: Vec::new(),
+        metadata,
+    });
+    if session.conversation.len() > DEFAULT_SESSION_HISTORY_LIMIT {
+        let excess = session.conversation.len() - DEFAULT_SESSION_HISTORY_LIMIT;
+        session.conversation.drain(..excess);
+    }
+    true
+}
+
+const MAX_TOOL_CONTENT_ITEMS: usize = 24;
+const TOOL_CONTENT_TRUNCATION_PREFIX: &str = "[... ";
+const TOOL_CONTENT_TRUNCATION_SUFFIX: &str = " earlier line(s) omitted ...]";
+
+fn format_tool_content_truncation_marker(omitted_count: usize) -> String {
+    format!("{TOOL_CONTENT_TRUNCATION_PREFIX}{omitted_count}{TOOL_CONTENT_TRUNCATION_SUFFIX}")
+}
+
+fn parse_tool_content_truncation_marker(value: &Value) -> Option<usize> {
+    let marker = value.as_str()?;
+    let digits = marker
+        .strip_prefix(TOOL_CONTENT_TRUNCATION_PREFIX)?
+        .strip_suffix(TOOL_CONTENT_TRUNCATION_SUFFIX)?;
+    digits.parse::<usize>().ok().filter(|count| *count > 0)
+}
+
+fn bound_tool_content_items(items: &mut Vec<Value>) -> bool {
+    if items.len() <= MAX_TOOL_CONTENT_ITEMS {
+        return false;
+    }
+
+    let Some(summary) = items.first().cloned() else {
+        return false;
+    };
+    let mut visible_lines = items[1..].to_vec();
+    let mut previously_omitted = 0usize;
+    if let Some(count) = visible_lines
+        .first()
+        .and_then(parse_tool_content_truncation_marker)
+    {
+        previously_omitted = count;
+        visible_lines.remove(0);
+    }
+
+    let keep_visible_count = visible_lines
+        .len()
+        .min(MAX_TOOL_CONTENT_ITEMS.saturating_sub(2));
+    let dropped_visible_count = visible_lines.len().saturating_sub(keep_visible_count);
+    let omitted_count = previously_omitted + dropped_visible_count;
+    let kept_visible_lines =
+        visible_lines.split_off(visible_lines.len().saturating_sub(keep_visible_count));
+
+    let mut bounded = Vec::with_capacity(2 + kept_visible_lines.len());
+    bounded.push(summary);
+    if omitted_count > 0 {
+        bounded.push(Value::String(format_tool_content_truncation_marker(
+            omitted_count,
+        )));
+    }
+    bounded.extend(kept_visible_lines);
+
+    if *items == bounded {
+        return false;
+    }
+    *items = bounded;
+    true
+}
+
 fn merge_status_metadata(
     existing: &mut HashMap<String, Value>,
     incoming: HashMap<String, Value>,
 ) -> bool {
-    const MAX_TOOL_CONTENT_ITEMS: usize = 24;
     let mut changed = false;
     for (key, value) in incoming {
         if key == "toolContent" {
@@ -738,14 +1010,7 @@ fn merge_status_metadata(
                         changed = true;
                     }
                 }
-                if existing_items.len() > MAX_TOOL_CONTENT_ITEMS {
-                    // Keep the invocation summary at index 0 plus the newest
-                    // progress/result lines. This bounds long-running tool
-                    // cards and the cost of subsequent lifecycle patches.
-                    let remove_count = existing_items.len() - MAX_TOOL_CONTENT_ITEMS;
-                    existing_items.drain(1..=remove_count);
-                    changed = true;
-                }
+                changed |= bound_tool_content_items(existing_items);
                 continue;
             }
         }
@@ -1860,6 +2125,62 @@ mod tests {
         assert_eq!(current, "Working on it");
     }
 
+    #[test]
+    fn streamed_runtime_assistant_deltas_append_verbatim() {
+        let mut session = test_session("assistant-delta-verbatim");
+
+        assert!(append_streamed_runtime_assistant_delta(&mut session, "ha"));
+        assert!(append_streamed_runtime_assistant_delta(&mut session, "ha"));
+
+        let assistant_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_entries.len(), 1);
+        assert_eq!(assistant_entries[0].text, "haha");
+    }
+
+    #[test]
+    fn latest_turn_runtime_assistant_text_ignores_older_turns() {
+        let mut session = test_session("assistant-summary-scope");
+        session.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "assistant_message".to_string(),
+            source: "runtime".to_string(),
+            text: "older assistant".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "user_message".to_string(),
+            source: "chat".to_string(),
+            text: "latest prompt".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        assert_eq!(latest_turn_runtime_assistant_text(&session), None);
+
+        session.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "assistant_message".to_string(),
+            source: "runtime".to_string(),
+            text: "latest assistant".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        assert_eq!(
+            latest_turn_runtime_assistant_text(&session).as_deref(),
+            Some("latest assistant")
+        );
+    }
+
     fn test_session(id: &str) -> SessionRecord {
         SessionRecord::new(
             id.to_string(),
@@ -1941,6 +2262,46 @@ mod tests {
                 .expect("merged tool content"),
             &vec![json!("ls -la"), json!("done")]
         );
+    }
+
+    #[test]
+    fn tool_content_truncation_inserts_visible_marker() {
+        let mut session = test_session("tool-truncation");
+        let mut started = HashMap::from([
+            ("toolCallId".to_string(), json!("call-1")),
+            ("toolKind".to_string(), json!("command")),
+            ("toolTitle".to_string(), json!("Bash")),
+            ("toolStatus".to_string(), json!("running")),
+            ("toolContent".to_string(), json!(["summary"])),
+        ]);
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Bash",
+            Some(started.clone())
+        ));
+
+        for index in 0..30 {
+            started.insert("toolContent".to_string(), json!([format!("line-{index}")]));
+            assert!(upsert_runtime_status_entry(
+                &mut session,
+                "",
+                Some(started.clone())
+            ));
+        }
+
+        let tool_content = session
+            .conversation
+            .last()
+            .and_then(|entry| entry.metadata.get("toolContent"))
+            .and_then(Value::as_array)
+            .expect("tool content should remain present");
+        assert_eq!(tool_content.len(), MAX_TOOL_CONTENT_ITEMS);
+        assert_eq!(tool_content[0], json!("summary"));
+        assert_eq!(
+            tool_content[1],
+            json!("[... 8 earlier line(s) omitted ...]")
+        );
+        assert_eq!(tool_content.last().and_then(Value::as_str), Some("line-29"));
     }
 
     #[test]

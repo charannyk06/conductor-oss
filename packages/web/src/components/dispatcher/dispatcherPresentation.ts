@@ -212,11 +212,8 @@ export function shouldShowDispatcherWorkingEntry(
     if (entry.streaming) {
       return true;
     }
-    if (entry.kind !== "tool") {
-      return false;
-    }
-    const toolStatus = readString(entry.metadata.toolStatus)?.trim().toLowerCase() ?? "";
-    return toolStatus === "running" || toolStatus === "working" || toolStatus === "pending";
+    const toolPresentation = getDispatcherToolPresentation(entry);
+    return toolPresentation?.status === "running" || toolPresentation?.status === "pending";
   });
   return !hasActiveSurface;
 }

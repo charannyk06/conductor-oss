@@ -13,9 +13,9 @@ use super::bridge_registry::{
     BridgeConnectionRecord, BridgeConnectionStatus, BRIDGE_HEARTBEAT_TIMEOUT_SECS,
 };
 use super::helpers::{
-    append_output, apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
-    sanitize_terminal_text, settle_runtime_tool_statuses, upsert_runtime_status_entry,
-    ASSISTANT_DELTA_STREAM_METADATA_KEY,
+    append_output, append_runtime_assistant_snapshot, append_streamed_runtime_assistant_delta,
+    apply_openclaw_runtime_env, is_runtime_status_line, sanitize_terminal_text,
+    settle_runtime_tool_statuses, upsert_runtime_status_entry,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::types::{
@@ -585,87 +585,11 @@ fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
 }
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
-    let sanitized = sanitize_terminal_text(text);
-    if let Some(streamed) = session
-        .conversation
-        .iter_mut()
-        .rev()
-        .take_while(|entry| entry.kind != "user_message")
-        .find(|entry| {
-            entry.kind == "assistant_message"
-                && entry.source == "runtime"
-                && entry
-                    .metadata
-                    .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        })
-    {
-        if sanitized == streamed.text || streamed.text.starts_with(&sanitized) {
-            return;
-        }
-        if sanitized.starts_with(&streamed.text) {
-            streamed.text = sanitized;
-            return;
-        }
-    }
-    let normalized = sanitized.trim_end();
-    if normalized.trim().is_empty() {
-        return;
-    }
-
-    if let Some(last) = session.conversation.last_mut() {
-        if last.kind == "assistant_message" && last.source == "runtime" {
-            if merge_assistant_fragment(&mut last.text, normalized) {
-                last.created_at = Utc::now().to_rfc3339();
-            }
-            return;
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: normalized.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata: HashMap::new(),
-    });
-    enforce_conversation_limit(session);
+    let _ = append_runtime_assistant_snapshot(session, text);
 }
 
 fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) {
-    if delta.is_empty() {
-        return;
-    }
-
-    if let Some(last) = session.conversation.last_mut() {
-        if last.kind == "assistant_message" && last.source == "runtime" {
-            last.text.push_str(delta);
-            last.metadata.insert(
-                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
-                Value::Bool(true),
-            );
-            return;
-        }
-    }
-
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
-        Value::Bool(true),
-    );
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: delta.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
+    let _ = append_streamed_runtime_assistant_delta(session, delta);
 }
 
 fn append_runtime_assistant_break(session: &mut SessionRecord) {
@@ -2771,7 +2695,8 @@ mod tests {
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
     use conductor_executors::process::{spawn_process, PtyDimensions};
-    use std::collections::BTreeMap;
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command as StdCommand};
@@ -3144,6 +3069,50 @@ mod tests {
 
         maybe_update_session_branch_from_output(&mut session, "git branch -m release/1.0.0");
         assert_eq!(session.branch.as_deref(), Some("release/1.0.0"));
+    }
+
+    #[test]
+    fn assistant_delta_after_interleaved_status_updates_one_canonical_row() {
+        let mut session = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+
+        append_runtime_assistant_delta(&mut session, "hello");
+        append_runtime_status_entry_with_metadata(
+            &mut session,
+            "Bash",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("tool-1")),
+                ("toolTitle".to_string(), json!("Bash")),
+                ("toolStatus".to_string(), json!("running")),
+            ])),
+        );
+        append_runtime_assistant_delta(&mut session, " world");
+
+        let assistant_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_entries.len(), 1);
+        assert_eq!(assistant_entries[0].text, "hello world");
+        assert_eq!(
+            session
+                .conversation
+                .iter()
+                .filter(|entry| entry.kind == "status_message")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

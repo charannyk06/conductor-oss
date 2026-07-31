@@ -60,8 +60,10 @@ pub async fn is_supported(binary: &Path) -> bool {
         _ => false,
     };
 
-    if let Ok(mut cache) = support_cache().lock() {
-        cache.insert(key, supported);
+    if supported {
+        if let Ok(mut cache) = support_cache().lock() {
+            cache.insert(key, true);
+        }
     }
     supported
 }
@@ -1225,6 +1227,49 @@ printf '%s\n' EOF >> "$FAKE_LOG"
     async fn support_probe_detects_stdio_app_server() {
         let (root, binary, _, _) = fake_server("support");
         assert!(is_supported(&binary).await);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn support_probe_does_not_cache_timeout_or_command_failures() {
+        let root = unique_temp_dir("support-probe-retry");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let binary = root.join("fake-codex");
+        let mode_path = root.join("help-mode");
+        fs::write(&mode_path, "error").expect("write initial mode");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+  mode=$(cat "{}")
+  case "$mode" in
+    support)
+      printf '%s\n' 'Options: --stdio'
+      exit 0
+      ;;
+    timeout)
+      sleep 4
+      exit 0
+      ;;
+    *)
+      printf '%s\n' 'probe failed' >&2
+      exit 1
+      ;;
+  esac
+fi
+exit 0
+"#,
+            mode_path.display()
+        );
+        fs::write(&binary, script).expect("write fake server");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+            .expect("make fake server executable");
+
+        assert!(!is_supported(&binary).await);
+        fs::write(&mode_path, "timeout").expect("write timeout mode");
+        assert!(!is_supported(&binary).await);
+        fs::write(&mode_path, "support").expect("write success mode");
+        assert!(is_supported(&binary).await);
+
         let _ = fs::remove_dir_all(root);
     }
 

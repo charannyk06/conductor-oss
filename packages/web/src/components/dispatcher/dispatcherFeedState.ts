@@ -113,6 +113,26 @@ export function updateDispatcherReconnectAttemptAfterConnection(
   return connectionProvedHealthy ? 0 : reconnectAttempt;
 }
 
+type CompactTextPatchDisposition = "append" | "replay" | "mismatch" | "missing";
+
+function classifyCompactTextPatchOffset(
+  text: string | null | undefined,
+  textDelta: string,
+  textOffset: number,
+): CompactTextPatchDisposition {
+  if (typeof text !== "string") {
+    return "missing";
+  }
+  if (text.length === textOffset) {
+    return "append";
+  }
+  const expectedEnd = textOffset + textDelta.length;
+  if (text.length === expectedEnd && text.slice(textOffset) === textDelta) {
+    return "replay";
+  }
+  return "mismatch";
+}
+
 export function compactFeedPatchNeedsRefresh(
   current: SessionFeedPayload,
   delta: FeedDeltaEvent,
@@ -127,19 +147,12 @@ export function compactFeedPatchNeedsRefresh(
   }
 
   const existing = current.entries.find((entry) => entry.id === delta.entryId);
-  if (!existing) {
-    return true;
-  }
-
-  if (existing.text.length === delta.textOffset) {
-    return false;
-  }
-
-  const expectedEnd = delta.textOffset + delta.textDelta.length;
-  return !(
-    existing.text.length === expectedEnd
-    && existing.text.slice(delta.textOffset) === delta.textDelta
+  const patchDisposition = classifyCompactTextPatchOffset(
+    existing?.text,
+    delta.textDelta,
+    delta.textOffset,
   );
+  return !(patchDisposition === "append" || patchDisposition === "replay");
 }
 
 export function shouldStartCompactFeedResync(
@@ -237,16 +250,17 @@ export function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEven
       const patchIndex = entries.findIndex((entry) => entry.id === delta.entryId);
       if (patchIndex >= 0) {
         const existing = entries[patchIndex];
-        const expectedEnd = delta.textOffset + delta.textDelta.length;
-        if (existing.text.length === delta.textOffset) {
+        const patchDisposition = classifyCompactTextPatchOffset(
+          existing.text,
+          delta.textDelta,
+          delta.textOffset,
+        );
+        if (patchDisposition === "append") {
           entries[patchIndex] = {
             ...existing,
             text: existing.text + delta.textDelta,
           };
-        } else if (
-          existing.text.length === expectedEnd
-          && existing.text.slice(delta.textOffset) === delta.textDelta
-        ) {
+        } else if (patchDisposition === "replay") {
           // Idempotent replay of a frame the client already applied.
           entries[patchIndex] = existing;
         }
@@ -291,16 +305,21 @@ export function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEven
 
   if (patchIndex >= 0) {
     const existing = entries[patchIndex];
+    const textDelta = delta.textDelta;
+    const patchDisposition = textDelta !== null && delta.textOffset !== null
+      ? classifyCompactTextPatchOffset(existing.text, textDelta, delta.textOffset)
+      : null;
     if (feedEntriesEqual(existing, nextEntry)) {
       entries[patchIndex] = existing;
     } else if (
-      delta.textDelta !== null
+      textDelta !== null
+      && patchDisposition === "append"
       && nextEntry.text.startsWith(existing.text)
-      && existing.text.length + delta.textDelta.length === nextEntry.text.length
+      && existing.text.length + textDelta.length === nextEntry.text.length
     ) {
       entries[patchIndex] = {
         ...nextEntry,
-        text: existing.text + delta.textDelta,
+        text: existing.text + textDelta,
       };
     } else {
       entries[patchIndex] = nextEntry;

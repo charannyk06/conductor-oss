@@ -26,9 +26,10 @@ use super::acp_memory::{
     ACP_MAX_NOTE_CHARS, ACP_MEMORY_VERSION, ACP_RECENT_BOARD_ACTIVITY_LIMIT, ACP_SHORT_TERM_LIMIT,
 };
 use super::helpers::{
-    apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
+    append_runtime_assistant_snapshot, append_streamed_runtime_assistant_delta,
+    apply_openclaw_runtime_env, is_runtime_status_line, latest_turn_runtime_assistant_text,
     resolve_board_file, sanitize_terminal_text, settle_runtime_tool_statuses,
-    upsert_runtime_status_entry, ASSISTANT_DELTA_STREAM_METADATA_KEY,
+    upsert_runtime_status_entry,
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{
@@ -899,188 +900,12 @@ fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) -> bool 
     append_runtime_status_entry_with_metadata(session, text, None)
 }
 
-fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bool {
-    let sanitized = sanitize_terminal_text(text);
-    if let Some((canonical_index, duplicate_indexes)) =
-        find_streamed_runtime_assistant_anchor(session)
-    {
-        let mut changed = fold_streamed_runtime_assistant_duplicates(
-            session,
-            canonical_index,
-            &duplicate_indexes,
-        );
-        if sanitized.trim().is_empty() {
-            return changed;
-        }
-        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
-            if sanitized != streamed.text && !streamed.text.starts_with(&sanitized) {
-                if sanitized.starts_with(&streamed.text) {
-                    streamed.text = sanitized;
-                    changed = true;
-                } else if merge_runtime_assistant_stream_text(&mut streamed.text, &sanitized) {
-                    changed = true;
-                }
-            }
-        }
-        return changed;
-    }
-    let normalized = sanitized.trim_end();
-    if normalized.trim().is_empty() {
-        return false;
-    }
-
-    if let Some(last) = session.conversation.last_mut() {
-        if last.kind == "assistant_message" && last.source == "runtime" {
-            if merge_assistant_fragment(&mut last.text, normalized) {
-                last.created_at = Utc::now().to_rfc3339();
-                return true;
-            }
-            return false;
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: normalized.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata: HashMap::new(),
-    });
-    enforce_conversation_limit(session);
-    true
-}
-
-fn find_streamed_runtime_assistant_anchor(session: &SessionRecord) -> Option<(usize, Vec<usize>)> {
-    let turn_start = session
-        .conversation
-        .iter()
-        .rposition(|entry| entry.kind == "user_message")
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let mut canonical_index = None;
-    let mut duplicate_indexes = Vec::new();
-
-    for index in turn_start..session.conversation.len() {
-        let Some(entry) = session.conversation.get(index) else {
-            continue;
-        };
-        let is_streamed_runtime_assistant = entry.kind == "assistant_message"
-            && entry.source == "runtime"
-            && entry
-                .metadata
-                .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
-                .and_then(Value::as_bool)
-                == Some(true);
-        if !is_streamed_runtime_assistant {
-            continue;
-        }
-        if canonical_index.is_none() {
-            canonical_index = Some(index);
-        } else {
-            duplicate_indexes.push(index);
-        }
-    }
-
-    canonical_index.map(|index| (index, duplicate_indexes))
-}
-
-fn merge_runtime_assistant_stream_text(current: &mut String, incoming: &str) -> bool {
-    if incoming.is_empty() {
-        return false;
-    }
-    if current.is_empty() {
-        current.push_str(incoming);
-        return true;
-    }
-    if current == incoming || current.ends_with(incoming) {
-        return false;
-    }
-    if incoming.starts_with(current.as_str()) {
-        current.clear();
-        current.push_str(incoming);
-        return true;
-    }
-
-    current.push_str(incoming);
-    true
-}
-
-fn fold_streamed_runtime_assistant_duplicates(
-    session: &mut SessionRecord,
-    canonical_index: usize,
-    duplicate_indexes: &[usize],
-) -> bool {
-    let duplicate_texts = duplicate_indexes
-        .iter()
-        .filter_map(|index| {
-            session
-                .conversation
-                .get(*index)
-                .map(|entry| entry.text.clone())
-        })
-        .collect::<Vec<_>>();
-    let mut changed = false;
-    if let Some(canonical) = session.conversation.get_mut(canonical_index) {
-        canonical.metadata.insert(
-            ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
-            Value::Bool(true),
-        );
-        for text in duplicate_texts {
-            if merge_runtime_assistant_stream_text(&mut canonical.text, &text) {
-                changed = true;
-            }
-        }
-    }
-    for index in duplicate_indexes.iter().rev() {
-        session.conversation.remove(*index);
-        changed = true;
-    }
-    changed
-}
-
 fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) -> bool {
-    if delta.is_empty() {
-        return false;
-    }
+    append_streamed_runtime_assistant_delta(session, delta)
+}
 
-    if let Some((canonical_index, duplicate_indexes)) =
-        find_streamed_runtime_assistant_anchor(session)
-    {
-        let mut changed = fold_streamed_runtime_assistant_duplicates(
-            session,
-            canonical_index,
-            &duplicate_indexes,
-        );
-        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
-            if merge_runtime_assistant_stream_text(&mut streamed.text, delta) {
-                changed = true;
-            }
-            streamed.metadata.insert(
-                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
-                Value::Bool(true),
-            );
-            return changed;
-        }
-    }
-
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
-        Value::Bool(true),
-    );
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "assistant_message".to_string(),
-        source: "runtime".to_string(),
-        text: delta.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
-    true
+fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bool {
+    append_runtime_assistant_snapshot(session, text)
 }
 
 fn append_runtime_assistant_break(session: &mut SessionRecord) -> bool {
@@ -3987,15 +3812,7 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
-                if let Some(summary) = thread
-                    .conversation
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
-                    .map(|entry| entry.text.trim())
-                    .filter(|text| !text.is_empty())
-                    .map(ToOwned::to_owned)
-                {
+                if let Some(summary) = latest_turn_runtime_assistant_text(thread) {
                     thread.summary = Some(summary.clone());
                     thread.metadata.insert("summary".to_string(), summary);
                 }
@@ -4927,6 +4744,62 @@ mod tests {
             !entry.metadata.contains_key("codexThreadId")
                 && !entry.metadata.contains_key("nativeResumeTarget")
         }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn completed_dispatcher_turn_summary_ignores_older_assistant_messages() {
+        let (root, state) = build_test_state("acp-complete-summary-scope").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.agent = "codex".to_string();
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "assistant_message".to_string(),
+            source: "runtime".to_string(),
+            text: "older assistant".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "user_message".to_string(),
+            source: "chat".to_string(),
+            text: "latest prompt".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        thread.summary = None;
+        thread.metadata.remove("summary");
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &runtime.runtime_id,
+                ExecutorOutput::Completed { exit_code: 0 },
+            )
+            .await
+            .expect("completion should apply");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(
+            updated.summary.as_deref(),
+            Some("Dispatcher ready for the next turn")
+        );
+        assert_ne!(updated.summary.as_deref(), Some("older assistant"));
 
         let _ = fs::remove_dir_all(root);
     }

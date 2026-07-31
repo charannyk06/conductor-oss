@@ -83,6 +83,18 @@ test("shouldShowDispatcherWorkingEntry fills the dead interval after the latest 
     ),
     true,
   );
+  assert.equal(
+    shouldShowDispatcherWorkingEntry(
+      [...entries, makeEntry({
+        id: "tool-pending",
+        kind: "tool",
+        text: "Bash",
+        metadata: { toolTitle: "Bash" },
+      })],
+      "running",
+    ),
+    false,
+  );
 });
 
 test("shouldShowDispatcherWorkingEntry disappears once the session becomes idle or terminal", () => {

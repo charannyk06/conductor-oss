@@ -274,7 +274,7 @@ fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
         return Vec::new();
     };
 
-    extract_content_block_events(content)
+    extract_content_block_events(content, message_discriminator(value).as_deref())
 }
 
 fn extract_stream_event_outputs(event: &Value) -> Vec<ExecutorOutput> {
@@ -283,15 +283,16 @@ fn extract_stream_event_outputs(event: &Value) -> Vec<ExecutorOutput> {
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
-            .map(|content| extract_content_block_events(content))
+            .map(|content| {
+                extract_content_block_events(content, message_discriminator(event).as_deref())
+            })
             .unwrap_or_default(),
         Some("content_block_start") => event
             .get("content_block")
             .map(|block| {
-                let stable_id = event
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .map(|index| format!("claude-block-{index}"));
+                let stable_id = event.get("index").and_then(Value::as_u64).map(|index| {
+                    content_block_fallback_id(message_discriminator(event).as_deref(), index)
+                });
                 extract_content_block_event(block, stable_id.as_deref())
             })
             .unwrap_or_default(),
@@ -320,14 +321,65 @@ fn extract_stream_event_outputs(event: &Value) -> Vec<ExecutorOutput> {
     }
 }
 
-fn extract_content_block_events(content: &[Value]) -> Vec<ExecutorOutput> {
+fn extract_content_block_events(
+    content: &[Value],
+    message_discriminator: Option<&str>,
+) -> Vec<ExecutorOutput> {
     let mut events = Vec::new();
     for (index, block) in content.iter().enumerate() {
-        let stable_id = format!("claude-block-{index}");
+        let stable_id = content_block_fallback_id(message_discriminator, index as u64);
         events.extend(extract_content_block_event(block, Some(&stable_id)));
     }
 
     events
+}
+
+fn message_discriminator(value: &Value) -> Option<String> {
+    let direct_id = value
+        .get("message")
+        .and_then(|message| message.get("id"))
+        .or_else(|| value.get("message_id"))
+        .or_else(|| value.get("messageId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(sanitize_message_discriminator);
+    if direct_id.is_some() {
+        return direct_id;
+    }
+
+    let fallback_source = value
+        .get("message")
+        .or_else(|| value.get("content_block"))
+        .or_else(|| value.get("delta"))
+        .cloned()
+        .unwrap_or_else(|| value.clone());
+    let serialized = serde_json::to_string(&fallback_source).ok()?;
+    let sanitized = sanitize_message_discriminator(&serialized);
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn sanitize_message_discriminator(raw: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch);
+        } else if !sanitized.ends_with('-') {
+            sanitized.push('-');
+        }
+        if sanitized.len() >= 48 {
+            break;
+        }
+    }
+    sanitized.trim_matches('-').to_string()
+}
+
+fn content_block_fallback_id(message_discriminator: Option<&str>, index: u64) -> String {
+    let message_discriminator = message_discriminator
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("message");
+    format!("claude-{message_discriminator}-block-{index}")
 }
 
 fn extract_content_block_event(block: &Value, fallback_id: Option<&str>) -> Vec<ExecutorOutput> {
@@ -786,6 +838,51 @@ mod tests {
         assert_eq!(
             metadata.get("nativeResumeTarget").and_then(Value::as_str),
             Some("session-123")
+        );
+    }
+
+    #[test]
+    fn fallback_tool_call_ids_include_message_discriminator_and_block_index() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let first = executor.parse_output(
+            r#"{"type":"assistant","message":{"id":"msg-1","content":[{"type":"thinking","thinking":"Inspecting"}]}}"#,
+        );
+        let second = executor.parse_output(
+            r#"{"type":"assistant","message":{"id":"msg-2","content":[{"type":"thinking","thinking":"Inspecting"}]}}"#,
+        );
+
+        let ExecutorOutput::Composite(first_events) = first else {
+            panic!("expected composite output");
+        };
+        let ExecutorOutput::Composite(second_events) = second else {
+            panic!("expected composite output");
+        };
+        let ExecutorOutput::StructuredStatus {
+            metadata: first_metadata,
+            ..
+        } = &first_events[0]
+        else {
+            panic!("expected structured status");
+        };
+        let ExecutorOutput::StructuredStatus {
+            metadata: second_metadata,
+            ..
+        } = &second_events[0]
+        else {
+            panic!("expected structured status");
+        };
+
+        assert_eq!(
+            first_metadata.get("toolCallId").and_then(Value::as_str),
+            Some("claude-msg-1-block-0")
+        );
+        assert_eq!(
+            second_metadata.get("toolCallId").and_then(Value::as_str),
+            Some("claude-msg-2-block-0")
+        );
+        assert_ne!(
+            first_metadata.get("toolCallId"),
+            second_metadata.get("toolCallId")
         );
     }
 }
