@@ -27,7 +27,8 @@ use super::acp_memory::{
 };
 use super::helpers::{
     apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
-    resolve_board_file, runtime_tool_metadata, sanitize_terminal_text,
+    resolve_board_file, sanitize_terminal_text, settle_runtime_tool_statuses,
+    upsert_runtime_status_entry, ASSISTANT_DELTA_STREAM_METADATA_KEY,
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{
@@ -891,41 +892,7 @@ fn append_runtime_status_entry_with_metadata(
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
 ) -> bool {
-    let sanitized = sanitize_terminal_text(text);
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if let Some(last) = session.conversation.last() {
-        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
-        {
-            return false;
-        }
-    }
-
-    let mut metadata = explicit_metadata.unwrap_or_default();
-    if metadata.is_empty() {
-        if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
-            if let Some(object) = tool_metadata.as_object() {
-                for (key, value) in object {
-                    metadata.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "status_message".to_string(),
-        source: "runtime".to_string(),
-        text: trimmed.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
-    true
+    upsert_runtime_status_entry(session, text, explicit_metadata)
 }
 
 fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) -> bool {
@@ -934,6 +901,29 @@ fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) -> bool 
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bool {
     let sanitized = sanitize_terminal_text(text);
+    if let Some((canonical_index, duplicate_indexes)) =
+        find_streamed_runtime_assistant_anchor(session)
+    {
+        let mut changed = fold_streamed_runtime_assistant_duplicates(
+            session,
+            canonical_index,
+            &duplicate_indexes,
+        );
+        if sanitized.trim().is_empty() {
+            return changed;
+        }
+        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
+            if sanitized != streamed.text && !streamed.text.starts_with(&sanitized) {
+                if sanitized.starts_with(&streamed.text) {
+                    streamed.text = sanitized;
+                    changed = true;
+                } else if merge_runtime_assistant_stream_text(&mut streamed.text, &sanitized) {
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
     let normalized = sanitized.trim_end();
     if normalized.trim().is_empty() {
         return false;
@@ -957,6 +947,137 @@ fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bo
         created_at: Utc::now().to_rfc3339(),
         attachments: Vec::new(),
         metadata: HashMap::new(),
+    });
+    enforce_conversation_limit(session);
+    true
+}
+
+fn find_streamed_runtime_assistant_anchor(session: &SessionRecord) -> Option<(usize, Vec<usize>)> {
+    let turn_start = session
+        .conversation
+        .iter()
+        .rposition(|entry| entry.kind == "user_message")
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let mut canonical_index = None;
+    let mut duplicate_indexes = Vec::new();
+
+    for index in turn_start..session.conversation.len() {
+        let Some(entry) = session.conversation.get(index) else {
+            continue;
+        };
+        let is_streamed_runtime_assistant = entry.kind == "assistant_message"
+            && entry.source == "runtime"
+            && entry
+                .metadata
+                .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
+                .and_then(Value::as_bool)
+                == Some(true);
+        if !is_streamed_runtime_assistant {
+            continue;
+        }
+        if canonical_index.is_none() {
+            canonical_index = Some(index);
+        } else {
+            duplicate_indexes.push(index);
+        }
+    }
+
+    canonical_index.map(|index| (index, duplicate_indexes))
+}
+
+fn merge_runtime_assistant_stream_text(current: &mut String, incoming: &str) -> bool {
+    if incoming.is_empty() {
+        return false;
+    }
+    if current.is_empty() {
+        current.push_str(incoming);
+        return true;
+    }
+    if current == incoming || current.ends_with(incoming) {
+        return false;
+    }
+    if incoming.starts_with(current.as_str()) {
+        current.clear();
+        current.push_str(incoming);
+        return true;
+    }
+
+    current.push_str(incoming);
+    true
+}
+
+fn fold_streamed_runtime_assistant_duplicates(
+    session: &mut SessionRecord,
+    canonical_index: usize,
+    duplicate_indexes: &[usize],
+) -> bool {
+    let duplicate_texts = duplicate_indexes
+        .iter()
+        .filter_map(|index| {
+            session
+                .conversation
+                .get(*index)
+                .map(|entry| entry.text.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    if let Some(canonical) = session.conversation.get_mut(canonical_index) {
+        canonical.metadata.insert(
+            ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+            Value::Bool(true),
+        );
+        for text in duplicate_texts {
+            if merge_runtime_assistant_stream_text(&mut canonical.text, &text) {
+                changed = true;
+            }
+        }
+    }
+    for index in duplicate_indexes.iter().rev() {
+        session.conversation.remove(*index);
+        changed = true;
+    }
+    changed
+}
+
+fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) -> bool {
+    if delta.is_empty() {
+        return false;
+    }
+
+    if let Some((canonical_index, duplicate_indexes)) =
+        find_streamed_runtime_assistant_anchor(session)
+    {
+        let mut changed = fold_streamed_runtime_assistant_duplicates(
+            session,
+            canonical_index,
+            &duplicate_indexes,
+        );
+        if let Some(streamed) = session.conversation.get_mut(canonical_index) {
+            if merge_runtime_assistant_stream_text(&mut streamed.text, delta) {
+                changed = true;
+            }
+            streamed.metadata.insert(
+                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+                Value::Bool(true),
+            );
+            return changed;
+        }
+    }
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    session.conversation.push(ConversationEntry {
+        id: Uuid::new_v4().to_string(),
+        kind: "assistant_message".to_string(),
+        source: "runtime".to_string(),
+        text: delta.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        attachments: Vec::new(),
+        metadata,
     });
     enforce_conversation_limit(session);
     true
@@ -3774,6 +3895,18 @@ impl AppState {
         touch_acp_dispatcher_heartbeat(thread);
 
         match event {
+            ExecutorOutput::AssistantDelta(delta) => {
+                clear_dispatcher_runtime_error(thread);
+                if !thread.status.is_terminal() {
+                    if thread.status != SessionStatus::Working {
+                        thread.status = SessionStatus::Working;
+                    }
+                    thread.activity = Some("active".to_string());
+                }
+                if append_runtime_assistant_delta(thread, &delta) {
+                    feed_dirty = true;
+                }
+            }
             ExecutorOutput::Stdout(line) => {
                 clear_dispatcher_runtime_error(thread);
                 if apply_dispatcher_stdout_event(thread, &line) {
@@ -3800,13 +3933,6 @@ impl AppState {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .or_else(|| {
-                        metadata
-                            .get("codexThreadId")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                    })
                 {
                     thread.metadata.insert(
                         ACP_RESUME_TARGET_METADATA_KEY.to_string(),
@@ -3861,6 +3987,18 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
+                if let Some(summary) = thread
+                    .conversation
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+                    .map(|entry| entry.text.trim())
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned)
+                {
+                    thread.summary = Some(summary.clone());
+                    thread.metadata.insert("summary".to_string(), summary);
+                }
                 if clear_parser_state(thread) {
                     feed_dirty = true;
                 }
@@ -3986,6 +4124,17 @@ impl AppState {
             feed_dirty = true;
         }
         if parser_state_signature(thread) != parser_state_before {
+            feed_dirty = true;
+        }
+        if clear_runtime
+            && settle_runtime_tool_statuses(
+                thread,
+                matches!(
+                    thread.status,
+                    SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated
+                ),
+            )
+        {
             feed_dirty = true;
         }
 
@@ -4330,7 +4479,7 @@ mod tests {
     use conductor_executors::executor::{
         Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
@@ -4688,7 +4837,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_dispatchers_rebuild_state_instead_of_reusing_native_resume_targets() {
+    fn headless_dispatchers_ignore_persisted_resume_targets_including_codex() {
         let mut thread = SessionRecord::new(
             "session-1".to_string(),
             "demo".to_string(),
@@ -4712,10 +4861,74 @@ mod tests {
             dispatcher_resume_target(&thread, &AgentKind::QwenCode),
             None
         );
+        assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Gemini), None);
         assert_eq!(
             dispatcher_resume_target(&thread, &AgentKind::ClaudeCode),
             Some("session-123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn codex_thread_started_metadata_stays_telemetry_only() {
+        let (root, state) = build_test_state("acp-codex-thread-started-telemetry").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        thread.agent = "codex".to_string();
+        thread.metadata.insert(
+            ACP_RESUME_TARGET_METADATA_KEY.to_string(),
+            "stale-thread".to_string(),
+        );
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let runtime = register_test_dispatcher_runtime(&state, &thread.id).await;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "eventKind".to_string(),
+            Value::String("thread_started".to_string()),
+        );
+        metadata.insert(
+            "codexThreadId".to_string(),
+            Value::String("thread-live".to_string()),
+        );
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                &runtime.runtime_id,
+                ExecutorOutput::StructuredStatus {
+                    text: String::new(),
+                    metadata,
+                },
+            )
+            .await
+            .expect("thread started metadata should apply");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(
+            updated.metadata.get("codexThreadId").map(String::as_str),
+            Some("thread-live")
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_RESUME_TARGET_METADATA_KEY)
+                .map(String::as_str),
+            Some("stale-thread")
+        );
+        assert_eq!(dispatcher_resume_target(&updated, &AgentKind::Codex), None);
+        assert!(updated.conversation.iter().all(|entry| {
+            entry.metadata.get("codexThreadId").is_none()
+                && entry.metadata.get("nativeResumeTarget").is_none()
+        }));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

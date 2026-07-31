@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_stream_json_text_delta_emits_stdout() {
+    fn parse_stream_json_text_delta_emits_assistant_delta() {
         let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
         let output = executor.parse_output(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}"#,
@@ -434,7 +434,7 @@ mod tests {
         };
         assert!(matches!(
             events.first(),
-            Some(ExecutorOutput::Stdout(text)) if text == "partial"
+            Some(ExecutorOutput::AssistantDelta(text)) if text == "partial"
         ));
     }
 }

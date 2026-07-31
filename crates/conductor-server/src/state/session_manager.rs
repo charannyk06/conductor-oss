@@ -14,7 +14,8 @@ use super::bridge_registry::{
 };
 use super::helpers::{
     append_output, apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
-    runtime_tool_metadata, sanitize_terminal_text,
+    sanitize_terminal_text, settle_runtime_tool_statuses, upsert_runtime_status_entry,
+    ASSISTANT_DELTA_STREAM_METADATA_KEY,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::types::{
@@ -585,6 +586,29 @@ fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
     let sanitized = sanitize_terminal_text(text);
+    if let Some(streamed) = session
+        .conversation
+        .iter_mut()
+        .rev()
+        .take_while(|entry| entry.kind != "user_message")
+        .find(|entry| {
+            entry.kind == "assistant_message"
+                && entry.source == "runtime"
+                && entry
+                    .metadata
+                    .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+    {
+        if sanitized == streamed.text || streamed.text.starts_with(&sanitized) {
+            return;
+        }
+        if sanitized.starts_with(&streamed.text) {
+            streamed.text = sanitized;
+            return;
+        }
+    }
     let normalized = sanitized.trim_end();
     if normalized.trim().is_empty() {
         return;
@@ -607,6 +631,39 @@ fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
         created_at: Utc::now().to_rfc3339(),
         attachments: Vec::new(),
         metadata: HashMap::new(),
+    });
+    enforce_conversation_limit(session);
+}
+
+fn append_runtime_assistant_delta(session: &mut SessionRecord, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+
+    if let Some(last) = session.conversation.last_mut() {
+        if last.kind == "assistant_message" && last.source == "runtime" {
+            last.text.push_str(delta);
+            last.metadata.insert(
+                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+                Value::Bool(true),
+            );
+            return;
+        }
+    }
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    session.conversation.push(ConversationEntry {
+        id: Uuid::new_v4().to_string(),
+        kind: "assistant_message".to_string(),
+        source: "runtime".to_string(),
+        text: delta.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        attachments: Vec::new(),
+        metadata,
     });
     enforce_conversation_limit(session);
 }
@@ -670,40 +727,7 @@ fn append_runtime_status_entry_with_metadata(
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
 ) {
-    let sanitized = sanitize_terminal_text(text);
-    let trimmed = sanitized.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-
-    if let Some(last) = session.conversation.last() {
-        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
-        {
-            return;
-        }
-    }
-
-    let mut metadata = HashMap::new();
-    if let Some(explicit_metadata) = explicit_metadata {
-        metadata = explicit_metadata;
-    } else if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
-        if let Some(object) = tool_metadata.as_object() {
-            for (key, value) in object {
-                metadata.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    session.conversation.push(ConversationEntry {
-        id: Uuid::new_v4().to_string(),
-        kind: "status_message".to_string(),
-        source: "runtime".to_string(),
-        text: trimmed.to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        attachments: Vec::new(),
-        metadata,
-    });
-    enforce_conversation_limit(session);
+    let _ = upsert_runtime_status_entry(session, text, explicit_metadata);
 }
 
 fn clear_parser_state(session: &mut SessionRecord) {
@@ -1679,6 +1703,10 @@ impl AppState {
                     self.append_and_apply(session_id, persisted.as_deref(), output)
                         .await?;
                 }
+                ExecutorOutput::AssistantDelta(delta) => {
+                    self.append_and_apply(session_id, None, ExecutorOutput::AssistantDelta(delta))
+                        .await?;
+                }
                 ExecutorOutput::StructuredStatus { text, metadata } => {
                     self.append_and_apply(
                         session_id,
@@ -1738,6 +1766,13 @@ impl AppState {
 
         // Apply event (inline from apply_runtime_event logic)
         match event {
+            ExecutorOutput::AssistantDelta(ref delta) => {
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_assistant_delta(session, delta);
+            }
             ExecutorOutput::Stdout(ref stdout_line) => {
                 apply_stdout_event(session, stdout_line, is_live);
             }
@@ -1828,6 +1863,13 @@ impl AppState {
         );
 
         match event {
+            ExecutorOutput::AssistantDelta(delta) => {
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_assistant_delta(session, &delta);
+            }
             ExecutorOutput::Stdout(line) => {
                 apply_stdout_event(session, &line, is_live);
             }
@@ -1969,6 +2011,14 @@ impl AppState {
                 }
             }
             ExecutorOutput::Composite(_) => {}
+        }
+
+        if clear_live_handle {
+            let failed = matches!(
+                session.status,
+                SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated
+            );
+            settle_runtime_tool_statuses(session, failed);
         }
 
         let dispatcher_thread_id = linked_dispatcher_thread_id(session);

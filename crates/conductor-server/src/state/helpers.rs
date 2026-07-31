@@ -1,14 +1,17 @@
+use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use conductor_core::support::resolve_project_path;
 
 use super::types::{
-    SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
+    ConversationEntry, SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES,
+    DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::BridgeConnectionStatus;
 use super::{DETACHED_PID_METADATA_KEY, RUNTIME_MODE_METADATA_KEY};
@@ -27,6 +30,7 @@ const OPENCLAW_GATEWAY_SCOPES_ENV: &str = "OPENCLAW_GATEWAY_SCOPES";
 const LEGACY_DIRECT_RUNTIME_SUMMARY: &str =
     "Legacy direct terminal session is no longer supported. Archive it and start a fresh live terminal session.";
 const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tmux runtime removal";
+pub(crate) const ASSISTANT_DELTA_STREAM_METADATA_KEY: &str = "assistantDeltaStream";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ResolvedOpenClawRuntimeEnv {
@@ -716,6 +720,169 @@ pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) -> 
     true
 }
 
+fn merge_status_metadata(
+    existing: &mut HashMap<String, Value>,
+    incoming: HashMap<String, Value>,
+) -> bool {
+    const MAX_TOOL_CONTENT_ITEMS: usize = 24;
+    let mut changed = false;
+    for (key, value) in incoming {
+        if key == "toolContent" {
+            if let (Some(existing_items), Some(incoming_items)) = (
+                existing.get_mut(&key).and_then(Value::as_array_mut),
+                value.as_array(),
+            ) {
+                for item in incoming_items {
+                    if !existing_items.contains(item) {
+                        existing_items.push(item.clone());
+                        changed = true;
+                    }
+                }
+                if existing_items.len() > MAX_TOOL_CONTENT_ITEMS {
+                    // Keep the invocation summary at index 0 plus the newest
+                    // progress/result lines. This bounds long-running tool
+                    // cards and the cost of subsequent lifecycle patches.
+                    let remove_count = existing_items.len() - MAX_TOOL_CONTENT_ITEMS;
+                    existing_items.drain(1..=remove_count);
+                    changed = true;
+                }
+                continue;
+            }
+        }
+
+        if existing.get(&key) != Some(&value) {
+            existing.insert(key, value);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Upsert a runtime status/tool lifecycle event. Events with a `toolCallId`
+/// update one stable conversation entry from running through completion;
+/// legacy text-only events retain the previous append/deduplicate behavior.
+pub(crate) fn upsert_runtime_status_entry(
+    session: &mut SessionRecord,
+    text: &str,
+    explicit_metadata: Option<HashMap<String, Value>>,
+) -> bool {
+    let sanitized = sanitize_terminal_text(text);
+    let trimmed = sanitized.trim();
+    let mut metadata = explicit_metadata.unwrap_or_default();
+    if metadata.is_empty() && !trimmed.is_empty() {
+        if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
+            if let Some(object) = tool_metadata.as_object() {
+                metadata.extend(
+                    object
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+        }
+    }
+
+    let tool_call_id = metadata
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if trimmed.is_empty() && tool_call_id.is_none() {
+        return false;
+    }
+
+    if let Some(tool_call_id) = tool_call_id {
+        if let Some(existing) = session
+            .conversation
+            .iter_mut()
+            .rev()
+            .take_while(|entry| entry.kind != "user_message")
+            .find(|entry| {
+                entry.kind == "status_message"
+                    && entry.source == "runtime"
+                    && entry
+                        .metadata
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        == Some(tool_call_id.as_str())
+            })
+        {
+            let mut changed = merge_status_metadata(&mut existing.metadata, metadata);
+            if !trimmed.is_empty() && existing.text != trimmed {
+                existing.text = trimmed.to_string();
+                changed = true;
+            }
+            return changed;
+        }
+    } else if let Some(last) = session.conversation.last_mut() {
+        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
+        {
+            return merge_status_metadata(&mut last.metadata, metadata);
+        }
+    }
+
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    session.conversation.push(ConversationEntry {
+        id: Uuid::new_v4().to_string(),
+        kind: "status_message".to_string(),
+        source: "runtime".to_string(),
+        text: trimmed.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        attachments: Vec::new(),
+        metadata,
+    });
+    if session.conversation.len() > DEFAULT_SESSION_HISTORY_LIMIT {
+        let excess = session.conversation.len() - DEFAULT_SESSION_HISTORY_LIMIT;
+        session.conversation.drain(..excess);
+    }
+    true
+}
+
+/// Persistently settle identified tool calls from the current user turn at a
+/// runtime terminal boundary. Feed-time fallback alone is insufficient: once
+/// a later turn becomes live, stale persisted `running` metadata would make
+/// old cards spin again.
+pub(crate) fn settle_runtime_tool_statuses(session: &mut SessionRecord, failed: bool) -> bool {
+    let settled_status = if failed { "error" } else { "success" };
+    let mut changed = false;
+    for entry in session
+        .conversation
+        .iter_mut()
+        .rev()
+        .take_while(|entry| entry.kind != "user_message")
+    {
+        if entry.kind != "status_message" || entry.source != "runtime" {
+            continue;
+        }
+        let identified = entry
+            .metadata
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        let running = entry
+            .metadata
+            .get("toolStatus")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .is_some_and(|status| matches!(status.as_str(), "running" | "working" | "pending"));
+        if identified && running {
+            entry.metadata.insert(
+                "toolStatus".to_string(),
+                Value::String(settled_status.to_string()),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn is_runtime_transport_event_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') || !trimmed.contains("\"type\"") {
@@ -966,6 +1133,32 @@ fn push_runtime_assistant_segments(
     entry: &super::types::ConversationEntry,
     streaming: bool,
 ) {
+    // Typed assistant deltas have already been separated from tool/status
+    // transport events by the executor. Preserve their bytes exactly; the
+    // legacy line parser below intentionally normalizes terminal output and
+    // would otherwise corrupt spaces/newlines at chunk boundaries.
+    if entry
+        .metadata
+        .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        if !entry.text.is_empty() {
+            feed.push(json!({
+                "id": entry.id,
+                "kind": "assistant",
+                "label": "Assistant",
+                "text": entry.text,
+                "createdAt": entry.created_at,
+                "attachments": entry.attachments,
+                "source": entry.source,
+                "streaming": streaming,
+                "metadata": entry.metadata,
+            }));
+        }
+        return;
+    }
+
     let mut assistant_text = String::new();
     let mut segment_index = 0usize;
 
@@ -1343,20 +1536,37 @@ fn finalize_tool_statuses(feed: &mut [Value], session_status: &SessionStatus) {
             if !matches!(normalized.as_str(), "running" | "working" | "pending") {
                 continue;
             }
-
-            let has_later_entry = feed
-                .iter()
-                .skip(index + 1)
-                .any(|candidate| candidate.get("kind").and_then(Value::as_str).is_some());
-
-            if has_later_entry {
-                "success"
-            } else if session_is_streaming {
-                "running"
-            } else if session_failed {
-                "error"
+            let identified = metadata
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            if identified {
+                // Identified lifecycle state is authoritative while live. At
+                // a terminal boundary, settle orphaned running calls so a
+                // crash or kill cannot leave a permanent spinner.
+                if session_is_streaming {
+                    "running"
+                } else if session_failed {
+                    "error"
+                } else {
+                    "success"
+                }
             } else {
-                "success"
+                let has_later_entry = feed
+                    .iter()
+                    .skip(index + 1)
+                    .any(|candidate| candidate.get("kind").and_then(Value::as_str).is_some());
+
+                if has_later_entry {
+                    "success"
+                } else if session_is_streaming {
+                    "running"
+                } else if session_failed {
+                    "error"
+                } else {
+                    "success"
+                }
             }
         };
 
@@ -1650,6 +1860,197 @@ mod tests {
         assert_eq!(current, "Working on it");
     }
 
+    fn test_session(id: &str) -> SessionRecord {
+        SessionRecord::new(
+            id.to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "claude-code".to_string(),
+            None,
+            None,
+            "Test".to_string(),
+            None,
+        )
+    }
+
+    #[test]
+    fn identified_tool_lifecycle_upserts_one_stable_entry() {
+        let mut session = test_session("tool-upsert");
+        let started = HashMap::from([
+            ("toolCallId".to_string(), json!("call-1")),
+            ("toolKind".to_string(), json!("command")),
+            ("toolTitle".to_string(), json!("Bash")),
+            ("toolStatus".to_string(), json!("running")),
+            ("toolContent".to_string(), json!(["ls -la"])),
+        ]);
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Bash",
+            Some(started)
+        ));
+        let original_id = session
+            .conversation
+            .last()
+            .expect("started tool entry")
+            .id
+            .clone();
+        let original_created_at = session
+            .conversation
+            .last()
+            .expect("started tool entry")
+            .created_at
+            .clone();
+
+        // Claude tool_result events do not carry a display label. The
+        // metadata-only completion must update the existing card rather than
+        // getting dropped or replacing its title with a generic label.
+        let completed = HashMap::from([
+            ("toolCallId".to_string(), json!("call-1")),
+            ("toolStatus".to_string(), json!("success")),
+            ("toolContent".to_string(), json!(["done"])),
+        ]);
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "",
+            Some(completed)
+        ));
+
+        let tool_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "status_message")
+            .collect::<Vec<_>>();
+        assert_eq!(tool_entries.len(), 1);
+        assert_eq!(tool_entries[0].id, original_id);
+        assert_eq!(tool_entries[0].created_at, original_created_at);
+        assert_eq!(tool_entries[0].text, "Bash");
+        assert_eq!(
+            tool_entries[0]
+                .metadata
+                .get("toolStatus")
+                .and_then(Value::as_str),
+            Some("success")
+        );
+        assert_eq!(
+            tool_entries[0]
+                .metadata
+                .get("toolContent")
+                .and_then(Value::as_array)
+                .expect("merged tool content"),
+            &vec![json!("ls -la"), json!("done")]
+        );
+    }
+
+    #[test]
+    fn identified_interleaved_tool_updates_correlate_by_call_id() {
+        let mut session = test_session("tool-interleaved");
+        for tool_call_id in ["call-a", "call-b"] {
+            assert!(upsert_runtime_status_entry(
+                &mut session,
+                "Read",
+                Some(HashMap::from([
+                    ("toolCallId".to_string(), json!(tool_call_id)),
+                    ("toolTitle".to_string(), json!("Read")),
+                    ("toolStatus".to_string(), json!("running")),
+                ])),
+            ));
+        }
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("call-a")),
+                ("toolStatus".to_string(), json!("error")),
+            ])),
+        ));
+
+        let status_for = |tool_call_id: &str| {
+            session
+                .conversation
+                .iter()
+                .find(|entry| {
+                    entry.metadata.get("toolCallId").and_then(Value::as_str) == Some(tool_call_id)
+                })
+                .and_then(|entry| entry.metadata.get("toolStatus"))
+                .and_then(Value::as_str)
+        };
+        assert_eq!(status_for("call-a"), Some("error"));
+        assert_eq!(status_for("call-b"), Some("running"));
+    }
+
+    #[test]
+    fn terminal_tool_settlement_persists_across_later_live_turn() {
+        let mut session = test_session("tool-terminal-settle");
+        session.conversation.push(ConversationEntry {
+            id: "turn-1".to_string(),
+            kind: "user_message".to_string(),
+            text: "first turn".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "user".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Bash",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("call-1")),
+                ("toolTitle".to_string(), json!("Bash")),
+                ("toolStatus".to_string(), json!("running")),
+            ])),
+        ));
+        assert!(settle_runtime_tool_statuses(&mut session, false));
+        assert_eq!(
+            session.conversation.last().unwrap().metadata["toolStatus"].as_str(),
+            Some("success")
+        );
+
+        session.conversation.push(ConversationEntry {
+            id: "turn-2".to_string(),
+            kind: "user_message".to_string(),
+            text: "second turn".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "user".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.status = SessionStatus::Working;
+        let feed = build_dispatcher_chat_feed(&session);
+        let old_tool = feed
+            .iter()
+            .find(|entry| entry["metadata"]["toolCallId"].as_str() == Some("call-1"))
+            .expect("old tool card remains in history");
+        assert_eq!(old_tool["metadata"]["toolStatus"].as_str(), Some("success"));
+    }
+
+    #[test]
+    fn typed_assistant_feed_preserves_exact_whitespace() {
+        let mut session = test_session("typed-delta-feed");
+        session.status = SessionStatus::Working;
+        let exact = " Hello  world\n\nnext line ";
+        session.conversation.push(ConversationEntry {
+            id: "assistant-stream".to_string(),
+            kind: "assistant_message".to_string(),
+            text: exact.to_string(),
+            created_at: "2026-07-27T12:00:00Z".to_string(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::from([(
+                ASSISTANT_DELTA_STREAM_METADATA_KEY.to_string(),
+                Value::Bool(true),
+            )]),
+        });
+
+        let feed = build_dispatcher_chat_feed(&session);
+        let assistant = feed
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some("assistant-stream"))
+            .expect("typed assistant feed row");
+        assert_eq!(assistant.get("text").and_then(Value::as_str), Some(exact));
+    }
+
     #[test]
     fn resolve_openclaw_runtime_env_prefers_explicit_env_and_expands_config_placeholders() {
         let env_map = HashMap::from([
@@ -1781,6 +2182,45 @@ mod tests {
                 .and_then(|metadata| metadata.get("toolStatus"))
                 .and_then(Value::as_str),
             Some("running")
+        );
+    }
+
+    #[test]
+    fn finalize_tool_statuses_settles_identified_tools_only_at_terminal_boundary() {
+        let mut feed = vec![
+            json!({
+                "kind": "tool",
+                "metadata": { "toolCallId": "call-1", "toolStatus": "running" }
+            }),
+            json!({ "kind": "assistant", "metadata": {} }),
+        ];
+
+        let mut live_feed = feed.clone();
+        finalize_tool_statuses(&mut live_feed, &SessionStatus::Working);
+        assert_eq!(
+            live_feed[0]["metadata"]["toolStatus"].as_str(),
+            Some("running")
+        );
+
+        finalize_tool_statuses(&mut feed, &SessionStatus::Done);
+
+        assert_eq!(
+            feed[0]
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get("toolStatus"))
+                .and_then(Value::as_str),
+            Some("success")
+        );
+
+        let mut failed_feed = vec![json!({
+            "kind": "tool",
+            "metadata": { "toolCallId": "call-2", "toolStatus": "running" }
+        })];
+        finalize_tool_statuses(&mut failed_feed, &SessionStatus::Killed);
+        assert_eq!(
+            failed_feed[0]["metadata"]["toolStatus"].as_str(),
+            Some("error")
         );
     }
 

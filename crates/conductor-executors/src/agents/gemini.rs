@@ -149,16 +149,22 @@ impl Executor for GeminiExecutor {
 
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             match value.get("type").and_then(Value::as_str) {
-                Some("init") | Some("tool_result") => return ExecutorOutput::Stdout(String::new()),
+                Some("init") => return ExecutorOutput::Stdout(String::new()),
+                Some("tool_result") => {
+                    return tool_result_event(&value)
+                        .unwrap_or_else(|| ExecutorOutput::Stdout(String::new()));
+                }
                 Some("message") => {
                     if value.get("role").and_then(Value::as_str) == Some("assistant") {
                         if let Some(text) = value
                             .get("content")
                             .and_then(Value::as_str)
-                            .map(str::trim)
                             .filter(|text| !text.is_empty())
                         {
-                            return ExecutorOutput::Stdout(text.to_string());
+                            if value.get("delta").and_then(Value::as_bool) == Some(true) {
+                                return ExecutorOutput::AssistantDelta(text.to_string());
+                            }
+                            return ExecutorOutput::Stdout(text.trim().to_string());
                         }
                     }
                     return ExecutorOutput::Stdout(String::new());
@@ -170,17 +176,26 @@ impl Executor for GeminiExecutor {
                         .map(str::trim)
                         .filter(|name| !name.is_empty())
                         .unwrap_or("tool");
+                    let mut metadata = tool_metadata(
+                        &normalize_tool_kind(tool_name),
+                        &tool_title(tool_name),
+                        "running",
+                        tool_content(value.get("parameters")),
+                    );
+                    if let Some(tool_call_id) = value
+                        .get("tool_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        metadata.insert(
+                            "toolCallId".to_string(),
+                            Value::String(tool_call_id.to_string()),
+                        );
+                    }
                     return ExecutorOutput::StructuredStatus {
                         text: tool_title(tool_name),
-                        metadata: tool_metadata(
-                            &normalize_tool_kind(tool_name),
-                            &tool_title(tool_name),
-                            "running",
-                            tool_content(
-                                value.get("parameters"),
-                                value.get("tool_id").and_then(Value::as_str),
-                            ),
-                        ),
+                        metadata,
                     };
                 }
                 Some("result") => {
@@ -229,12 +244,8 @@ fn normalize_tool_kind(tool_name: &str) -> String {
     tool_name.trim().to_ascii_lowercase()
 }
 
-fn tool_content(parameters: Option<&Value>, tool_id: Option<&str>) -> Vec<String> {
+fn tool_content(parameters: Option<&Value>) -> Vec<String> {
     let mut content = Vec::new();
-
-    if let Some(tool_id) = tool_id.map(str::trim).filter(|tool_id| !tool_id.is_empty()) {
-        content.push(format!("id: {tool_id}"));
-    }
 
     let Some(parameters) = parameters else {
         return content;
@@ -269,6 +280,54 @@ fn tool_content(parameters: Option<&Value>, tool_id: Option<&str>) -> Vec<String
     }
 
     content
+}
+
+fn tool_result_event(value: &Value) -> Option<ExecutorOutput> {
+    let tool_call_id = value
+        .get("tool_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let status = match value
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("error" | "failed" | "failure" | "cancelled" | "canceled") => "error",
+        _ if value.get("error").is_some_and(|error| !error.is_null()) => "error",
+        _ => "success",
+    };
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "toolCallId".to_string(),
+        Value::String(tool_call_id.to_string()),
+    );
+    metadata.insert("toolStatus".to_string(), Value::String(status.to_string()));
+
+    let content = ["output", "result", "error"]
+        .iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| serde_json::to_string(value).ok())
+        })
+        .map(|text| text.trim().chars().take(4_000).collect::<String>())
+        .filter(|text| !text.is_empty());
+    if let Some(content) = content {
+        metadata.insert(
+            "toolContent".to_string(),
+            Value::Array(vec![Value::String(content)]),
+        );
+    }
+
+    Some(ExecutorOutput::StructuredStatus {
+        text: String::new(),
+        metadata,
+    })
 }
 
 fn tool_metadata(
@@ -363,18 +422,42 @@ mod tests {
             metadata.get("toolStatus").and_then(Value::as_str),
             Some("running")
         );
+        assert_eq!(
+            metadata.get("toolCallId").and_then(Value::as_str),
+            Some("list_directory_1")
+        );
     }
 
     #[test]
-    fn parse_assistant_message_emits_stdout() {
+    fn parse_tool_result_emits_metadata_only_correlated_completion() {
         let executor = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini"));
-        let line = r#"{"type":"message","role":"assistant","content":"done","delta":true}"#;
+        let line = r#"{"type":"tool_result","tool_id":"list_directory_1","status":"success","output":"a.txt\nb.txt"}"#;
 
         let output = executor.parse_output(line);
-        let ExecutorOutput::Stdout(text) = output else {
-            panic!("expected stdout");
+        let ExecutorOutput::StructuredStatus { text, metadata } = output else {
+            panic!("expected structured tool completion");
+        };
+        assert!(text.is_empty());
+        assert_eq!(
+            metadata.get("toolCallId").and_then(Value::as_str),
+            Some("list_directory_1")
+        );
+        assert_eq!(
+            metadata.get("toolStatus").and_then(Value::as_str),
+            Some("success")
+        );
+    }
+
+    #[test]
+    fn parse_assistant_delta_preserves_stream_boundary() {
+        let executor = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini"));
+        let line = r#"{"type":"message","role":"assistant","content":" done\n","delta":true}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::AssistantDelta(text) = output else {
+            panic!("expected assistant delta");
         };
 
-        assert_eq!(text, "done");
+        assert_eq!(text, " done\n");
     }
 }

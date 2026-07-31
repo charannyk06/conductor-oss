@@ -200,8 +200,25 @@ export function shouldShowDispatcherWorkingEntry(
   entries: readonly SessionFeedEntry[],
   sessionStatus: string | null | undefined,
 ): boolean {
-  return isDispatcherActiveStatus(sessionStatus)
-    && findLastUserEntryIndex(entries) >= 0;
+  if (!isDispatcherActiveStatus(sessionStatus)) {
+    return false;
+  }
+  const lastUserIndex = findLastUserEntryIndex(entries);
+  if (lastUserIndex < 0) {
+    return false;
+  }
+
+  const hasActiveSurface = entries.slice(lastUserIndex + 1).some((entry) => {
+    if (entry.streaming) {
+      return true;
+    }
+    if (entry.kind !== "tool") {
+      return false;
+    }
+    const toolStatus = readString(entry.metadata.toolStatus)?.trim().toLowerCase() ?? "";
+    return toolStatus === "running" || toolStatus === "working" || toolStatus === "pending";
+  });
+  return !hasActiveSurface;
 }
 
 function getAbsoluteFeedIndex(feed: Pick<SessionFeedPayload, "entries" | "totalEntries">, index: number): number {

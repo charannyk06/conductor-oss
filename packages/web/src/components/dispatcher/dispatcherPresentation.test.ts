@@ -57,7 +57,19 @@ test("shouldShowDispatcherWorkingEntry fills the dead interval after the latest 
       [...entries, makeEntry({ id: "assistant-1", kind: "assistant", text: "On it", streaming: true })],
       "working",
     ),
-    true,
+    false,
+  );
+  assert.equal(
+    shouldShowDispatcherWorkingEntry(
+      [...entries, makeEntry({
+        id: "tool-running",
+        kind: "tool",
+        text: "Bash",
+        metadata: { toolStatus: "running" },
+      })],
+      "running",
+    ),
+    false,
   );
   assert.equal(
     shouldShowDispatcherWorkingEntry(

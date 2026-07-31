@@ -90,6 +90,10 @@ pub enum ExecutorInput {
 pub enum ExecutorOutput {
     /// Standard output line.
     Stdout(String),
+    /// Incremental assistant text. Unlike `Stdout`, this is a byte-exact
+    /// continuation of the current assistant message and must never be
+    /// trimmed, deduplicated, or separated with an inferred newline.
+    AssistantDelta(String),
     /// Standard error line.
     Stderr(String),
     /// Structured tool/status event that should render as a runtime status row.
@@ -314,6 +318,7 @@ fn flatten_parsed_output(event: ExecutorOutput) -> Vec<ExecutorOutput> {
         ExecutorOutput::Stdout(text) | ExecutorOutput::Stderr(text) if text.trim().is_empty() => {
             Vec::new()
         }
+        ExecutorOutput::AssistantDelta(text) if text.is_empty() => Vec::new(),
         other => vec![other],
     }
 }
@@ -495,6 +500,25 @@ mod tests {
 
         let output = parsed_rx.recv().await.unwrap();
         assert!(matches!(output, ExecutorOutput::Stdout(ref text) if text == "hello"));
+        assert!(parsed_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrap_parsed_output_preserves_whitespace_only_assistant_delta() {
+        let (raw_tx, raw_rx) = mpsc::channel::<ExecutorOutput>(2);
+        let mut parsed_rx = wrap_parsed_output(DummyExecutor, raw_rx);
+
+        raw_tx
+            .send(ExecutorOutput::AssistantDelta(" \n".to_string()))
+            .await
+            .unwrap();
+        drop(raw_tx);
+
+        let output = parsed_rx.recv().await.unwrap();
+        assert!(matches!(
+            output,
+            ExecutorOutput::AssistantDelta(ref text) if text == " \n"
+        ));
         assert!(parsed_rx.recv().await.is_none());
     }
 }
