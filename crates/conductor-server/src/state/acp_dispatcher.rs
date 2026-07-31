@@ -4924,8 +4924,8 @@ mod tests {
         );
         assert_eq!(dispatcher_resume_target(&updated, &AgentKind::Codex), None);
         assert!(updated.conversation.iter().all(|entry| {
-            entry.metadata.get("codexThreadId").is_none()
-                && entry.metadata.get("nativeResumeTarget").is_none()
+            !entry.metadata.contains_key("codexThreadId")
+                && !entry.metadata.contains_key("nativeResumeTarget")
         }));
 
         let _ = fs::remove_dir_all(root);

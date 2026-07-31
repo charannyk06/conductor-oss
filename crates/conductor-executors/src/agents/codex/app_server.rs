@@ -2,9 +2,9 @@
 //!
 //! App-server exposes byte-exact assistant deltas and stable item lifecycle IDs,
 //! which the legacy `codex exec --json` stream does not consistently provide.
-//! This module deliberately stays independent from [`super::codex`] so callers
-//! can probe support and fall back to the legacy transport without changing the
-//! executor trait surface.
+//! This module stays behind the Codex executor boundary so callers can probe
+//! support and fall back to the legacy transport without changing the executor
+//! trait surface.
 
 use anyhow::{anyhow, Context, Result};
 use conductor_core::types::AgentKind;

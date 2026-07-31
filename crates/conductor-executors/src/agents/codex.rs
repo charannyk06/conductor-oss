@@ -9,11 +9,13 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{codex_app_server, discover_binary};
+use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{
     spawn_process, spawn_process_no_stdin_with_clean_env, spawn_process_with_env_removals,
 };
+
+mod app_server;
 
 /// OpenAI Codex CLI executor.
 #[derive(Clone)]
@@ -456,12 +458,12 @@ impl Executor for CodexExecutor {
         // current Codex releases. Prefer app-server for structured dispatcher
         // turns so the runtime receives true assistant token deltas and stable
         // tool lifecycle IDs. Older Codex binaries keep the legacy path below.
-        if options.structured_output && codex_app_server::is_supported(&self.binary).await {
+        if options.structured_output && app_server::is_supported(&self.binary).await {
             let app_server_home = headless_home.clone();
             let legacy_home = headless_home.clone();
             return codex_app_server_or_legacy(
                 &self.binary,
-                codex_app_server::spawn(&self.binary, options.clone(), env.clone())
+                app_server::spawn(&self.binary, options.clone(), env.clone())
                     .await
                     .map(|handle| {
                         let (pid, kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
