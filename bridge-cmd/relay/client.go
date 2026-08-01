@@ -738,6 +738,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 					previous.cancel()
 				}
 				go func(request bridgeEnvelope, requestID string, handle *apiStreamHandle) {
+					defer streamCancel()
 					defer activeAPIStreams.removeIfMatch(requestID, handle)
 					if err := proxyAPIStream(
 						streamCtx,
