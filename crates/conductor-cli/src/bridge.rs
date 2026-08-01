@@ -1,19 +1,24 @@
 use anyhow::{Context, Result};
 use base64::Engine;
-use conductor_types::{BridgeToBrowserMessage, BrowserToBridgeMessage, FileEntry, FileEntryKind};
+use conductor_types::{
+    BridgeToBrowserMessage, BrowserToBridgeMessage, FileEntry, FileEntryKind,
+    API_STREAM_V1_CAPABILITY,
+};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::{AbortHandle, Id as TaskId, JoinSet};
 use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
@@ -33,6 +38,10 @@ const CONTROL_SCOPE: &str = "conductor-bridge-control";
 const MAX_PREVIEW_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_PREVIEW_REQUEST_BODY_BYTES: usize = 5 * 1024 * 1024;
 const PREVIEW_REQUEST_TIMEOUT_SECS: u64 = 30;
+const BRIDGE_CONTROL_QUEUE_CAPACITY: usize = 128;
+const BRIDGE_STREAM_QUEUE_CAPACITY: usize = 128;
+const MAX_BRIDGE_CONTROL_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_PROXY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BridgeRuntimeState {
@@ -54,6 +63,54 @@ struct PreviewProxyResponse {
     status: u16,
     headers: std::collections::BTreeMap<String, String>,
     body_base64: Option<String>,
+}
+
+#[derive(Debug)]
+struct StreamTaskAbortEntry {
+    task_id: TaskId,
+    abort_handle: AbortHandle,
+}
+
+#[derive(Debug, Default)]
+struct StreamTaskAbortRegistry {
+    by_request_id: HashMap<String, StreamTaskAbortEntry>,
+    by_task_id: HashMap<TaskId, String>,
+}
+
+impl StreamTaskAbortRegistry {
+    fn register(&mut self, request_id: String, abort_handle: AbortHandle) {
+        let task_id = abort_handle.id();
+        if let Some(previous) = self.by_request_id.insert(
+            request_id.clone(),
+            StreamTaskAbortEntry {
+                task_id,
+                abort_handle,
+            },
+        ) {
+            self.by_task_id.remove(&previous.task_id);
+            previous.abort_handle.abort();
+        }
+        self.by_task_id.insert(task_id, request_id);
+    }
+
+    fn remove_by_request_id(&mut self, request_id: &str) -> Option<StreamTaskAbortEntry> {
+        let entry = self.by_request_id.remove(request_id)?;
+        self.by_task_id.remove(&entry.task_id);
+        Some(entry)
+    }
+
+    fn remove_by_task_id(&mut self, task_id: TaskId) -> Option<StreamTaskAbortEntry> {
+        let request_id = self.by_task_id.remove(&task_id)?;
+        self.by_request_id.remove(&request_id)
+    }
+
+    fn drain_abort_handles(&mut self) -> Vec<AbortHandle> {
+        self.by_task_id.clear();
+        self.by_request_id
+            .drain()
+            .map(|(_, entry)| entry.abort_handle)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +225,42 @@ fn status_payload(connected: bool) -> BridgeToBrowserMessage {
         os: std::env::consts::OS.to_string(),
         connected,
         version: Some(conductor_core::BUILD_VERSION.to_string()),
+        capabilities: vec![API_STREAM_V1_CAPABILITY.to_string()],
+    }
+}
+
+fn register_stream_task_abort(
+    registry: &Arc<StdMutex<StreamTaskAbortRegistry>>,
+    request_id: String,
+    abort_handle: AbortHandle,
+) {
+    if let Ok(mut aborts) = registry.lock() {
+        aborts.register(request_id, abort_handle);
+    }
+}
+
+fn remove_completed_stream_task_abort(
+    registry: &Arc<StdMutex<StreamTaskAbortRegistry>>,
+    task_id: TaskId,
+) {
+    if let Ok(mut aborts) = registry.lock() {
+        aborts.remove_by_task_id(task_id);
+    }
+}
+
+fn cancel_stream_task_abort(registry: &Arc<StdMutex<StreamTaskAbortRegistry>>, request_id: &str) {
+    if let Ok(mut aborts) = registry.lock() {
+        if let Some(entry) = aborts.remove_by_request_id(request_id) {
+            entry.abort_handle.abort();
+        }
+    }
+}
+
+fn abort_all_stream_tasks(registry: &Arc<StdMutex<StreamTaskAbortRegistry>>) {
+    if let Ok(mut aborts) = registry.lock() {
+        for abort_handle in aborts.drain_abort_handles() {
+            abort_handle.abort();
+        }
     }
 }
 
@@ -264,6 +357,108 @@ fn resolve_backend_terminal_websocket_url(backend: &Url, candidate: &str) -> Res
     Ok(url)
 }
 
+fn resolve_proxy_url(backend: &Url, path: &str) -> Result<Url> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        Url::parse(path).context("invalid proxied URL")
+    } else {
+        backend.join(path).context("failed to resolve backend URL")
+    }
+}
+
+fn sanitize_proxy_request_headers(
+    headers: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut sanitized = BTreeMap::new();
+    for (name, value) in headers {
+        let lower = name.trim().to_ascii_lowercase();
+        if lower.is_empty()
+            || matches!(
+                lower.as_str(),
+                "authorization"
+                    | "cookie"
+                    | "host"
+                    | "connection"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "x-forwarded-host"
+                    | "x-forwarded-proto"
+            )
+        {
+            continue;
+        }
+        if lower.contains('\r') || lower.contains('\n') {
+            anyhow::bail!("invalid proxy request header name");
+        }
+        let clean_value = sanitize_header_value(value);
+        sanitized.insert(lower, clean_value);
+    }
+    Ok(sanitized)
+}
+
+fn sanitize_proxy_response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> BTreeMap<String, String> {
+    let mut sanitized = BTreeMap::new();
+    for (name, value) in headers.iter() {
+        let name = name.as_str().to_ascii_lowercase();
+        match name.as_str() {
+            "connection"
+            | "proxy-connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "content-length"
+            | "content-encoding"
+            | "upgrade"
+            | "proxy-authenticate"
+            | "proxy-authentication-info"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "set-cookie"
+            | "set-cookie2" => {
+                continue;
+            }
+            _ => {}
+        }
+
+        let value = match value.to_str() {
+            Ok(value) => sanitize_header_value(value),
+            Err(_) => continue,
+        };
+        if value.contains('\r') || value.contains('\n') {
+            continue;
+        }
+        sanitized.insert(name, value);
+    }
+    sanitized
+}
+
+fn build_proxy_request(
+    client: &reqwest::Client,
+    backend: &Url,
+    method: &str,
+    path: &str,
+    headers: &BTreeMap<String, String>,
+    body: Option<Value>,
+) -> Result<reqwest::RequestBuilder> {
+    let method = method
+        .parse::<reqwest::Method>()
+        .context("invalid HTTP method")?;
+    let url = resolve_proxy_url(backend, path)?;
+    let mut request = client.request(method, url);
+    for (name, value) in sanitize_proxy_request_headers(headers)? {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .context("invalid proxy request header name")?;
+        let header_value = reqwest::header::HeaderValue::from_str(&value)
+            .context("invalid proxy request header value")?;
+        request = request.header(header_name, header_value);
+    }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    Ok(request)
+}
+
 async fn proxy_request(
     client: &reqwest::Client,
     backend: &Url,
@@ -271,23 +466,9 @@ async fn proxy_request(
     path: &str,
     body: Option<Value>,
 ) -> Result<BackendProxyResponse> {
-    let method = method
-        .parse::<reqwest::Method>()
-        .context("invalid HTTP method")?;
-    let url = if path.starts_with("http://") || path.starts_with("https://") {
-        Url::parse(path).context("invalid proxied URL")?
-    } else {
-        backend
-            .join(path)
-            .context("failed to resolve backend URL")?
-    };
-
-    let mut request = client.request(method, url);
-    if let Some(body) = body {
-        request = request.json(&body);
-    }
-
-    let response = request.send().await?;
+    let response = build_proxy_request(client, backend, method, path, &BTreeMap::new(), body)?
+        .send()
+        .await?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -316,6 +497,185 @@ async fn proxy_request(
     };
 
     Ok(BackendProxyResponse { status, body })
+}
+
+fn bridge_message_to_text(payload: &BridgeToBrowserMessage) -> Result<String> {
+    let encoded = serde_json::to_string(payload)?;
+    if encoded.len() > MAX_BRIDGE_CONTROL_MESSAGE_BYTES {
+        anyhow::bail!("bridge control payload exceeded the websocket message size limit");
+    }
+    Ok(encoded)
+}
+
+fn try_send_bridge_payload(
+    tx: &mpsc::Sender<Message>,
+    payload: &BridgeToBrowserMessage,
+) -> Result<()> {
+    let text = bridge_message_to_text(payload)?;
+    tx.try_send(Message::Text(text.into()))
+        .map_err(|err| anyhow::anyhow!("bridge outbound queue is unavailable: {err}"))
+}
+
+async fn send_bridge_payload(
+    tx: &mpsc::Sender<Message>,
+    payload: &BridgeToBrowserMessage,
+) -> Result<()> {
+    let text = bridge_message_to_text(payload)?;
+    tx.send(Message::Text(text.into()))
+        .await
+        .map_err(|_| anyhow::anyhow!("bridge outbound queue is closed"))
+}
+
+async fn send_stream_failure_response(
+    tx: &mpsc::Sender<Message>,
+    id: &str,
+    status: u16,
+    message: &str,
+) -> Result<()> {
+    send_bridge_payload(
+        tx,
+        &BridgeToBrowserMessage::ApiStreamStart {
+            id: id.to_string(),
+            status,
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        },
+    )
+    .await?;
+    send_bridge_payload(
+        tx,
+        &BridgeToBrowserMessage::ApiStreamChunk {
+            id: id.to_string(),
+            chunk_base64: base64::engine::general_purpose::STANDARD
+                .encode(json!({ "error": message }).to_string().as_bytes()),
+        },
+    )
+    .await?;
+    send_bridge_payload(
+        tx,
+        &BridgeToBrowserMessage::ApiStreamEnd {
+            id: id.to_string(),
+            error: None,
+        },
+    )
+    .await
+}
+
+struct ProxyStreamRequest {
+    id: String,
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Option<Value>,
+}
+
+struct ProxyStreamContext {
+    client: reqwest::Client,
+    backend: Url,
+    stream_tx: mpsc::Sender<Message>,
+}
+
+async fn proxy_stream_request(
+    context: ProxyStreamContext,
+    request: ProxyStreamRequest,
+) -> Result<()> {
+    let ProxyStreamContext {
+        client,
+        backend,
+        stream_tx,
+    } = context;
+    let ProxyStreamRequest {
+        id,
+        method,
+        path,
+        headers,
+        body,
+    } = request;
+
+    let response = match build_proxy_request(&client, &backend, &method, &path, &headers, body)?
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            send_stream_failure_response(
+                &stream_tx,
+                &id,
+                StatusCode::BAD_GATEWAY.as_u16(),
+                &err.to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let status = response.status().as_u16();
+    let response_headers = sanitize_proxy_response_headers(response.headers());
+    let chunk_stream = Box::pin(futures_util::stream::unfold(
+        response,
+        |mut response| async move {
+            match response.chunk().await {
+                Ok(Some(chunk)) => Some((Ok(chunk.to_vec()), response)),
+                Ok(None) => None,
+                Err(err) => Some((Err(err.to_string()), response)),
+            }
+        },
+    ));
+
+    forward_proxy_stream_response(id, status, response_headers, stream_tx, chunk_stream).await
+}
+
+async fn forward_proxy_stream_response(
+    id: String,
+    status: u16,
+    headers: BTreeMap<String, String>,
+    tx: mpsc::Sender<Message>,
+    mut chunks: std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = std::result::Result<Vec<u8>, String>> + Send>,
+    >,
+) -> Result<()> {
+    send_bridge_payload(
+        &tx,
+        &BridgeToBrowserMessage::ApiStreamStart {
+            id: id.clone(),
+            status,
+            headers,
+        },
+    )
+    .await?;
+
+    while let Some(chunk) = chunks.next().await {
+        match chunk {
+            Ok(chunk) => {
+                for part in chunk.chunks(MAX_PROXY_STREAM_CHUNK_BYTES) {
+                    send_bridge_payload(
+                        &tx,
+                        &BridgeToBrowserMessage::ApiStreamChunk {
+                            id: id.clone(),
+                            chunk_base64: base64::engine::general_purpose::STANDARD.encode(part),
+                        },
+                    )
+                    .await?;
+                }
+            }
+            Err(err) => {
+                send_bridge_payload(
+                    &tx,
+                    &BridgeToBrowserMessage::ApiStreamEnd {
+                        id,
+                        error: Some(err),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    send_bridge_payload(
+        &tx,
+        &BridgeToBrowserMessage::ApiStreamEnd { id, error: None },
+    )
+    .await
 }
 
 async fn proxy_preview_request(
@@ -650,7 +1010,7 @@ async fn poll_session_output(
     active_session: Arc<Mutex<Option<String>>>,
     client: reqwest::Client,
     backend: Url,
-    bridge_tx: mpsc::UnboundedSender<Message>,
+    bridge_tx: mpsc::Sender<Message>,
 ) {
     let mut current_session = String::new();
     let mut last_output = String::new();
@@ -695,14 +1055,41 @@ async fn poll_session_output(
 
         if !delta.is_empty() {
             let message = BridgeToBrowserMessage::TerminalOutput { data: delta };
-            if let Ok(text) = serde_json::to_string(&message) {
-                if bridge_tx.send(Message::Text(text.into())).is_err() {
+            if let Ok(text) = bridge_message_to_text(&message) {
+                if bridge_tx.try_send(Message::Text(text.into())).is_err() {
                     break;
                 }
             }
         }
 
         last_output = output.to_string();
+    }
+}
+
+async fn recv_prioritized_bridge_message(
+    control_rx: &mut mpsc::Receiver<Message>,
+    stream_rx: &mut mpsc::Receiver<Message>,
+) -> Option<Message> {
+    loop {
+        match control_rx.try_recv() {
+            Ok(message) => return Some(message),
+            Err(mpsc::error::TryRecvError::Disconnected) if stream_rx.is_closed() => return None,
+            Err(mpsc::error::TryRecvError::Disconnected | mpsc::error::TryRecvError::Empty) => {}
+        }
+
+        tokio::select! {
+            biased;
+            control = control_rx.recv() => match control {
+                Some(message) => return Some(message),
+                None if stream_rx.is_closed() => return None,
+                None => {}
+            },
+            stream = stream_rx.recv(), if !stream_rx.is_closed() => match stream {
+                Some(message) => return Some(message),
+                None if control_rx.is_closed() => return None,
+                None => {}
+            },
+        }
     }
 }
 
@@ -715,19 +1102,24 @@ async fn run_bridge_connection_once(
     let ws_url = bridge_websocket_url(relay, token)?;
     let (ws, _) = connect_async(ws_url.as_str()).await?;
     let (mut outbound, mut inbound) = ws.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (control_tx, mut control_rx) = mpsc::channel::<Message>(BRIDGE_CONTROL_QUEUE_CAPACITY);
+    let (stream_tx, mut stream_rx) = mpsc::channel::<Message>(BRIDGE_STREAM_QUEUE_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let active_session = Arc::new(Mutex::new(None::<String>));
+    let mut stream_tasks = JoinSet::new();
+    let stream_task_aborts = Arc::new(StdMutex::new(StreamTaskAbortRegistry::default()));
 
     let writer = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
+        while let Some(message) =
+            recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx).await
+        {
             if outbound.send(message).await.is_err() {
                 break;
             }
         }
     });
 
-    let heartbeat_tx = tx.clone();
+    let heartbeat_tx = control_tx.clone();
     let heartbeat_stop = stop.clone();
     let heartbeat_task = tokio::spawn(async move {
         let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
@@ -738,8 +1130,11 @@ async fn run_bridge_connection_once(
             if heartbeat_stop.load(Ordering::Relaxed) {
                 break;
             }
-            if let Ok(payload) = serde_json::to_string(&status_payload(true)) {
-                if heartbeat_tx.send(Message::Text(payload.into())).is_err() {
+            if let Ok(payload) = bridge_message_to_text(&status_payload(true)) {
+                if heartbeat_tx
+                    .try_send(Message::Text(payload.into()))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -752,11 +1147,11 @@ async fn run_bridge_connection_once(
         active_session.clone(),
         client.clone(),
         backend.clone(),
-        tx.clone(),
+        control_tx.clone(),
     ));
 
-    if let Ok(payload) = serde_json::to_string(&status_payload(true)) {
-        let _ = tx.send(Message::Text(payload.into()));
+    if let Ok(payload) = bridge_message_to_text(&status_payload(true)) {
+        let _ = control_tx.try_send(Message::Text(payload.into()));
     }
     save_state(&BridgeRuntimeState {
         relay_url: relay.to_string(),
@@ -772,6 +1167,19 @@ async fn run_bridge_connection_once(
 
     let outcome = loop {
         tokio::select! {
+            Some(joined) = stream_tasks.join_next_with_id(), if !stream_tasks.is_empty() => {
+                let completed_task_id = match &joined {
+                    Ok((task_id, _)) => *task_id,
+                    Err(err) => err.id(),
+                };
+                remove_completed_stream_task_abort(&stream_task_aborts, completed_task_id);
+                if let Err(err) = joined {
+                    if err.is_cancelled() {
+                        continue;
+                    }
+                    tracing::warn!(error = %err, "bridge API stream task failed");
+                }
+            }
             _ = disconnect_check.tick() => {
                 if load_token()?.is_none() {
                     break ConnectionOutcome::Exit;
@@ -788,13 +1196,14 @@ async fn run_bridge_connection_once(
                             Ok(event) => {
                                 match event {
                                     BrowserToBridgeMessage::Ping => {
-                                        let payload = serde_json::to_string(&BridgeToBrowserMessage::Pong)?;
-                                        let _ = tx.send(Message::Text(payload.into()));
+                                        let _ = try_send_bridge_payload(&control_tx, &BridgeToBrowserMessage::Pong);
                                     }
                                     BrowserToBridgeMessage::FileBrowse { path } => {
                                         let entries = browse_path(&path);
-                                        let payload = serde_json::to_string(&BridgeToBrowserMessage::FileTree { path, entries })?;
-                                        let _ = tx.send(Message::Text(payload.into()));
+                                        let _ = try_send_bridge_payload(
+                                            &control_tx,
+                                            &BridgeToBrowserMessage::FileTree { path, entries },
+                                        );
                                     }
                                     BrowserToBridgeMessage::ApiRequest { id, method, path, body } => {
                                         if let Some(session_id) = extract_session_id(&path) {
@@ -810,22 +1219,64 @@ async fn run_bridge_connection_once(
 
                                         match proxy_request(&client, &backend, &method, &path, body).await {
                                             Ok(response) => {
-                                                let payload = BridgeToBrowserMessage::ApiResponse {
+                                                let _ = try_send_bridge_payload(&control_tx, &BridgeToBrowserMessage::ApiResponse {
                                                     id,
                                                     status: response.status,
                                                     body: response.body,
-                                                };
-                                                let _ = tx.send(Message::Text(serde_json::to_string(&payload)?.into()));
+                                                });
                                             }
                                             Err(err) => {
-                                                let payload = BridgeToBrowserMessage::ApiResponse {
+                                                let _ = try_send_bridge_payload(&control_tx, &BridgeToBrowserMessage::ApiResponse {
                                                     id,
                                                     status: StatusCode::BAD_GATEWAY.as_u16(),
                                                     body: json!({ "error": err.to_string() }),
-                                                };
-                                                let _ = tx.send(Message::Text(serde_json::to_string(&payload)?.into()));
+                                                });
                                             }
                                         }
+                                    }
+                                    BrowserToBridgeMessage::ApiStreamRequest {
+                                        id,
+                                        method,
+                                        path,
+                                        headers,
+                                        body,
+                                    } => {
+                                        let context = ProxyStreamContext {
+                                            stream_tx: stream_tx.clone(),
+                                            client: client.clone(),
+                                            backend: backend.clone(),
+                                        };
+                                        let request = ProxyStreamRequest {
+                                            id,
+                                            method,
+                                            path,
+                                            headers,
+                                            body,
+                                        };
+                                        let failure_tx = context.stream_tx.clone();
+                                        let stream_id = request.id.clone();
+                                        let abort_handle = stream_tasks.spawn(async move {
+                                            let fallback_id = request.id.clone();
+                                            if let Err(err) =
+                                                proxy_stream_request(context, request).await
+                                            {
+                                                let _ = send_stream_failure_response(
+                                                    &failure_tx,
+                                                    &fallback_id,
+                                                    StatusCode::BAD_GATEWAY.as_u16(),
+                                                    &err.to_string(),
+                                                )
+                                                .await;
+                                            }
+                                        });
+                                        register_stream_task_abort(
+                                            &stream_task_aborts,
+                                            stream_id,
+                                            abort_handle,
+                                        );
+                                    }
+                                    BrowserToBridgeMessage::ApiStreamCancel { id } => {
+                                        cancel_stream_task_abort(&stream_task_aborts, &id);
                                     }
                                     BrowserToBridgeMessage::PreviewRequest {
                                         id,
@@ -867,7 +1318,7 @@ async fn run_bridge_connection_once(
                                                 }
                                             }
                                         };
-                                        let _ = tx.send(Message::Text(serde_json::to_string(&payload)?.into()));
+                                        let _ = try_send_bridge_payload(&control_tx, &payload);
                                     }
                                     BrowserToBridgeMessage::TerminalInput { data } => {
                                         if let Some(session_id) = current_active_session(&active_session).await {
@@ -909,7 +1360,7 @@ async fn run_bridge_connection_once(
                         }
                     }
                     Ok(Message::Ping(data)) => {
-                        let _ = tx.send(Message::Pong(data));
+                        let _ = control_tx.try_send(Message::Pong(data));
                     }
                     Ok(Message::Pong(_)) => {}
                     Ok(Message::Binary(_)) => {}
@@ -928,7 +1379,17 @@ async fn run_bridge_connection_once(
         }
     };
 
-    drop(tx);
+    abort_all_stream_tasks(&stream_task_aborts);
+    stream_tasks.abort_all();
+    while let Some(joined) = stream_tasks.join_next().await {
+        if let Err(err) = joined {
+            if !err.is_cancelled() {
+                tracing::warn!(error = %err, "bridge API stream task failed during shutdown");
+            }
+        }
+    }
+    drop(control_tx);
+    drop(stream_tx);
     stop.store(true, Ordering::Relaxed);
     let _ = heartbeat_task.await;
     let _ = poller_task.await;
@@ -1143,5 +1604,256 @@ mod tests {
         assert!(check_preview_host_allowed("192.168.1.1", Some(80)).is_some());
         assert!(check_preview_host_allowed("example.com", Some(443)).is_some());
         assert!(check_preview_host_allowed("metadata.google.internal", Some(80)).is_some());
+    }
+
+    #[tokio::test]
+    async fn bridge_writer_prioritizes_control_queue_over_stream_backlog() {
+        let (control_tx, mut control_rx) = mpsc::channel::<Message>(1);
+        let (stream_tx, mut stream_rx) = mpsc::channel::<Message>(1);
+
+        stream_tx
+            .try_send(Message::Text("stream".into()))
+            .expect("stream backlog should fit in its own queue");
+        control_tx
+            .try_send(Message::Text("control".into()))
+            .expect("control queue should stay available even when stream queue is full");
+
+        let first = recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("prioritized reader should return a message");
+        assert_eq!(first, Message::Text("control".into()));
+
+        let second = recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("prioritized reader should return the queued stream message");
+        assert_eq!(second, Message::Text("stream".into()));
+    }
+
+    #[tokio::test]
+    async fn proxy_stream_request_emits_start_chunk_end_without_blocking_other_control_messages() {
+        let (upstream_tx, upstream_rx) = mpsc::channel::<std::result::Result<Vec<u8>, String>>(4);
+        let (control_tx, mut control_rx) = mpsc::channel::<Message>(BRIDGE_CONTROL_QUEUE_CAPACITY);
+        let (stream_tx, mut stream_rx) = mpsc::channel::<Message>(BRIDGE_STREAM_QUEUE_CAPACITY);
+        let chunk_stream = Box::pin(futures_util::stream::unfold(
+            upstream_rx,
+            |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
+        ));
+        let stream_task = tokio::spawn(forward_proxy_stream_response(
+            "stream-1".to_string(),
+            200,
+            BTreeMap::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                (
+                    "cache-control".to_string(),
+                    "no-cache, no-transform".to_string(),
+                ),
+                ("x-accel-buffering".to_string(), "no".to_string()),
+            ]),
+            stream_tx.clone(),
+            chunk_stream,
+        ));
+
+        let start = match recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("stream should emit start")
+        {
+            Message::Text(text) => {
+                serde_json::from_str::<BridgeToBrowserMessage>(&text).expect("decode start")
+            }
+            other => panic!("expected text message, got {other:?}"),
+        };
+        assert_eq!(
+            start,
+            BridgeToBrowserMessage::ApiStreamStart {
+                id: "stream-1".to_string(),
+                status: 200,
+                headers: BTreeMap::from([
+                    (
+                        "cache-control".to_string(),
+                        "no-cache, no-transform".to_string()
+                    ),
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    ("x-accel-buffering".to_string(), "no".to_string()),
+                ]),
+            }
+        );
+
+        upstream_tx
+            .send(Ok(b"chunk-1".to_vec()))
+            .await
+            .expect("send first chunk");
+        try_send_bridge_payload(&control_tx, &BridgeToBrowserMessage::Pong).expect("queue pong");
+        let pong = recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("pong should be forwarded before the stream finishes");
+        assert!(matches!(pong, Message::Text(_)));
+        if let Message::Text(text) = pong {
+            assert_eq!(
+                serde_json::from_str::<BridgeToBrowserMessage>(&text).expect("decode pong"),
+                BridgeToBrowserMessage::Pong
+            );
+        }
+
+        let first_chunk = match recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("first chunk should arrive")
+        {
+            Message::Text(text) => {
+                serde_json::from_str::<BridgeToBrowserMessage>(&text).expect("decode first chunk")
+            }
+            other => panic!("expected text message, got {other:?}"),
+        };
+        assert_eq!(
+            first_chunk,
+            BridgeToBrowserMessage::ApiStreamChunk {
+                id: "stream-1".to_string(),
+                chunk_base64: base64::engine::general_purpose::STANDARD.encode(b"chunk-1"),
+            }
+        );
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx),
+            )
+            .await
+            .is_err(),
+            "the stream should stay open until the second chunk is released"
+        );
+
+        upstream_tx
+            .send(Ok(b"chunk-2".to_vec()))
+            .await
+            .expect("send second chunk");
+        drop(upstream_tx);
+        let second_chunk = match recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("second chunk should arrive")
+        {
+            Message::Text(text) => {
+                serde_json::from_str::<BridgeToBrowserMessage>(&text).expect("decode second chunk")
+            }
+            other => panic!("expected text message, got {other:?}"),
+        };
+        assert_eq!(
+            second_chunk,
+            BridgeToBrowserMessage::ApiStreamChunk {
+                id: "stream-1".to_string(),
+                chunk_base64: base64::engine::general_purpose::STANDARD.encode(b"chunk-2"),
+            }
+        );
+        let end = match recv_prioritized_bridge_message(&mut control_rx, &mut stream_rx)
+            .await
+            .expect("stream should end cleanly")
+        {
+            Message::Text(text) => {
+                serde_json::from_str::<BridgeToBrowserMessage>(&text).expect("decode end")
+            }
+            other => panic!("expected text message, got {other:?}"),
+        };
+        assert_eq!(
+            end,
+            BridgeToBrowserMessage::ApiStreamEnd {
+                id: "stream-1".to_string(),
+                error: None,
+            }
+        );
+
+        stream_task
+            .await
+            .expect("stream task join")
+            .expect("stream task");
+    }
+
+    #[tokio::test]
+    async fn stream_task_registry_cleans_up_fast_completed_streams_after_registration() {
+        let registry = Arc::new(StdMutex::new(StreamTaskAbortRegistry::default()));
+        let mut stream_tasks = JoinSet::new();
+        let abort_handle = stream_tasks.spawn(async {});
+
+        tokio::task::yield_now().await;
+        register_stream_task_abort(&registry, "stream-fast".to_string(), abort_handle);
+
+        let joined = stream_tasks
+            .join_next_with_id()
+            .await
+            .expect("fast stream should complete");
+        let completed_task_id = match joined {
+            Ok((task_id, ())) => task_id,
+            Err(err) => panic!("fast stream should not fail: {err}"),
+        };
+        remove_completed_stream_task_abort(&registry, completed_task_id);
+
+        let aborts = registry.lock().expect("registry lock");
+        assert!(aborts.by_request_id.is_empty());
+        assert!(aborts.by_task_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn api_stream_cancel_aborts_only_the_matching_stream_task() {
+        let registry = Arc::new(StdMutex::new(StreamTaskAbortRegistry::default()));
+        let mut stream_tasks = JoinSet::new();
+        let (survivor_tx, survivor_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let cancelled_handle = stream_tasks.spawn(async {
+            std::future::pending::<()>().await;
+            false
+        });
+        let cancelled_task_id = cancelled_handle.id();
+        register_stream_task_abort(&registry, "stream-cancelled".to_string(), cancelled_handle);
+
+        let survivor_handle = stream_tasks.spawn(async move {
+            survivor_rx
+                .await
+                .expect("survivor should receive completion");
+            true
+        });
+        let survivor_task_id = survivor_handle.id();
+        register_stream_task_abort(&registry, "stream-survivor".to_string(), survivor_handle);
+
+        cancel_stream_task_abort(&registry, "stream-cancelled");
+
+        {
+            let aborts = registry.lock().expect("registry lock");
+            assert!(!aborts.by_request_id.contains_key("stream-cancelled"));
+            assert!(aborts.by_request_id.contains_key("stream-survivor"));
+        }
+
+        survivor_tx.send(()).expect("send completion");
+
+        let mut cancelled_joined = false;
+        let mut survivor_joined = false;
+        while let Some(joined) = stream_tasks.join_next_with_id().await {
+            let completed_task_id = match &joined {
+                Ok((task_id, _)) => *task_id,
+                Err(err) => err.id(),
+            };
+            remove_completed_stream_task_abort(&registry, completed_task_id);
+            match joined {
+                Ok((task_id, result)) => {
+                    if task_id == survivor_task_id {
+                        assert!(result, "survivor stream should complete normally");
+                        survivor_joined = true;
+                    } else {
+                        panic!("unexpected successful stream task: {task_id}");
+                    }
+                }
+                Err(err) => {
+                    assert!(err.is_cancelled(), "unexpected join error: {err}");
+                    assert_eq!(err.id(), cancelled_task_id);
+                    cancelled_joined = true;
+                }
+            }
+            if cancelled_joined && survivor_joined {
+                break;
+            }
+        }
+
+        assert!(cancelled_joined, "matching stream should be cancelled");
+        assert!(survivor_joined, "non-matching stream should keep running");
+
+        let aborts = registry.lock().expect("registry lock");
+        assert!(aborts.by_request_id.is_empty());
+        assert!(aborts.by_task_id.is_empty());
     }
 }

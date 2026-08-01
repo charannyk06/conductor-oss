@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::ConnectInfo;
 use axum::extract::{Path, Query, State};
@@ -10,7 +11,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use conductor_types::{BridgeStatus, BridgeToBrowserMessage, BrowserToBridgeMessage};
+use conductor_types::{
+    BridgeStatus, BridgeToBrowserMessage, BrowserToBridgeMessage, API_STREAM_V1_CAPABILITY,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,8 +22,10 @@ use std::env;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -30,12 +35,13 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RelayState {
     inner: Arc<Mutex<RelayInner>>,
     persistence: Arc<Mutex<PersistenceCoordinator>>,
     trusted_proxies: Arc<Vec<TrustedProxyNetwork>>,
     queue_budget: Arc<QueueByteBudget>,
+    api_stream_queue_budget: Arc<ApiStreamQueueByteBudget>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -58,8 +64,10 @@ struct RelayInner {
     devices: HashMap<String, DeviceRecord>,
     terminal_sessions: HashMap<String, TerminalSessionRecord>,
     pending_api_requests: HashMap<String, PendingApiRequest>,
+    pending_api_stream_requests: HashMap<String, PendingApiStreamRequest>,
     pending_preview_requests: HashMap<String, PendingPreviewRequest>,
     pending_api_bytes: usize,
+    pending_api_stream_bytes: usize,
     pending_preview_bytes: usize,
     pending_device_claim_bytes: usize,
     refresh_tokens: HashMap<String, String>,
@@ -74,6 +82,7 @@ struct BridgeChannel {
     bridge: Option<ConnectionRecord>,
     browsers: HashMap<u64, ConnectionRecord>,
     last_status: Option<BridgeStatus>,
+    active_bridge_status_seen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +489,14 @@ struct PendingApiRequest {
 }
 
 #[derive(Debug)]
+struct PendingApiStreamRequest {
+    device_id: String,
+    request_bytes: usize,
+    tx: ApiStreamEventSender,
+    started: bool,
+}
+
+#[derive(Debug)]
 struct PendingPreviewRequest {
     device_id: String,
     request_bytes: usize,
@@ -490,6 +507,260 @@ struct PendingPreviewRequest {
 struct ProxiedApiResponse {
     status: u16,
     body: Value,
+}
+
+#[derive(Debug)]
+struct ProxiedApiStreamResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body: ProxiedApiStreamBody,
+}
+
+#[derive(Debug)]
+enum ProxiedApiStreamEvent {
+    Start {
+        status: u16,
+        headers: BTreeMap<String, String>,
+    },
+    Chunk(Vec<u8>),
+    End {
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+struct ProxiedApiStreamBody {
+    cleanup: Option<PendingApiStreamCleanup>,
+    receiver: ApiStreamEventReceiver,
+    finished: bool,
+}
+
+#[derive(Debug)]
+struct ApiStreamQueueByteBudget {
+    queued_bytes: AtomicUsize,
+    capacity: usize,
+}
+
+impl ApiStreamQueueByteBudget {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queued_bytes: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    fn production() -> Self {
+        Self::new(GLOBAL_API_STREAM_EVENT_QUEUE_BYTE_CAPACITY)
+    }
+
+    fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<ApiStreamQueueByteReservation> {
+        self.queued_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                queued
+                    .checked_add(bytes)
+                    .filter(|next| *next <= self.capacity)
+            })
+            .ok()?;
+        Some(ApiStreamQueueByteReservation {
+            stream_bytes: None,
+            aggregate: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    fn release(&self, bytes: usize) {
+        self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    fn usage(&self) -> usize {
+        self.queued_bytes.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+struct ApiStreamQueueByteReservation {
+    stream_bytes: Option<Arc<AtomicUsize>>,
+    aggregate: Arc<ApiStreamQueueByteBudget>,
+    bytes: usize,
+}
+
+impl Drop for ApiStreamQueueByteReservation {
+    fn drop(&mut self) {
+        if let Some(stream_bytes) = self.stream_bytes.as_ref() {
+            stream_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+        self.aggregate.release(self.bytes);
+    }
+}
+
+#[derive(Debug)]
+struct QueuedApiStreamEvent {
+    event: ProxiedApiStreamEvent,
+    _reservation: ApiStreamQueueByteReservation,
+}
+
+#[derive(Debug, Clone)]
+struct ApiStreamEventSender {
+    tx: mpsc::Sender<QueuedApiStreamEvent>,
+    queued_bytes: Arc<AtomicUsize>,
+    byte_capacity: usize,
+    aggregate_budget: Arc<ApiStreamQueueByteBudget>,
+}
+
+#[derive(Debug)]
+struct ApiStreamEventReceiver {
+    rx: mpsc::Receiver<QueuedApiStreamEvent>,
+}
+
+#[derive(Debug)]
+struct PendingApiStreamCleanup {
+    state: RelayState,
+    device_id: String,
+    request_id: String,
+}
+
+impl futures_util::Stream for ProxiedApiStreamBody {
+    type Item = std::result::Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.receiver.rx).poll_recv(cx) {
+            Poll::Ready(Some(QueuedApiStreamEvent {
+                event: ProxiedApiStreamEvent::Chunk(chunk),
+                ..
+            })) => Poll::Ready(Some(Ok(Bytes::from(chunk)))),
+            Poll::Ready(Some(QueuedApiStreamEvent {
+                event: ProxiedApiStreamEvent::End { error },
+                ..
+            })) => {
+                self.finished = true;
+                if let Some(error) = error {
+                    let request_id = self
+                        .cleanup
+                        .as_ref()
+                        .map(|cleanup| cleanup.request_id.as_str())
+                        .unwrap_or("buffered-compat");
+                    warn!(request_id = %request_id, error = %error, "proxied API stream ended early");
+                }
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(QueuedApiStreamEvent {
+                event: ProxiedApiStreamEvent::Start { .. },
+                ..
+            })) => {
+                self.finished = true;
+                Poll::Ready(Some(Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    "proxied API stream received a duplicate start event",
+                ))))
+            }
+            Poll::Ready(None) => {
+                self.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl ApiStreamEventSender {
+    fn try_send(
+        &self,
+        event: ProxiedApiStreamEvent,
+    ) -> std::result::Result<(), mpsc::error::TrySendError<ProxiedApiStreamEvent>> {
+        let bytes = proxied_api_stream_event_size(&event);
+        let reserved =
+            self.queued_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                    queued
+                        .checked_add(bytes)
+                        .filter(|next| *next <= self.byte_capacity)
+                });
+        if reserved.is_err() {
+            return Err(mpsc::error::TrySendError::Full(event));
+        }
+
+        let Some(mut reservation) = self.aggregate_budget.try_reserve(bytes) else {
+            self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            return Err(mpsc::error::TrySendError::Full(event));
+        };
+        reservation.stream_bytes = Some(Arc::clone(&self.queued_bytes));
+
+        match self.tx.try_send(QueuedApiStreamEvent {
+            event,
+            _reservation: reservation,
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(queued)) => {
+                Err(mpsc::error::TrySendError::Full(queued.event))
+            }
+            Err(mpsc::error::TrySendError::Closed(queued)) => {
+                Err(mpsc::error::TrySendError::Closed(queued.event))
+            }
+        }
+    }
+}
+
+impl ApiStreamEventReceiver {
+    async fn recv(&mut self) -> Option<ProxiedApiStreamEvent> {
+        let queued = self.rx.recv().await?;
+        Some(queued.event)
+    }
+}
+
+fn api_stream_event_channel(
+    capacity: usize,
+    byte_capacity: usize,
+    aggregate_budget: Arc<ApiStreamQueueByteBudget>,
+) -> (ApiStreamEventSender, ApiStreamEventReceiver) {
+    let (tx, rx) = mpsc::channel(capacity);
+    let queued_bytes = Arc::new(AtomicUsize::new(0));
+    (
+        ApiStreamEventSender {
+            tx,
+            queued_bytes: Arc::clone(&queued_bytes),
+            byte_capacity,
+            aggregate_budget,
+        },
+        ApiStreamEventReceiver { rx },
+    )
+}
+
+fn proxied_api_stream_event_size(event: &ProxiedApiStreamEvent) -> usize {
+    match event {
+        ProxiedApiStreamEvent::Start { headers, .. } => headers
+            .iter()
+            .map(|(name, value)| name.len().saturating_add(value.len()))
+            .sum::<usize>()
+            .saturating_add(32),
+        ProxiedApiStreamEvent::Chunk(chunk) => chunk.len(),
+        ProxiedApiStreamEvent::End { error } => error.as_ref().map_or(0, String::len),
+    }
+}
+
+impl Drop for ProxiedApiStreamBody {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let Some(cleanup) = self.cleanup.take() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let should_cancel = {
+                let mut inner = cleanup.state.inner.lock().await;
+                inner
+                    .take_pending_api_stream_for_device(&cleanup.request_id, &cleanup.device_id)
+                    .is_some()
+            };
+            if should_cancel {
+                cleanup
+                    .state
+                    .send_api_stream_cancel(&cleanup.device_id, &cleanup.request_id)
+                    .await;
+            }
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -683,6 +954,10 @@ struct DeviceAuthResolveResponse {
 struct DeviceProxyRequest {
     method: String,
     path: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    stream: bool,
     body: Option<Value>,
 }
 
@@ -804,9 +1079,14 @@ const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(45);
 const DEVICE_PICKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING_API_REQUESTS: usize = 256;
+const MAX_PENDING_API_STREAM_REQUESTS: usize = 64;
 const MAX_PENDING_PREVIEW_REQUESTS: usize = 128;
 const MAX_PENDING_API_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PENDING_API_STREAM_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_PREVIEW_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const API_STREAM_EVENT_QUEUE_CAPACITY: usize = 4;
+const API_STREAM_EVENT_QUEUE_BYTE_CAPACITY: usize = MAX_WS_MESSAGE_BYTES;
+const GLOBAL_API_STREAM_EVENT_QUEUE_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
 const MAX_TERMINAL_SESSIONS: usize = 256;
 const MAX_TERMINAL_SESSIONS_PER_DEVICE: usize = 16;
 const MAX_TERMINAL_SESSIONS_PER_USER: usize = 64;
@@ -827,6 +1107,7 @@ impl Default for RelayState {
             persistence: Arc::new(Mutex::new(PersistenceCoordinator::default())),
             trusted_proxies: Arc::new(Vec::new()),
             queue_budget: Arc::new(QueueByteBudget::production()),
+            api_stream_queue_budget: Arc::new(ApiStreamQueueByteBudget::production()),
         }
     }
 }
@@ -960,6 +1241,7 @@ impl RelayState {
             })),
             trusted_proxies: Arc::new(Vec::new()),
             queue_budget: Arc::new(QueueByteBudget::production()),
+            api_stream_queue_budget: Arc::new(ApiStreamQueueByteBudget::production()),
         })
     }
 
@@ -1554,12 +1836,29 @@ async fn proxy_device_api(
             .into_response();
     };
 
-    match state
-        .forward_device_api_request(&user_id, &device_id, &body.method, &body.path, body.body)
-        .await
-    {
-        Ok(response) => response_from_proxied_api(response.status, response.body),
-        Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+    if body.stream {
+        match state
+            .forward_device_api_stream_request(
+                &user_id,
+                &device_id,
+                &body.method,
+                &body.path,
+                body.headers,
+                body.body,
+            )
+            .await
+        {
+            Ok(response) => response_from_proxied_api_stream(response),
+            Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+        }
+    } else {
+        match state
+            .forward_device_api_request(&user_id, &device_id, &body.method, &body.path, body.body)
+            .await
+        {
+            Ok(response) => response_from_proxied_api(response.status, response.body),
+            Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+        }
     }
 }
 
@@ -1776,8 +2075,14 @@ async fn delete_bridge(
             .into_response();
     };
 
-    let (bridge_closes, browser_closes, pending_requests, pending_previews, removed) =
-        state.disconnect_bridge_for_user(&user_id, &bridge_id).await;
+    let (
+        bridge_closes,
+        browser_closes,
+        pending_requests,
+        pending_streams,
+        pending_previews,
+        removed,
+    ) = state.disconnect_bridge_for_user(&user_id, &bridge_id).await;
     close_senders(bridge_closes).await;
     close_senders(browser_closes).await;
     fail_pending_api_requests(
@@ -1785,6 +2090,7 @@ async fn delete_bridge(
         StatusCode::SERVICE_UNAVAILABLE,
         "Device disconnected.",
     );
+    fail_pending_api_stream_requests(pending_streams, Some("Device disconnected.".to_string()));
     fail_pending_preview_requests(pending_previews, StatusCode::SERVICE_UNAVAILABLE);
 
     if removed {
@@ -1867,6 +2173,7 @@ async fn bridge_ws(
                     os: format_device_os(&device.os, &device.arch),
                     connected: true,
                     version: None,
+                    capabilities: Vec::new(),
                 }),
             )
         } else if let Some(user_id) = query
@@ -3000,7 +3307,9 @@ impl RelayState {
                         os: env::consts::OS.to_string(),
                         connected: true,
                         version: None,
+                        capabilities: Vec::new(),
                     }));
+                    channel.active_bridge_status_seen = false;
                     replaced
                 }
                 PeerKind::Browser => {
@@ -3023,6 +3332,7 @@ impl RelayState {
     async fn unregister_connection(&self, key: &str, peer_kind: PeerKind, connection_id: u64) {
         let mut browsers_to_notify = Vec::new();
         let mut failed_api_requests = Vec::new();
+        let mut failed_api_stream_requests = Vec::new();
         let mut failed_preview_requests = Vec::new();
         let mut remove_pending_for_device = false;
         let mut remove_channel = false;
@@ -3039,6 +3349,7 @@ impl RelayState {
                             .is_some_and(|record| record.id == connection_id)
                         {
                             channel.bridge = None;
+                            channel.active_bridge_status_seen = false;
                             let status = channel
                                 .last_status
                                 .clone()
@@ -3047,12 +3358,14 @@ impl RelayState {
                                     os: last.os,
                                     connected: false,
                                     version: last.version,
+                                    capabilities: last.capabilities,
                                 })
                                 .unwrap_or(BridgeStatus {
                                     hostname: host_name(),
                                     os: env::consts::OS.to_string(),
                                     connected: false,
                                     version: None,
+                                    capabilities: Vec::new(),
                                 });
                             channel.last_status = Some(status.clone());
                             status_to_broadcast = Some(status);
@@ -3091,6 +3404,18 @@ impl RelayState {
                     }
                 }
 
+                let pending_stream_ids = inner
+                    .pending_api_stream_requests
+                    .iter()
+                    .filter(|(_, pending)| pending.device_id == key)
+                    .map(|(request_id, _)| request_id.clone())
+                    .collect::<Vec<_>>();
+                for request_id in pending_stream_ids {
+                    if let Some(pending) = inner.take_pending_api_stream(&request_id) {
+                        failed_api_stream_requests.push(pending.tx);
+                    }
+                }
+
                 let preview_ids = inner
                     .pending_preview_requests
                     .iter()
@@ -3112,6 +3437,12 @@ impl RelayState {
             });
         }
 
+        for pending in failed_api_stream_requests {
+            let _ = pending.try_send(ProxiedApiStreamEvent::End {
+                error: Some("Device disconnected.".to_string()),
+            });
+        }
+
         for pending in failed_preview_requests {
             let _ = pending.send(ProxiedPreviewResponse {
                 status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
@@ -3126,6 +3457,7 @@ impl RelayState {
                 os: status.os,
                 connected: status.connected,
                 version: status.version,
+                capabilities: status.capabilities,
             }) {
                 for browser in browsers_to_notify {
                     let _ = browser.try_send(Message::Text(text.clone().into()));
@@ -3313,6 +3645,155 @@ impl RelayState {
             }
         }
 
+        if let BridgeToBrowserMessage::ApiStreamStart {
+            id,
+            status,
+            headers,
+        } = &message
+        {
+            let (pending, duplicate_pending, wrong_device) = {
+                let mut inner = self.inner.lock().await;
+                if !inner.bridge_connection_is_current(key, connection_id) {
+                    return false;
+                }
+                let wrong_device = inner
+                    .pending_api_stream_requests
+                    .get(id)
+                    .is_some_and(|pending| pending.device_id != key);
+                if wrong_device {
+                    (None, None, true)
+                } else if inner
+                    .pending_api_stream_requests
+                    .get(id)
+                    .is_some_and(|pending| pending.started)
+                {
+                    (
+                        None,
+                        inner.take_pending_api_stream_for_device(id, key),
+                        false,
+                    )
+                } else {
+                    let pending = inner
+                        .pending_api_stream_requests
+                        .get_mut(id)
+                        .map(|pending| {
+                            pending.started = true;
+                            pending.tx.clone()
+                        });
+                    (pending, None, false)
+                }
+            };
+
+            if let Some(pending) = duplicate_pending {
+                let _ = pending.tx.try_send(ProxiedApiStreamEvent::End {
+                    error: Some("received duplicate stream start event".to_string()),
+                });
+                self.send_api_stream_cancel(key, id).await;
+                return true;
+            }
+            if let Some(pending) = pending {
+                match pending.try_send(ProxiedApiStreamEvent::Start {
+                    status: *status,
+                    headers: headers.clone(),
+                }) {
+                    Ok(()) => return true,
+                    Err(_) => {
+                        let should_cancel = {
+                            let mut inner = self.inner.lock().await;
+                            inner.take_pending_api_stream_for_device(id, key).is_some()
+                        };
+                        if should_cancel {
+                            self.send_api_stream_cancel(key, id).await;
+                        }
+                        return true;
+                    }
+                }
+            }
+            if wrong_device {
+                return true;
+            }
+        }
+
+        if let BridgeToBrowserMessage::ApiStreamChunk { id, chunk_base64 } = &message {
+            let (pending, wrong_device) = {
+                let inner = self.inner.lock().await;
+                if !inner.bridge_connection_is_current(key, connection_id) {
+                    return false;
+                }
+                let wrong_device = inner
+                    .pending_api_stream_requests
+                    .get(id)
+                    .is_some_and(|pending| pending.device_id != key);
+                (
+                    inner
+                        .pending_api_stream_requests
+                        .get(id)
+                        .map(|pending| pending.tx.clone()),
+                    wrong_device,
+                )
+            };
+
+            if let Some(pending) = pending {
+                let chunk = match base64::engine::general_purpose::STANDARD.decode(chunk_base64) {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        warn!(request_id = %id, error = %err, "invalid proxied API stream chunk");
+                        let should_cancel = {
+                            let mut inner = self.inner.lock().await;
+                            inner.take_pending_api_stream_for_device(id, key).is_some()
+                        };
+                        if should_cancel {
+                            self.send_api_stream_cancel(key, id).await;
+                        }
+                        return true;
+                    }
+                };
+                match pending.try_send(ProxiedApiStreamEvent::Chunk(chunk)) {
+                    Ok(()) => return true,
+                    Err(_) => {
+                        let should_cancel = {
+                            let mut inner = self.inner.lock().await;
+                            inner.take_pending_api_stream_for_device(id, key).is_some()
+                        };
+                        if should_cancel {
+                            self.send_api_stream_cancel(key, id).await;
+                        }
+                        return true;
+                    }
+                }
+            }
+            if wrong_device {
+                return true;
+            }
+        }
+
+        if let BridgeToBrowserMessage::ApiStreamEnd { id, error } = &message {
+            let (pending, wrong_device) = {
+                let mut inner = self.inner.lock().await;
+                if !inner.bridge_connection_is_current(key, connection_id) {
+                    return false;
+                }
+                let wrong_device = inner
+                    .pending_api_stream_requests
+                    .get(id)
+                    .is_some_and(|pending| pending.device_id != key);
+                (
+                    inner.take_pending_api_stream_for_device(id, key),
+                    wrong_device,
+                )
+            };
+
+            if let Some(pending) = pending {
+                let _ = pending.tx.try_send(ProxiedApiStreamEvent::End {
+                    error: error.clone(),
+                });
+                return true;
+            }
+            if wrong_device {
+                return true;
+            }
+        }
+
         if let BridgeToBrowserMessage::PreviewResponse {
             id,
             status,
@@ -3367,6 +3848,7 @@ impl RelayState {
                 os,
                 connected,
                 version,
+                capabilities,
             } = &message
             {
                 channel.last_status = Some(BridgeStatus {
@@ -3374,7 +3856,9 @@ impl RelayState {
                     os: os.clone(),
                     connected: *connected,
                     version: normalize_bridge_version(version.clone()),
+                    capabilities: normalize_bridge_capabilities(capabilities.clone()),
                 });
+                channel.active_bridge_status_seen = true;
             }
 
             channel
@@ -3389,6 +3873,31 @@ impl RelayState {
             let _ = browser.try_send(Message::Text(raw_text.clone().into()));
         }
         true
+    }
+
+    async fn send_api_stream_cancel(&self, device_id: &str, request_id: &str) {
+        let payload = match serde_json::to_string(&BrowserToBridgeMessage::ApiStreamCancel {
+            id: request_id.to_string(),
+        }) {
+            Ok(payload) => payload,
+            Err(err) => {
+                warn!(request_id = %request_id, error = %err, "failed to serialize API stream cancel");
+                return;
+            }
+        };
+        let bridge = {
+            let inner = self.inner.lock().await;
+            inner
+                .channels
+                .get(device_id)
+                .and_then(|channel| channel.bridge.as_ref())
+                .map(|record| record.tx.clone())
+        };
+        if let Some(bridge) = bridge {
+            if bridge.try_send(Message::Text(payload.into())).is_err() {
+                warn!(request_id = %request_id, device_id = %device_id, "failed to enqueue API stream cancel");
+            }
+        }
     }
 
     async fn broadcast_bridge_status(&self, key: &str, connection_id: u64, connected: bool) {
@@ -3413,12 +3922,14 @@ impl RelayState {
                     os: last.os,
                     connected,
                     version: last.version,
+                    capabilities: last.capabilities,
                 })
                 .unwrap_or(BridgeStatus {
                     hostname: host_name(),
                     os: env::consts::OS.to_string(),
                     connected,
                     version: None,
+                    capabilities: Vec::new(),
                 });
 
             channel.last_status = Some(status.clone());
@@ -3435,6 +3946,7 @@ impl RelayState {
             os: status.os,
             connected: status.connected,
             version: status.version,
+            capabilities: status.capabilities,
         }) {
             for browser in browsers {
                 let _ = browser.try_send(Message::Text(text.clone().into()));
@@ -3454,6 +3966,7 @@ impl RelayState {
                     os: env::consts::OS.to_string(),
                     connected: false,
                     version: None,
+                    capabilities: Vec::new(),
                 })
         };
 
@@ -3462,6 +3975,7 @@ impl RelayState {
             os: status.os,
             connected: status.connected,
             version: status.version,
+            capabilities: status.capabilities,
         }) {
             let _ = tx.try_send(Message::Text(text.into()));
         }
@@ -3534,12 +4048,14 @@ impl RelayState {
         Vec<MessageSender>,
         Vec<MessageSender>,
         Vec<oneshot::Sender<ProxiedApiResponse>>,
+        Vec<ApiStreamEventSender>,
         Vec<oneshot::Sender<ProxiedPreviewResponse>>,
         bool,
     ) {
         let mut bridge_txs = Vec::new();
         let mut browser_txs = Vec::new();
         let mut pending_api_requests = Vec::new();
+        let mut pending_api_stream_requests = Vec::new();
         let mut pending_preview_requests = Vec::new();
         let mut removed = false;
 
@@ -3568,6 +4084,12 @@ impl RelayState {
             .filter(|(_, pending)| keys.iter().any(|key| key == &pending.device_id))
             .map(|(request_id, _)| request_id.clone())
             .collect::<Vec<_>>();
+        let pending_stream_ids = inner
+            .pending_api_stream_requests
+            .iter()
+            .filter(|(_, pending)| keys.iter().any(|key| key == &pending.device_id))
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
 
         for key in keys {
             if let Some(channel) = inner.channels.remove(&key) {
@@ -3584,6 +4106,11 @@ impl RelayState {
                 pending_api_requests.push(pending.tx);
             }
         }
+        for request_id in pending_stream_ids {
+            if let Some(pending) = inner.take_pending_api_stream(&request_id) {
+                pending_api_stream_requests.push(pending.tx);
+            }
+        }
         for request_id in pending_preview_ids {
             if let Some(pending) = inner.take_pending_preview(&request_id) {
                 pending_preview_requests.push(pending.tx);
@@ -3594,6 +4121,7 @@ impl RelayState {
             bridge_txs,
             browser_txs,
             pending_api_requests,
+            pending_api_stream_requests,
             pending_preview_requests,
             removed,
         )
@@ -3948,6 +4476,7 @@ impl RelayState {
                                 os: format_device_os(&device.os, &device.arch),
                                 connected: false,
                                 version: None,
+                                capabilities: Vec::new(),
                             })
                         });
 
@@ -4007,7 +4536,7 @@ impl RelayState {
             ));
         }
 
-        let (connection_closes, pending_requests, pending_previews) =
+        let (connection_closes, pending_requests, pending_streams, pending_previews) =
             self.disconnect_device_runtime(device_id).await;
         close_senders(connection_closes).await;
         fail_pending_api_requests(
@@ -4015,6 +4544,7 @@ impl RelayState {
             StatusCode::SERVICE_UNAVAILABLE,
             "Device disconnected.",
         );
+        fail_pending_api_stream_requests(pending_streams, Some("Device disconnected.".to_string()));
         fail_pending_preview_requests(pending_previews, StatusCode::SERVICE_UNAVAILABLE);
 
         Ok(true)
@@ -4026,10 +4556,12 @@ impl RelayState {
     ) -> (
         Vec<MessageSender>,
         Vec<oneshot::Sender<ProxiedApiResponse>>,
+        Vec<ApiStreamEventSender>,
         Vec<oneshot::Sender<ProxiedPreviewResponse>>,
     ) {
         let mut connection_closes = Vec::new();
         let mut pending_api = Vec::new();
+        let mut pending_api_streams = Vec::new();
         let mut pending_preview = Vec::new();
         let mut inner = self.inner.lock().await;
 
@@ -4049,6 +4581,18 @@ impl RelayState {
         for request_id in api_ids {
             if let Some(pending) = inner.take_pending_api(&request_id) {
                 pending_api.push(pending.tx);
+            }
+        }
+
+        let stream_ids = inner
+            .pending_api_stream_requests
+            .iter()
+            .filter(|(_, pending)| pending.device_id == device_id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in stream_ids {
+            if let Some(pending) = inner.take_pending_api_stream(&request_id) {
+                pending_api_streams.push(pending.tx);
             }
         }
 
@@ -4089,13 +4633,61 @@ impl RelayState {
             .values()
             .map(|claim| claim.request_bytes)
             .sum();
-        (connection_closes, pending_api, pending_preview)
+        (
+            connection_closes,
+            pending_api,
+            pending_api_streams,
+            pending_preview,
+        )
     }
 
     async fn resolve_device_auth(&self, refresh_token: &str) -> Option<DeviceRecord> {
         let inner = self.inner.lock().await;
         let device_id = inner.refresh_tokens.get(refresh_token)?;
         inner.devices.get(device_id).cloned()
+    }
+
+    async fn bridge_supports_device_api_stream(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> std::result::Result<BridgeApiStreamSupport, (StatusCode, String)> {
+        let inner = self.inner.lock().await;
+        match inner.devices.get(device_id) {
+            Some(device) if device.owner_user_id == user_id => {}
+            Some(_) => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "You do not own this device.".to_string(),
+                ))
+            }
+            None => return Err((StatusCode::NOT_FOUND, "Device not found.".to_string())),
+        }
+
+        let Some(channel) = inner.channels.get(device_id) else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Device is offline.".to_string(),
+            ));
+        };
+        let Some(_bridge_tx) = channel
+            .bridge
+            .as_ref()
+            .filter(|record| record.user_id == user_id)
+        else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Device is offline.".to_string(),
+            ));
+        };
+        if !channel.active_bridge_status_seen {
+            return Ok(BridgeApiStreamSupport::Unknown);
+        }
+        if bridge_supports_api_stream_v1(channel.last_status.as_ref()) {
+            Ok(BridgeApiStreamSupport::Supported)
+        } else {
+            Ok(BridgeApiStreamSupport::Unsupported)
+        }
     }
 
     async fn forward_device_api_request(
@@ -4243,6 +4835,199 @@ impl RelayState {
                 normalized_path = normalized_path
             ),
         ))
+    }
+
+    async fn forward_device_api_stream_request(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        method: &str,
+        path: &str,
+        headers: BTreeMap<String, String>,
+        body: Option<Value>,
+    ) -> std::result::Result<ProxiedApiStreamResponse, (StatusCode, String)> {
+        let normalized_method = method.trim().to_ascii_uppercase();
+        let normalized_path = path.trim();
+        if normalized_method.is_empty() || normalized_path.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Missing proxy method or path.".to_string(),
+            ));
+        }
+        match self
+            .bridge_supports_device_api_stream(user_id, device_id)
+            .await?
+        {
+            BridgeApiStreamSupport::Supported => {}
+            BridgeApiStreamSupport::Unknown => {
+                return Err((
+                    StatusCode::TOO_EARLY,
+                    "Paired bridge status is not ready yet. Retry the event stream shortly."
+                        .to_string(),
+                ));
+            }
+            BridgeApiStreamSupport::Unsupported => {
+                return Err((
+                    StatusCode::UPGRADE_REQUIRED,
+                    "Paired bridge must support api_stream_v1. Upgrade the bridge and retry."
+                        .to_string(),
+                ));
+            }
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = serde_json::to_string(&BrowserToBridgeMessage::ApiStreamRequest {
+            id: request_id.clone(),
+            method: normalized_method,
+            path: normalized_path.to_string(),
+            headers,
+            body,
+        })
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+        let request_bytes = message.len();
+        if request_bytes > MAX_WS_MESSAGE_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Device API stream request exceeds the relay byte limit.".to_string(),
+            ));
+        }
+
+        let request_timeout = device_proxy_timeout_for_url(normalized_path);
+        let (bridge_tx, mut receiver) = {
+            let mut inner = self.inner.lock().await;
+            match inner.devices.get(device_id) {
+                Some(device) if device.owner_user_id == user_id => {}
+                Some(_) => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "You do not own this device.".to_string(),
+                    ))
+                }
+                None => return Err((StatusCode::NOT_FOUND, "Device not found.".to_string())),
+            }
+
+            let Some(channel) = inner.channels.get(device_id) else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Device is offline.".to_string(),
+                ));
+            };
+            let Some(bridge_tx) = channel
+                .bridge
+                .as_ref()
+                .filter(|record| record.user_id == user_id)
+                .map(|record| record.tx.clone())
+            else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Device is offline.".to_string(),
+                ));
+            };
+            if !channel.active_bridge_status_seen {
+                return Err((
+                    StatusCode::TOO_EARLY,
+                    "Paired bridge status is not ready yet. Retry the event stream shortly."
+                        .to_string(),
+                ));
+            }
+            if !bridge_supports_api_stream_v1(channel.last_status.as_ref()) {
+                return Err((
+                    StatusCode::UPGRADE_REQUIRED,
+                    "Paired bridge must support api_stream_v1. Upgrade the bridge and retry."
+                        .to_string(),
+                ));
+            }
+
+            let (tx, rx) = api_stream_event_channel(
+                API_STREAM_EVENT_QUEUE_CAPACITY,
+                API_STREAM_EVENT_QUEUE_BYTE_CAPACITY,
+                Arc::clone(&self.api_stream_queue_budget),
+            );
+            if inner.pending_api_stream_requests.len() >= MAX_PENDING_API_STREAM_REQUESTS
+                || inner.pending_api_stream_bytes.saturating_add(request_bytes)
+                    > MAX_PENDING_API_STREAM_REQUEST_BYTES
+            {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too many in-flight device API streams.".to_string(),
+                ));
+            }
+            inner.pending_api_stream_requests.insert(
+                request_id.clone(),
+                PendingApiStreamRequest {
+                    device_id: device_id.to_string(),
+                    request_bytes,
+                    tx,
+                    started: false,
+                },
+            );
+            inner.pending_api_stream_bytes =
+                inner.pending_api_stream_bytes.saturating_add(request_bytes);
+            (bridge_tx, rx)
+        };
+
+        if bridge_tx.try_send(Message::Text(message.into())).is_err() {
+            let mut inner = self.inner.lock().await;
+            inner.take_pending_api_stream(&request_id);
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Device connection is unavailable.".to_string(),
+            ));
+        }
+
+        let (status, response_headers) =
+            match await_proxied_api_stream_start(request_timeout, &mut receiver).await {
+                Ok(start) => start,
+                Err(ProxyStreamWaitError::Closed(message)) => {
+                    let mut inner = self.inner.lock().await;
+                    inner.take_pending_api_stream(&request_id);
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        message.unwrap_or_else(|| "Device connection closed.".to_string()),
+                    ));
+                }
+                Err(ProxyStreamWaitError::TimedOut) => {
+                    let should_cancel = {
+                        let mut inner = self.inner.lock().await;
+                        inner.take_pending_api_stream(&request_id).is_some()
+                    };
+                    if should_cancel {
+                        self.send_api_stream_cancel(device_id, &request_id).await;
+                    }
+                    return Err((
+                        StatusCode::GATEWAY_TIMEOUT,
+                        format!(
+                            "Device request timed out after {timeout_secs}s for {normalized_path}",
+                            timeout_secs = request_timeout.as_secs(),
+                            normalized_path = normalized_path
+                        ),
+                    ));
+                }
+                Err(ProxyStreamWaitError::Protocol(message)) => {
+                    let should_cancel = {
+                        let mut inner = self.inner.lock().await;
+                        inner.take_pending_api_stream(&request_id).is_some()
+                    };
+                    if should_cancel {
+                        self.send_api_stream_cancel(device_id, &request_id).await;
+                    }
+                    return Err((StatusCode::BAD_GATEWAY, message.to_string()));
+                }
+            };
+
+        Ok(ProxiedApiStreamResponse {
+            status,
+            headers: response_headers,
+            body: ProxiedApiStreamBody {
+                cleanup: Some(PendingApiStreamCleanup {
+                    state: self.clone(),
+                    device_id: device_id.to_string(),
+                    request_id,
+                }),
+                receiver,
+                finished: false,
+            },
+        })
     }
 
     async fn forward_device_preview_request(
@@ -4503,6 +5288,14 @@ impl RelayInner {
         Some(pending)
     }
 
+    fn take_pending_api_stream(&mut self, request_id: &str) -> Option<PendingApiStreamRequest> {
+        let pending = self.pending_api_stream_requests.remove(request_id)?;
+        self.pending_api_stream_bytes = self
+            .pending_api_stream_bytes
+            .saturating_sub(pending.request_bytes);
+        Some(pending)
+    }
+
     fn take_pending_api_for_device(
         &mut self,
         request_id: &str,
@@ -4516,6 +5309,21 @@ impl RelayInner {
             return None;
         }
         self.take_pending_api(request_id)
+    }
+
+    fn take_pending_api_stream_for_device(
+        &mut self,
+        request_id: &str,
+        device_id: &str,
+    ) -> Option<PendingApiStreamRequest> {
+        if self
+            .pending_api_stream_requests
+            .get(request_id)
+            .is_none_or(|pending| pending.device_id != device_id)
+        {
+            return None;
+        }
+        self.take_pending_api_stream(request_id)
     }
 
     fn take_pending_preview(&mut self, request_id: &str) -> Option<PendingPreviewRequest> {
@@ -4581,6 +5389,20 @@ enum ProxyResponseWaitError {
     TimedOut,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProxyStreamWaitError {
+    Closed(Option<String>),
+    TimedOut,
+    Protocol(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeApiStreamSupport {
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
 async fn await_proxied_api_response(
     request_timeout: Duration,
     receiver: oneshot::Receiver<ProxiedApiResponse>,
@@ -4589,6 +5411,21 @@ async fn await_proxied_api_response(
         Ok(Ok(response)) => Ok(response),
         Ok(Err(_)) => Err(ProxyResponseWaitError::Closed),
         Err(_) => Err(ProxyResponseWaitError::TimedOut),
+    }
+}
+
+async fn await_proxied_api_stream_start(
+    request_timeout: Duration,
+    receiver: &mut ApiStreamEventReceiver,
+) -> std::result::Result<(u16, BTreeMap<String, String>), ProxyStreamWaitError> {
+    match tokio::time::timeout(request_timeout, receiver.recv()).await {
+        Ok(Some(ProxiedApiStreamEvent::Start { status, headers })) => Ok((status, headers)),
+        Ok(Some(ProxiedApiStreamEvent::End { error })) => Err(ProxyStreamWaitError::Closed(error)),
+        Ok(Some(ProxiedApiStreamEvent::Chunk(_))) => Err(ProxyStreamWaitError::Protocol(
+            "received stream chunk before start",
+        )),
+        Ok(None) => Err(ProxyStreamWaitError::Closed(None)),
+        Err(_) => Err(ProxyStreamWaitError::TimedOut),
     }
 }
 
@@ -4601,6 +5438,14 @@ fn fail_pending_api_requests(
         let _ = request.send(ProxiedApiResponse {
             status: status.as_u16(),
             body: json!({ "error": message }),
+        });
+    }
+}
+
+fn fail_pending_api_stream_requests(requests: Vec<ApiStreamEventSender>, error: Option<String>) {
+    for request in requests {
+        let _ = request.try_send(ProxiedApiStreamEvent::End {
+            error: error.clone(),
         });
     }
 }
@@ -4679,6 +5524,21 @@ fn response_from_proxied_api(status: u16, body: Value) -> Response {
         }
         _ => (status_code, Json(body)).into_response(),
     }
+}
+
+fn response_from_proxied_api_stream(response: ProxiedApiStreamResponse) -> Response {
+    let status_code = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut headers = HeaderMap::new();
+    for (name, value) in response.headers {
+        let Ok(header_name) = axum::http::header::HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(header_value) = HeaderValue::from_str(&value) else {
+            continue;
+        };
+        headers.insert(header_name, header_value);
+    }
+    (status_code, headers, Body::from_stream(response.body)).into_response()
 }
 
 async fn send_bridge_error(tx: &MessageSender, id: &str, status: StatusCode, message: &str) {
@@ -4783,6 +5643,26 @@ fn normalize_bridge_version(version: Option<String>) -> Option<String> {
     version
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_bridge_capabilities(capabilities: Vec<String>) -> Vec<String> {
+    let mut normalized = capabilities
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn bridge_supports_api_stream_v1(status: Option<&BridgeStatus>) -> bool {
+    status.is_some_and(|status| {
+        status
+            .capabilities
+            .iter()
+            .any(|capability| capability == API_STREAM_V1_CAPABILITY)
+    })
 }
 
 fn format_device_os(os: &str, arch: &str) -> String {
@@ -4943,6 +5823,7 @@ fn generate_claim_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use std::sync::LazyLock;
 
     static RELAY_STATE_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -5061,6 +5942,30 @@ mod tests {
         assert_eq!(aggregate.usage(&scope_b), (0, 0, 0));
     }
 
+    #[test]
+    fn api_stream_event_queue_enforces_aggregate_byte_budget() {
+        let aggregate = Arc::new(ApiStreamQueueByteBudget::new(8));
+        let (tx_a, rx_a) = api_stream_event_channel(4, 8, Arc::clone(&aggregate));
+        let (tx_b, rx_b) = api_stream_event_channel(4, 8, Arc::clone(&aggregate));
+
+        tx_a.try_send(ProxiedApiStreamEvent::Chunk(vec![1; 5]))
+            .expect("first stream should reserve bytes");
+        assert_eq!(aggregate.usage(), 5);
+        assert!(
+            tx_b.try_send(ProxiedApiStreamEvent::Chunk(vec![2; 4]))
+                .is_err(),
+            "aggregate bytes must be enforced across concurrent slow streams"
+        );
+
+        drop(rx_a);
+        assert_eq!(aggregate.usage(), 0);
+        tx_b.try_send(ProxiedApiStreamEvent::Chunk(vec![3; 4]))
+            .expect("dropping a slow stream should release its queued reservation");
+
+        drop(rx_b);
+        assert_eq!(aggregate.usage(), 0);
+    }
+
     #[tokio::test]
     async fn rate_limit_storage_is_bounded_and_expired_buckets_are_pruned() {
         let state = RelayState::default();
@@ -5134,6 +6039,779 @@ mod tests {
             pending_browser_frames: Vec::new(),
             pending_browser_frame_bytes: 0,
         }
+    }
+
+    fn bridge_message_text(message: Message) -> String {
+        match message {
+            Message::Text(text) => text.to_string(),
+            other => panic!("expected text websocket message, got {other:?}"),
+        }
+    }
+
+    fn test_api_stream_bridge_status(connected: bool) -> BridgeStatus {
+        BridgeStatus {
+            hostname: "test-bridge".to_string(),
+            os: "darwin".to_string(),
+            connected,
+            version: Some("0.3.4".to_string()),
+            capabilities: vec![API_STREAM_V1_CAPABILITY.to_string()],
+        }
+    }
+
+    async fn report_api_stream_bridge_status(
+        state: &RelayState,
+        device_id: &str,
+        connection_id: u64,
+        connected: bool,
+    ) {
+        let message = BridgeToBrowserMessage::BridgeStatus {
+            hostname: "test-bridge".to_string(),
+            os: "darwin".to_string(),
+            connected,
+            version: Some("0.3.4".to_string()),
+            capabilities: vec![API_STREAM_V1_CAPABILITY.to_string()],
+        };
+        let raw = serde_json::to_string(&message).expect("serialize bridge status");
+        assert!(
+            state
+                .route_bridge_message(device_id, connection_id, message, raw)
+                .await,
+            "bridge status frame should be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_device_api_stream_returns_425_before_first_bridge_status_and_sends_no_request()
+    {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+
+        let err = state
+            .forward_device_api_stream_request(
+                "owner-a",
+                "device-1",
+                "GET",
+                "/api/stream",
+                BTreeMap::from([("accept".to_string(), "text/event-stream".to_string())]),
+                None,
+            )
+            .await
+            .expect_err("bridge without a status should force EventSource retry");
+        assert_eq!(err.0, StatusCode::TOO_EARLY);
+        assert!(err.1.contains("Retry"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bridge_rx.recv())
+                .await
+                .is_err(),
+            "relay should not send any upstream request before the bridge reports status"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_device_api_stream_returns_426_for_legacy_bridge_status_and_sends_no_request() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+
+        let legacy_status = BridgeToBrowserMessage::BridgeStatus {
+            hostname: "legacy-bridge".to_string(),
+            os: "darwin".to_string(),
+            connected: true,
+            version: Some("0.3.3".to_string()),
+            capabilities: Vec::new(),
+        };
+        let legacy_status_raw =
+            serde_json::to_string(&legacy_status).expect("serialize legacy bridge status");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, legacy_status, legacy_status_raw,)
+                .await
+        );
+
+        let err = state
+            .forward_device_api_stream_request(
+                "owner-a",
+                "device-1",
+                "GET",
+                "/api/stream",
+                BTreeMap::from([("accept".to_string(), "text/event-stream".to_string())]),
+                None,
+            )
+            .await
+            .expect_err("legacy bridge status should fail closed with 426");
+        assert_eq!(err.0, StatusCode::UPGRADE_REQUIRED);
+        assert!(err.1.contains(API_STREAM_V1_CAPABILITY));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bridge_rx.recv())
+                .await
+                .is_err(),
+            "legacy bridges must not receive a fallback buffered API request"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_reconnect_with_seeded_status_still_waits_for_an_explicit_status_frame() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+
+        let (old_bridge_tx, _old_bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let old_connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                old_bridge_tx,
+                None,
+            )
+            .await
+            .expect("initial bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", old_connection_id, true).await;
+
+        let (new_bridge_tx, mut new_bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                new_bridge_tx,
+                Some(test_api_stream_bridge_status(true)),
+            )
+            .await
+            .expect("replacement bridge registration");
+
+        let err = state
+            .forward_device_api_stream_request(
+                "owner-a",
+                "device-1",
+                "GET",
+                "/api/stream",
+                BTreeMap::from([("accept".to_string(), "text/event-stream".to_string())]),
+                None,
+            )
+            .await
+            .expect_err("replacement bridge should wait for a fresh status frame");
+        assert_eq!(err.0, StatusCode::TOO_EARLY);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), new_bridge_rx.recv())
+                .await
+                .is_err(),
+            "replacement bridge should not receive a stream request until it reports fresh status"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_device_api_stream_delivers_headers_and_chunks_before_end() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/projects/demo/dispatcher/feed/stream?limit=120",
+                    BTreeMap::from([("accept".to_string(), "text/event-stream".to_string())]),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "text/event-stream".to_string()),
+                (
+                    "cache-control".to_string(),
+                    "no-cache, no-transform".to_string(),
+                ),
+                ("x-accel-buffering".to_string(), "no".to_string()),
+            ]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+
+        let mut response = response_task.await.expect("stream task join");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some("text/event-stream")
+        );
+
+        let chunk_one = BridgeToBrowserMessage::ApiStreamChunk {
+            id: request_id.clone(),
+            chunk_base64: base64::engine::general_purpose::STANDARD.encode(b"chunk-1"),
+        };
+        let chunk_one_raw = serde_json::to_string(&chunk_one).expect("serialize chunk");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, chunk_one, chunk_one_raw)
+                .await
+        );
+
+        let first = response
+            .body
+            .next()
+            .await
+            .expect("first chunk should arrive")
+            .expect("first chunk should decode");
+        assert_eq!(first.as_ref(), b"chunk-1");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), response.body.next())
+                .await
+                .is_err(),
+            "downstream reader should still be waiting for the second chunk"
+        );
+
+        let chunk_two = BridgeToBrowserMessage::ApiStreamChunk {
+            id: request_id.clone(),
+            chunk_base64: base64::engine::general_purpose::STANDARD.encode(b"chunk-2"),
+        };
+        let chunk_two_raw = serde_json::to_string(&chunk_two).expect("serialize second chunk");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, chunk_two, chunk_two_raw)
+                .await
+        );
+        let end = BridgeToBrowserMessage::ApiStreamEnd {
+            id: request_id.clone(),
+            error: None,
+        };
+        let end_raw = serde_json::to_string(&end).expect("serialize end");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, end, end_raw)
+                .await
+        );
+
+        let second = response
+            .body
+            .next()
+            .await
+            .expect("second chunk should arrive")
+            .expect("second chunk should decode");
+        assert_eq!(second.as_ref(), b"chunk-2");
+        assert!(response.body.next().await.is_none());
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+        assert_eq!(inner.pending_api_stream_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn api_stream_disconnect_cleans_pending_state_and_closes_body() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/stream",
+                    BTreeMap::new(),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+        let mut response = response_task.await.expect("stream task join");
+
+        state
+            .unregister_connection("device-1", PeerKind::Bridge, connection_id)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), response.body.next())
+                .await
+                .expect("body should observe disconnect")
+                .is_none()
+        );
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+    }
+
+    #[tokio::test]
+    async fn api_stream_drop_sends_cancel_to_bridge() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/stream",
+                    BTreeMap::new(),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+        let response = response_task.await.expect("stream task join");
+        drop(response);
+
+        let cancel = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream cancel"),
+        ))
+        .expect("decode stream cancel");
+        assert_eq!(
+            cancel,
+            BrowserToBridgeMessage::ApiStreamCancel {
+                id: request_id.clone(),
+            }
+        );
+
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+    }
+
+    #[tokio::test]
+    async fn api_stream_backpressure_removes_pending_state() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/stream",
+                    BTreeMap::new(),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+        let response = response_task.await.expect("stream task join");
+
+        for _ in 0..=API_STREAM_EVENT_QUEUE_CAPACITY {
+            let chunk = BridgeToBrowserMessage::ApiStreamChunk {
+                id: request_id.clone(),
+                chunk_base64: base64::engine::general_purpose::STANDARD.encode(b"x"),
+            };
+            let raw = serde_json::to_string(&chunk).expect("serialize chunk");
+            assert!(
+                state
+                    .route_bridge_message("device-1", connection_id, chunk, raw)
+                    .await
+            );
+        }
+
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+        drop(inner);
+        drop(response);
+
+        let cancel = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream cancel"),
+        ))
+        .expect("decode stream cancel");
+        assert_eq!(
+            cancel,
+            BrowserToBridgeMessage::ApiStreamCancel { id: request_id }
+        );
+    }
+
+    #[tokio::test]
+    async fn api_stream_error_end_cleans_pending_state() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/stream",
+                    BTreeMap::new(),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+        let mut response = response_task.await.expect("stream task join");
+
+        let end = BridgeToBrowserMessage::ApiStreamEnd {
+            id: request_id.clone(),
+            error: Some("upstream aborted".to_string()),
+        };
+        let end_raw = serde_json::to_string(&end).expect("serialize end");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, end, end_raw)
+                .await
+        );
+        assert!(response.body.next().await.is_none());
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+    }
+
+    #[tokio::test]
+    async fn duplicate_api_stream_start_cleans_pending_state_closes_body_and_sends_cancel() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            inner
+                .devices
+                .insert("device-1".to_string(), test_device("device-1", "owner-a"));
+        }
+        let (bridge_tx, mut bridge_rx) = test_message_channel(CONTROL_WS_QUEUE_CAPACITY);
+        let connection_id = state
+            .register_connection(
+                "device-1",
+                PeerKind::Bridge,
+                "owner-a".to_string(),
+                bridge_tx,
+                None,
+            )
+            .await
+            .expect("bridge registration");
+        report_api_stream_bridge_status(&state, "device-1", connection_id, true).await;
+
+        let state_for_request = state.clone();
+        let response_task = tokio::spawn(async move {
+            state_for_request
+                .forward_device_api_stream_request(
+                    "owner-a",
+                    "device-1",
+                    "GET",
+                    "/api/stream",
+                    BTreeMap::new(),
+                    None,
+                )
+                .await
+                .expect("stream request should start")
+        });
+
+        let request = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream request"),
+        ))
+        .expect("decode stream request");
+        let request_id = match request {
+            BrowserToBridgeMessage::ApiStreamRequest { id, .. } => id,
+            other => panic!("expected stream request, got {other:?}"),
+        };
+
+        let start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let start_raw = serde_json::to_string(&start).expect("serialize start");
+        assert!(
+            state
+                .route_bridge_message("device-1", connection_id, start, start_raw)
+                .await
+        );
+        let mut response = response_task.await.expect("stream task join");
+
+        let duplicate_start = BridgeToBrowserMessage::ApiStreamStart {
+            id: request_id.clone(),
+            status: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+        };
+        let duplicate_start_raw =
+            serde_json::to_string(&duplicate_start).expect("serialize duplicate start");
+        assert!(
+            state
+                .route_bridge_message(
+                    "device-1",
+                    connection_id,
+                    duplicate_start,
+                    duplicate_start_raw,
+                )
+                .await
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), response.body.next())
+                .await
+                .expect("body should close after duplicate start")
+                .is_none()
+        );
+        let cancel = serde_json::from_str::<BrowserToBridgeMessage>(&bridge_message_text(
+            bridge_rx
+                .recv()
+                .await
+                .expect("bridge should receive stream cancel"),
+        ))
+        .expect("decode stream cancel");
+        assert_eq!(
+            cancel,
+            BrowserToBridgeMessage::ApiStreamCancel {
+                id: request_id.clone(),
+            }
+        );
+
+        let inner = state.inner.lock().await;
+        assert!(!inner.pending_api_stream_requests.contains_key(&request_id));
+        assert_eq!(inner.pending_api_stream_bytes, 0);
     }
 
     #[tokio::test]
@@ -5587,6 +7265,7 @@ mod tests {
                     }),
                     browsers: HashMap::new(),
                     last_status: None,
+                    active_bridge_status_seen: false,
                 },
             );
         }
@@ -5770,6 +7449,7 @@ mod tests {
                     }),
                     browsers: HashMap::new(),
                     last_status: None,
+                    active_bridge_status_seen: false,
                 },
             );
             inner.terminal_sessions.insert(
@@ -5852,6 +7532,7 @@ mod tests {
                     }),
                     browsers: HashMap::new(),
                     last_status: None,
+                    active_bridge_status_seen: false,
                 },
             );
             inner.terminal_sessions.insert(
@@ -5923,6 +7604,7 @@ mod tests {
                     }),
                     browsers: HashMap::new(),
                     last_status: None,
+                    active_bridge_status_seen: false,
                 },
             );
             inner.terminal_sessions.insert(
@@ -6832,6 +8514,7 @@ mod tests {
                         },
                     )]),
                     last_status: None,
+                    active_bridge_status_seen: false,
                 },
             );
             inner.pending_api_requests.insert(

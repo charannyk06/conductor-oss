@@ -13,6 +13,12 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
   "keep-alive",
   "transfer-encoding",
 ]);
+const SAFE_EVENT_STREAM_REQUEST_HEADERS = new Set([
+  "accept",
+  "cache-control",
+  "content-type",
+  "last-event-id",
+]);
 
 const BRIDGE_PROXY_REQUEST_META_KEY = "$bridgeRequest";
 
@@ -152,6 +158,23 @@ function buildEventStreamHeaders(response: Response): Headers {
   return headers;
 }
 
+function buildSafeEventStreamRequestHeaders(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    const normalized = key.toLowerCase();
+    if (SAFE_EVENT_STREAM_REQUEST_HEADERS.has(normalized)) {
+      headers[normalized] = value;
+    }
+  });
+  if (!headers.accept) {
+    headers.accept = "text/event-stream";
+  }
+  if (!headers["cache-control"]) {
+    headers["cache-control"] = "no-cache";
+  }
+  return headers;
+}
+
 async function readProxyBody(request: Request, bodyOverride?: unknown): Promise<unknown> {
   if (bodyOverride !== undefined) {
     return bodyOverride;
@@ -250,7 +273,27 @@ export async function proxyEventStreamToBridgeDevice(
   bridgeId: string,
   pathname: string,
 ): Promise<Response> {
-  const response = await proxyToBridgeDevice(request, bridgeId, pathname);
+  const relayUrl = requireBridgeRelayUrl();
+  const incomingUrl = new URL(request.url);
+  const target = new URL(`/api/devices/${encodeURIComponent(bridgeId)}/proxy`, relayUrl);
+  const headers = await buildBridgeRelayAuthHeaders(request);
+  headers.set("Content-Type", "application/json");
+  headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
+  headers.set("x-forwarded-host", incomingUrl.host);
+
+  const response = await fetch(target, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      method: "GET",
+      path: `${pathname}${incomingUrl.search}`,
+      stream: true,
+      headers: buildSafeEventStreamRequestHeaders(request),
+    }),
+    cache: "no-store",
+    redirect: "manual",
+    signal: request.signal,
+  });
 
   if (!response.ok || !response.body || !isEventStreamResponse(response)) {
     return response;
