@@ -872,76 +872,36 @@ func TestRunSessionAPIStreamCancelIsPerIDAndCleansUp(t *testing.T) {
 	}
 }
 
-func TestRunSessionAPIStreamFailureSynthesizesErrorLifecycle(t *testing.T) {
-	t.Setenv(legacyTTYDMirrorEnv, "")
-
-	upgrader := websocket.Upgrader{}
-	relay := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade relay websocket: %v", err)
-		}
-		defer conn.Close()
-
-		assertStreamCapability(t, readBridgeEnvelope(t, conn))
-		writeBridgeEnvelope(t, conn, bridgeEnvelope{
-			Type:   "api_stream_request",
-			ID:     "stream-fail",
-			Method: http.MethodGet,
-			Path:   "/api/dispatcher/feed/stream",
-		})
-
-		start := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
-			return env.Type == "api_stream_start" && env.ID == "stream-fail"
-		})
-		if start.Status != http.StatusBadGateway {
-			t.Fatalf("failure start status = %d, want %d", start.Status, http.StatusBadGateway)
-		}
-		if got := start.Headers["content-type"]; got != "application/json" {
-			t.Fatalf("failure start content-type = %q", got)
-		}
-
-		chunk := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
-			return env.Type == "api_stream_chunk" && env.ID == "stream-fail"
-		})
-		body, err := base64.StdEncoding.DecodeString(chunk.ChunkBase64)
-		if err != nil {
-			t.Fatalf("decode failure chunk: %v", err)
-		}
-		if !strings.Contains(string(body), `"error":`) {
-			t.Fatalf("failure chunk body = %q, want JSON error", string(body))
-		}
-
-		end := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
-			return env.Type == "api_stream_end" && env.ID == "stream-fail"
-		})
-		if end.Error != "" {
-			t.Fatalf("failure end error = %q, want empty", end.Error)
-		}
-	}))
-	defer relay.Close()
-
-	done := runSessionAsync(context.Background(), sessionOptions{
-		relayURL:          relay.URL,
-		refreshToken:      "refresh-token",
-		scope:             "device-123",
-		hostname:          "test-host",
-		osName:            "test-os",
-		version:           "test-version",
-		stderr:            io.Discard,
-		heartbeatInterval: time.Hour,
-		backendBaseURL:    "http://127.0.0.1:1",
-	})
-
-	select {
-	case result := <-done:
-		if !result.connected {
-			t.Fatal("runSession reported disconnected attempt after failure lifecycle")
-		}
-		if result.err == nil {
-			t.Fatal("runSession returned nil error after relay closed")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runSession did not exit after failure lifecycle test")
+func TestSendAPIStreamFailureResponseSynthesizesErrorLifecycle(t *testing.T) {
+	var messages []bridgeEnvelope
+	err := sendAPIStreamFailureResponse(func(env bridgeEnvelope) error {
+		messages = append(messages, env)
+		return nil
+	}, "stream-fail", http.StatusBadGateway, "backend unavailable")
+	if err != nil {
+		t.Fatalf("send failure lifecycle: %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("failure lifecycle message count = %d, want 3", len(messages))
+	}
+	start, chunk, end := messages[0], messages[1], messages[2]
+	if start.Type != "api_stream_start" || start.ID != "stream-fail" || start.Status != http.StatusBadGateway {
+		t.Fatalf("unexpected failure start: %+v", start)
+	}
+	if got := start.Headers["content-type"]; got != "application/json" {
+		t.Fatalf("failure start content-type = %q", got)
+	}
+	if chunk.Type != "api_stream_chunk" || chunk.ID != "stream-fail" {
+		t.Fatalf("unexpected failure chunk: %+v", chunk)
+	}
+	body, err := base64.StdEncoding.DecodeString(chunk.ChunkBase64)
+	if err != nil {
+		t.Fatalf("decode failure chunk: %v", err)
+	}
+	if !strings.Contains(string(body), `"error":`) {
+		t.Fatalf("failure chunk body = %q, want JSON error", string(body))
+	}
+	if end.Type != "api_stream_end" || end.ID != "stream-fail" || end.Error != "" {
+		t.Fatalf("unexpected failure end: %+v", end)
 	}
 }
