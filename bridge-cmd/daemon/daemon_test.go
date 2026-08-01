@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +12,20 @@ import (
 	"time"
 )
 
+func newIPv4TestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("sandbox blocks loopback listeners: %v", err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
+
 func TestValidateSavedPairingBestEffortContinuesOnNetworkFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server := newIPv4TestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	server.Close()
 
 	var stderr bytes.Buffer
@@ -32,7 +45,7 @@ func TestValidateSavedPairingBestEffortContinuesOnNetworkFailure(t *testing.T) {
 }
 
 func TestValidateSavedPairingBestEffortStopsOnRejectedPairing(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 	}))
 	defer server.Close()

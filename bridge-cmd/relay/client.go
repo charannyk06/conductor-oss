@@ -29,6 +29,7 @@ const (
 	defaultHeartbeatInterval       = 30 * time.Second
 	maxReconnectBackoff            = 30 * time.Second
 	terminalAttachMaxAttempts      = 12
+	apiStreamV1Capability          = "api_stream_v1"
 	ttydPortRangeStart             = 7681
 	ttydPortRangeEnd               = 8699
 	bridgeProxyMetaKey             = "$bridgeProxy"
@@ -39,6 +40,7 @@ const (
 	maxPreviewRequestBodyBytes     = 10 * 1024 * 1024
 	maxProxyRequestBodyBytes       = 10 * 1024 * 1024
 	maxBackendResponseBytes        = 10 * 1024 * 1024
+	maxAPIStreamChunkBytes         = 48 * 1024
 	maxTerminalTokenResponseBytes  = 64 * 1024
 	maxBridgeInstallScriptBytes    = 512 * 1024
 	maxFileBrowseEntries           = 2000
@@ -65,14 +67,15 @@ type bridgeEnvelope struct {
 	Data string `json:"data,omitempty"`
 
 	// api_request / api_response
-	ID         string            `json:"id,omitempty"`
-	Method     string            `json:"method,omitempty"`
-	Path       string            `json:"path,omitempty"`
-	URL        string            `json:"url,omitempty"`
-	Status     int               `json:"status,omitempty"`
-	Body       interface{}       `json:"body,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	BodyBase64 string            `json:"body_base64,omitempty"`
+	ID          string            `json:"id,omitempty"`
+	Method      string            `json:"method,omitempty"`
+	Path        string            `json:"path,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Status      int               `json:"status,omitempty"`
+	Body        interface{}       `json:"body,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	BodyBase64  string            `json:"body_base64,omitempty"`
+	ChunkBase64 string            `json:"chunk_base64,omitempty"`
 
 	// terminal_proxy_start
 	TerminalID string `json:"terminal_id,omitempty"`
@@ -87,10 +90,11 @@ type bridgeEnvelope struct {
 	Rows int `json:"rows,omitempty"`
 
 	// bridge_status
-	Hostname  string `json:"hostname,omitempty"`
-	OS        string `json:"os,omitempty"`
-	Connected bool   `json:"connected,omitempty"`
-	Version   string `json:"version,omitempty"`
+	Hostname     string   `json:"hostname,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Connected    bool     `json:"connected,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type backendHealthPayload struct {
@@ -192,6 +196,7 @@ func Run(ctx context.Context, opts Options) error {
 			version:           version,
 			stderr:            stderr,
 			heartbeatInterval: heartbeat,
+			backendBaseURL:    "http://127.0.0.1:4749",
 		})
 		if ctx.Err() != nil {
 			return nil
@@ -227,9 +232,77 @@ type sessionOptions struct {
 	version           string
 	stderr            io.Writer
 	heartbeatInterval time.Duration
+	backendBaseURL    string
 }
 
-var backendEnsureMu sync.Mutex
+var backendEnsureGate = func() chan struct{} {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return gate
+}()
+
+type apiStreamHandle struct {
+	cancel context.CancelFunc
+}
+
+type apiStreamRegistry struct {
+	mu      sync.Mutex
+	handles map[string]*apiStreamHandle
+}
+
+func (r *apiStreamRegistry) register(id string, handle *apiStreamHandle) *apiStreamHandle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.handles == nil {
+		r.handles = make(map[string]*apiStreamHandle)
+	}
+	previous := r.handles[id]
+	r.handles[id] = handle
+	return previous
+}
+
+func (r *apiStreamRegistry) cancel(id string) {
+	var handle *apiStreamHandle
+	r.mu.Lock()
+	if r.handles != nil {
+		handle = r.handles[id]
+		delete(r.handles, id)
+	}
+	r.mu.Unlock()
+	if handle != nil {
+		handle.cancel()
+	}
+}
+
+func (r *apiStreamRegistry) removeIfMatch(id string, handle *apiStreamHandle) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.handles == nil {
+		return
+	}
+	if current := r.handles[id]; current == handle {
+		delete(r.handles, id)
+	}
+}
+
+func (r *apiStreamRegistry) cancelAll() {
+	r.mu.Lock()
+	if len(r.handles) == 0 {
+		r.mu.Unlock()
+		return
+	}
+	handles := make([]*apiStreamHandle, 0, len(r.handles))
+	for id, handle := range r.handles {
+		delete(r.handles, id)
+		handles = append(handles, handle)
+	}
+	r.mu.Unlock()
+	for _, handle := range handles {
+		if handle != nil {
+			handle.cancel()
+		}
+	}
+}
 
 func legacyTTYDMirrorEnabled() bool {
 	value := strings.TrimSpace(strings.ToLower(os.Getenv(legacyTTYDMirrorEnv)))
@@ -270,6 +343,66 @@ func readAllBounded(reader io.Reader, maxBytes int, label string) ([]byte, error
 	return data, nil
 }
 
+func sanitizeHeaderValue(value string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(value)
+}
+
+func sanitizeProxyRequestHeaders(headers map[string]string) (http.Header, error) {
+	sanitized := http.Header{}
+	for name, value := range headers {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		switch lower {
+		case "", "authorization", "cookie", "host", "connection", "content-length", "transfer-encoding", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "forwarded", "proxy-authorization", "proxy-authenticate":
+			continue
+		}
+		if strings.ContainsAny(lower, "\r\n") {
+			return nil, fmt.Errorf("invalid proxy request header name")
+		}
+		sanitized.Set(lower, sanitizeHeaderValue(value))
+	}
+	return sanitized, nil
+}
+
+func sanitizeProxyResponseHeaders(headers http.Header) map[string]string {
+	sanitized := map[string]string{}
+	for name, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(name))
+		switch lower {
+		case "", "connection", "proxy-connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "upgrade", "proxy-authenticate", "proxy-authentication-info", "proxy-authorization", "te", "trailers", "set-cookie", "set-cookie2":
+			continue
+		}
+		value := sanitizeHeaderValue(values[len(values)-1])
+		if strings.ContainsAny(value, "\r\n") {
+			continue
+		}
+		sanitized[lower] = value
+	}
+	return sanitized
+}
+
+func encodeProxyRequestBody(body interface{}) ([]byte, string, error) {
+	if body == nil {
+		return nil, "", nil
+	}
+	if rawBody, rawContentType, ok, err := decodeProxyRequestBody(body); ok {
+		if err != nil {
+			return nil, "", err
+		}
+		if rawContentType != "" {
+			return rawBody, rawContentType, nil
+		}
+		return rawBody, "application/octet-stream", nil
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode backend request body: %w", err)
+	}
+	return bodyBytes, "application/json", nil
+}
+
 func normalizeHTTPMethod(method string) (string, error) {
 	normalized := strings.ToUpper(strings.TrimSpace(method))
 	if normalized == "" {
@@ -284,6 +417,10 @@ func normalizeHTTPMethod(method string) (string, error) {
 }
 
 func buildLocalBackendURL(rawPath string) (*url.URL, error) {
+	return buildLocalBackendURLWithBase("http://127.0.0.1:4749", rawPath)
+}
+
+func buildLocalBackendURLWithBase(baseURL, rawPath string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(rawPath)
 	if trimmed == "" {
 		trimmed = "/"
@@ -301,12 +438,14 @@ func buildLocalBackendURL(rawPath string) (*url.URL, error) {
 	if parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") || parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil {
 		return nil, fmt.Errorf("backend path must not include a scheme or host")
 	}
-	return &url.URL{
-		Scheme:   "http",
-		Host:     "127.0.0.1:4749",
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse backend base url: %w", err)
+	}
+	return base.ResolveReference(&url.URL{
 		Path:     parsed.Path,
 		RawQuery: parsed.RawQuery,
-	}, nil
+	}), nil
 }
 
 func requireLoopbackDialTarget(ctx context.Context, address string) error {
@@ -516,13 +655,17 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 		defer relayMu.Unlock()
 		return relayConn.WriteMessage(websocket.TextMessage, data)
 	}
-	if err := send(bridgeEnvelope{
-		Type:      "bridge_status",
-		Hostname:  opts.hostname,
-		OS:        opts.osName,
-		Connected: true,
-		Version:   opts.version,
-	}); err != nil {
+	statusEnvelope := func() bridgeEnvelope {
+		return bridgeEnvelope{
+			Type:         "bridge_status",
+			Hostname:     opts.hostname,
+			OS:           opts.osName,
+			Connected:    true,
+			Version:      opts.version,
+			Capabilities: []string{apiStreamV1Capability},
+		}
+	}
+	if err := send(statusEnvelope()); err != nil {
 		stopTtyd()
 		return false, fmt.Errorf("send bridge_status: %w", err)
 	}
@@ -530,6 +673,8 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	// 4. Bidirectional bridge loop.
 	errCh := make(chan error, 2)
 	var activeTerminals sync.Map
+	var activeAPIStreams apiStreamRegistry
+	defer activeAPIStreams.cancelAll()
 
 	// relay → ttyd
 	go func() {
@@ -565,7 +710,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 			case "api_request":
 				// Proxy to localhost:4749 (conductor backend).
-				apiResp, apiErr := proxyAPI(env.ID, env.Method, env.Path, env.Body)
+				apiResp, apiErr := proxyAPI(opts.backendBaseURL, env.ID, env.Method, env.Path, env.Body)
 				if apiErr != nil {
 					_ = send(bridgeEnvelope{
 						Type:   "api_response",
@@ -581,6 +726,36 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 						Body:   apiResp.Body,
 					})
 				}
+
+			case "api_stream_request":
+				requestID := strings.TrimSpace(env.ID)
+				if requestID == "" {
+					continue
+				}
+				streamCtx, streamCancel := context.WithCancel(ctx)
+				handle := &apiStreamHandle{cancel: streamCancel}
+				if previous := activeAPIStreams.register(requestID, handle); previous != nil {
+					previous.cancel()
+				}
+				go func(request bridgeEnvelope, requestID string, handle *apiStreamHandle) {
+					defer streamCancel()
+					defer activeAPIStreams.removeIfMatch(requestID, handle)
+					if err := proxyAPIStream(
+						streamCtx,
+						opts.backendBaseURL,
+						send,
+						requestID,
+						request.Method,
+						request.Path,
+						request.Headers,
+						request.Body,
+					); err != nil && ctx.Err() == nil && streamCtx.Err() == nil {
+						fmt.Fprintf(opts.stderr, "api stream proxy failed id=%s error=%v\n", requestID, err)
+					}
+				}(env, requestID, handle)
+
+			case "api_stream_cancel":
+				activeAPIStreams.cancel(strings.TrimSpace(env.ID))
 
 			case "preview_request":
 				previewResp, previewErr := proxyPreview(env.ID, env.SessionID, env.Method, env.URL, env.Headers, env.BodyBase64)
@@ -715,13 +890,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 			// backoff before retrying a dropped long-lived session.
 			return true, err
 		case <-heartbeat.C:
-			if err := send(bridgeEnvelope{
-				Type:      "bridge_status",
-				Hostname:  opts.hostname,
-				OS:        opts.osName,
-				Connected: true,
-				Version:   opts.version,
-			}); err != nil {
+			if err := send(statusEnvelope()); err != nil {
 				stopTtyd()
 				return true, fmt.Errorf("send bridge_status: %w", err)
 			}
@@ -945,7 +1114,7 @@ func connectBackendTerminal(
 			break
 		}
 
-		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil {
+		if ensureErr := ensureLocalBackendForProxy(ctx); ensureErr != nil {
 			lastErr = ensureErr
 			break
 		}
@@ -1382,7 +1551,114 @@ func proxyPreview(
 	}, nil
 }
 
-func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
+func sendAPIStreamFailureResponse(send func(bridgeEnvelope) error, id string, status int, message string) error {
+	if err := send(bridgeEnvelope{
+		Type:    "api_stream_start",
+		ID:      id,
+		Status:  status,
+		Headers: map[string]string{"content-type": "application/json"},
+	}); err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]string{"error": message})
+	if err != nil {
+		return fmt.Errorf("encode api stream failure response: %w", err)
+	}
+	if err := send(bridgeEnvelope{
+		Type:        "api_stream_chunk",
+		ID:          id,
+		ChunkBase64: base64.StdEncoding.EncodeToString(body),
+	}); err != nil {
+		return err
+	}
+	return send(bridgeEnvelope{
+		Type: "api_stream_end",
+		ID:   id,
+	})
+}
+
+func proxyAPIStream(
+	ctx context.Context,
+	backendBaseURL string,
+	send func(bridgeEnvelope) error,
+	id string,
+	method string,
+	path string,
+	headers map[string]string,
+	body interface{},
+) error {
+	requestBodyBytes, contentType, err := encodeProxyRequestBody(body)
+	if err != nil {
+		return sendAPIStreamFailureResponse(send, id, http.StatusBadGateway, err.Error())
+	}
+
+	sanitizedHeaders, err := sanitizeProxyRequestHeaders(headers)
+	if err != nil {
+		return sendAPIStreamFailureResponse(send, id, http.StatusBadGateway, err.Error())
+	}
+	if len(requestBodyBytes) > 0 && sanitizedHeaders.Get("content-type") == "" && contentType != "" {
+		sanitizedHeaders.Set("content-type", contentType)
+	}
+
+	resp, err := doBackendAPIStreamRequest(ctx, backendBaseURL, method, path, requestBodyBytes, sanitizedHeaders)
+	if err != nil && shouldRetryAfterEnsuringBackend(err) {
+		if ensureErr := ensureLocalBackendForProxy(ctx); ensureErr != nil {
+			return sendAPIStreamFailureResponse(send, id, http.StatusBadGateway, ensureErr.Error())
+		}
+		resp, err = doBackendAPIStreamRequest(ctx, backendBaseURL, method, path, requestBodyBytes, sanitizedHeaders)
+	}
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return sendAPIStreamFailureResponse(send, id, http.StatusBadGateway, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if err := send(bridgeEnvelope{
+		Type:    "api_stream_start",
+		ID:      id,
+		Status:  resp.StatusCode,
+		Headers: sanitizeProxyResponseHeaders(resp.Header),
+	}); err != nil {
+		return err
+	}
+
+	buffer := make([]byte, maxAPIStreamChunkBytes)
+	for {
+		n, readErr := resp.Body.Read(buffer)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buffer[:n])
+			if err := send(bridgeEnvelope{
+				Type:        "api_stream_chunk",
+				ID:          id,
+				ChunkBase64: base64.StdEncoding.EncodeToString(chunk),
+			}); err != nil {
+				return err
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		if readErr == io.EOF {
+			return send(bridgeEnvelope{
+				Type: "api_stream_end",
+				ID:   id,
+			})
+		}
+		if ctx.Err() != nil || errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+			return nil
+		}
+		return send(bridgeEnvelope{
+			Type:  "api_stream_end",
+			ID:    id,
+			Error: readErr.Error(),
+		})
+	}
+}
+
+func proxyAPI(backendBaseURL, id, method, path string, body interface{}) (apiResponse, error) {
 	if handled, resp := maybeHandleBridgeControlRequest(method, path, body); handled {
 		return resp, nil
 	}
@@ -1392,33 +1668,19 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 	}
 
 	// Proxy to local conductor backend at localhost:4749.
-	var requestBodyBytes []byte
-	contentType := "application/json"
-	if body != nil {
-		if rawBody, rawContentType, ok, err := decodeProxyRequestBody(body); ok {
-			if err != nil {
-				return apiResponse{Status: 0, Body: nil}, err
-			}
-			requestBodyBytes = rawBody
-			if rawContentType != "" {
-				contentType = rawContentType
-			} else {
-				contentType = "application/octet-stream"
-			}
-		} else {
-			bodyBytes, _ := json.Marshal(body)
-			requestBodyBytes = bodyBytes
-		}
+	requestBodyBytes, contentType, err := encodeProxyRequestBody(body)
+	if err != nil {
+		return apiResponse{Status: 0, Body: nil}, err
 	}
 
-	resp, err := doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+	resp, err := doBackendAPIRequest(backendBaseURL, method, path, requestBodyBytes, contentType)
 	if err != nil && shouldRetryAfterEnsuringBackend(err) {
-		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil {
+		if ensureErr := ensureLocalBackendForProxy(context.Background()); ensureErr != nil {
 			return apiResponse{Status: http.StatusBadGateway, Body: map[string]any{
 				"error": ensureErr.Error(),
 			}}, ensureErr
 		}
-		resp, err = doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+		resp, err = doBackendAPIRequest(backendBaseURL, method, path, requestBodyBytes, contentType)
 	}
 	if err != nil {
 		return apiResponse{Status: http.StatusBadGateway, Body: map[string]any{
@@ -1599,8 +1861,8 @@ func resolveLocalConductorVersion() string {
 	return strings.TrimSpace(payload.Version)
 }
 
-func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
-	backendURL, err := buildLocalBackendURL(path)
+func doBackendAPIRequest(backendBaseURL, method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
+	backendURL, err := buildLocalBackendURLWithBase(backendBaseURL, path)
 	if err != nil {
 		return nil, err
 	}
@@ -1630,11 +1892,51 @@ func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentTy
 	return client.Do(req)
 }
 
-func ensureLocalBackendForProxy() error {
-	backendEnsureMu.Lock()
-	defer backendEnsureMu.Unlock()
+func doBackendAPIStreamRequest(
+	ctx context.Context,
+	backendBaseURL string,
+	method string,
+	path string,
+	requestBodyBytes []byte,
+	headers http.Header,
+) (*http.Response, error) {
+	backendURL, err := buildLocalBackendURLWithBase(backendBaseURL, path)
+	if err != nil {
+		return nil, err
+	}
+	method, err = normalizeHTTPMethod(method)
+	if err != nil {
+		return nil, err
+	}
 
-	_, err := backend.Ensure(context.Background(), backend.Options{
+	var requestBody io.Reader
+	if len(requestBodyBytes) > 0 {
+		requestBody = bytes.NewReader(requestBodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, backendURL.String(), requestBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = headers.Clone()
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	return client.Do(req)
+}
+
+func ensureLocalBackendForProxy(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-backendEnsureGate:
+	}
+	defer func() { backendEnsureGate <- struct{}{} }()
+
+	_, err := backend.Ensure(ctx, backend.Options{
 		Stderr:         os.Stderr,
 		StartupTimeout: 45 * time.Second,
 	})

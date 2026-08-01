@@ -3,8 +3,10 @@ package relay
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,95 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func newIPv4TestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("sandbox blocks loopback listeners: %v", err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	return server
+}
+
+func readBridgeEnvelope(t *testing.T, conn *websocket.Conn) bridgeEnvelope {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read websocket message: %v", err)
+	}
+	var env bridgeEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("decode bridge envelope %q: %v", string(data), err)
+	}
+	return env
+}
+
+func waitForBridgeEnvelope(t *testing.T, conn *websocket.Conn, predicate func(bridgeEnvelope) bool) bridgeEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		env := readBridgeEnvelope(t, conn)
+		if predicate(env) {
+			return env
+		}
+	}
+	t.Fatal("timed out waiting for bridge message")
+	return bridgeEnvelope{}
+}
+
+func writeBridgeEnvelope(t *testing.T, conn *websocket.Conn, env bridgeEnvelope) {
+	t.Helper()
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("encode bridge envelope: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write websocket message: %v", err)
+	}
+}
+
+func assertStreamCapability(t *testing.T, env bridgeEnvelope) {
+	t.Helper()
+	if env.Type != "bridge_status" {
+		t.Fatalf("message type = %q, want bridge_status", env.Type)
+	}
+	if env.Hostname == "" || env.OS == "" {
+		t.Fatalf("bridge_status missing host metadata: %+v", env)
+	}
+	if !env.Connected {
+		t.Fatalf("bridge_status connected = false, want true")
+	}
+	for _, capability := range env.Capabilities {
+		if capability == apiStreamV1Capability {
+			return
+		}
+	}
+	t.Fatalf("bridge_status capabilities = %v, want %q", env.Capabilities, apiStreamV1Capability)
+}
+
+func runSessionAsync(ctx context.Context, opts sessionOptions) <-chan struct {
+	connected bool
+	err       error
+} {
+	done := make(chan struct {
+		connected bool
+		err       error
+	}, 1)
+	go func() {
+		connected, err := runSession(ctx, opts)
+		done <- struct {
+			connected bool
+			err       error
+		}{connected: connected, err: err}
+	}()
+	return done
+}
 
 func TestRelayAuthHeadersUsesAuthorizationBearer(t *testing.T) {
 	t.Parallel()
@@ -54,7 +145,7 @@ func TestRunSessionReportsEstablishedConnectionAfterRelayDrops(t *testing.T) {
 
 	serverErr := make(chan error, 1)
 	upgrader := websocket.Upgrader{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			serverErr <- err
@@ -62,10 +153,12 @@ func TestRunSessionReportsEstablishedConnectionAfterRelayDrops(t *testing.T) {
 		}
 		defer conn.Close()
 
-		if _, _, err := conn.ReadMessage(); err != nil {
-			serverErr <- err
+		env := readBridgeEnvelope(t, conn)
+		if env.Type != "bridge_status" {
+			serverErr <- errors.New("expected bridge_status handshake")
 			return
 		}
+		assertStreamCapability(t, env)
 		serverErr <- nil
 	}))
 	defer server.Close()
@@ -378,5 +471,437 @@ func TestBrowseFilesRestrictsToAllowedRoots(t *testing.T) {
 	outside := string(filepath.Separator) + "etc"
 	if _, err := browseFiles(outside); err == nil {
 		t.Fatalf("browseFiles(%q) succeeded, want root restriction error", outside)
+	}
+}
+
+func TestRunSessionStreamsHeldOpenSSEWithSanitizedHeaders(t *testing.T) {
+	t.Setenv(legacyTTYDMirrorEnv, "")
+
+	requestHeaders := make(chan http.Header, 1)
+	releaseSecondChunk := make(chan struct{})
+	backend := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/dispatcher/feed/stream" {
+			http.NotFound(w, r)
+			return
+		}
+		requestHeaders <- r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache, no-transform")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Set-Cookie", "bridge-secret=1")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("backend response writer is not flushable")
+		}
+		if _, err := io.WriteString(w, "data: first\n\n"); err != nil {
+			return
+		}
+		flusher.Flush()
+		<-releaseSecondChunk
+		_, _ = io.WriteString(w, "data: second\n\n")
+		flusher.Flush()
+	}))
+	defer backend.Close()
+
+	upgrader := websocket.Upgrader{}
+	relay := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade relay websocket: %v", err)
+		}
+		defer conn.Close()
+
+		assertStreamCapability(t, readBridgeEnvelope(t, conn))
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{
+			Type:   "api_stream_request",
+			ID:     "stream-1",
+			Method: http.MethodGet,
+			Path:   "/api/dispatcher/feed/stream",
+			Headers: map[string]string{
+				"accept":           "text/event-stream",
+				"cache-control":    "no-cache",
+				"authorization":    "Bearer should-not-forward",
+				"cookie":           "secret=1",
+				"x-forwarded-host": "evil.example",
+				"connection":       "keep-alive",
+			},
+		})
+
+		start := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_start" && env.ID == "stream-1"
+		})
+		if start.Status != http.StatusOK {
+			t.Fatalf("stream start status = %d, want %d", start.Status, http.StatusOK)
+		}
+		if got := start.Headers["content-type"]; got != "text/event-stream" {
+			t.Fatalf("start content-type = %q, want text/event-stream", got)
+		}
+		if got := start.Headers["cache-control"]; got != "no-cache, no-transform" {
+			t.Fatalf("start cache-control = %q", got)
+		}
+		if got := start.Headers["x-accel-buffering"]; got != "no" {
+			t.Fatalf("start x-accel-buffering = %q, want no", got)
+		}
+		if _, ok := start.Headers["set-cookie"]; ok {
+			t.Fatal("start headers leaked set-cookie")
+		}
+		if _, ok := start.Headers["connection"]; ok {
+			t.Fatal("start headers leaked connection")
+		}
+
+		firstChunk := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_chunk" && env.ID == "stream-1"
+		})
+		firstBytes, err := base64.StdEncoding.DecodeString(firstChunk.ChunkBase64)
+		if err != nil {
+			t.Fatalf("decode first stream chunk: %v", err)
+		}
+		if string(firstBytes) != "data: first\n\n" {
+			t.Fatalf("first chunk = %q", string(firstBytes))
+		}
+
+		close(releaseSecondChunk)
+
+		secondChunk := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_chunk" && env.ID == "stream-1"
+		})
+		secondBytes, err := base64.StdEncoding.DecodeString(secondChunk.ChunkBase64)
+		if err != nil {
+			t.Fatalf("decode second stream chunk: %v", err)
+		}
+		if string(secondBytes) != "data: second\n\n" {
+			t.Fatalf("second chunk = %q", string(secondBytes))
+		}
+
+		end := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_end" && env.ID == "stream-1"
+		})
+		if end.Error != "" {
+			t.Fatalf("stream end error = %q, want empty", end.Error)
+		}
+	}))
+	defer relay.Close()
+
+	done := runSessionAsync(context.Background(), sessionOptions{
+		relayURL:          relay.URL,
+		refreshToken:      "refresh-token",
+		scope:             "device-123",
+		hostname:          "test-host",
+		osName:            "test-os",
+		version:           "test-version",
+		stderr:            io.Discard,
+		heartbeatInterval: time.Hour,
+		backendBaseURL:    backend.URL,
+	})
+
+	select {
+	case headers := <-requestHeaders:
+		if got := headers.Get("Accept"); got != "text/event-stream" {
+			t.Fatalf("backend accept header = %q", got)
+		}
+		if got := headers.Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("backend cache-control header = %q", got)
+		}
+		if got := headers.Get("Authorization"); got != "" {
+			t.Fatalf("backend authorization header leaked: %q", got)
+		}
+		if got := headers.Get("Cookie"); got != "" {
+			t.Fatalf("backend cookie header leaked: %q", got)
+		}
+		if got := headers.Get("X-Forwarded-Host"); got != "" {
+			t.Fatalf("backend x-forwarded-host leaked: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend did not receive streamed request")
+	}
+
+	select {
+	case result := <-done:
+		if !result.connected {
+			t.Fatal("runSession reported disconnected attempt after streamed request")
+		}
+		if result.err == nil {
+			t.Fatal("runSession returned nil error after relay closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runSession did not exit after relay closed")
+	}
+}
+
+func TestRunSessionSendsHeartbeatWhileAPIStreamRemainsOpen(t *testing.T) {
+	t.Setenv(legacyTTYDMirrorEnv, "")
+
+	release := make(chan struct{})
+	backend := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("backend response writer is not flushable")
+		}
+		_, _ = io.WriteString(w, "data: waiting\n\n")
+		flusher.Flush()
+		<-release
+	}))
+	defer backend.Close()
+
+	upgrader := websocket.Upgrader{}
+	relay := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade relay websocket: %v", err)
+		}
+		defer conn.Close()
+
+		assertStreamCapability(t, readBridgeEnvelope(t, conn))
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{
+			Type:   "api_stream_request",
+			ID:     "stream-heartbeat",
+			Method: http.MethodGet,
+			Path:   "/api/dispatcher/feed/stream",
+			Headers: map[string]string{
+				"accept": "text/event-stream",
+			},
+		})
+
+		waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_start" && env.ID == "stream-heartbeat"
+		})
+		waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_chunk" && env.ID == "stream-heartbeat"
+		})
+		heartbeat := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "bridge_status"
+		})
+		assertStreamCapability(t, heartbeat)
+
+		close(release)
+	}))
+	defer relay.Close()
+
+	done := runSessionAsync(context.Background(), sessionOptions{
+		relayURL:          relay.URL,
+		refreshToken:      "refresh-token",
+		scope:             "device-123",
+		hostname:          "test-host",
+		osName:            "test-os",
+		version:           "test-version",
+		stderr:            io.Discard,
+		heartbeatInterval: 40 * time.Millisecond,
+		backendBaseURL:    backend.URL,
+	})
+
+	select {
+	case result := <-done:
+		if !result.connected {
+			t.Fatal("runSession reported disconnected attempt after heartbeat stream")
+		}
+		if result.err == nil {
+			t.Fatal("runSession returned nil error after relay closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runSession did not exit after heartbeat test")
+	}
+}
+
+func TestEnsureLocalBackendForProxyHonorsCancellationWhileWaiting(t *testing.T) {
+	<-backendEnsureGate
+	defer func() { backendEnsureGate <- struct{}{} }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err := ensureLocalBackendForProxy(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensure error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancelled ensure waited too long: %s", elapsed)
+	}
+}
+
+func TestRunSessionAPIStreamCancelIsPerIDAndCleansUp(t *testing.T) {
+	t.Setenv(legacyTTYDMirrorEnv, "")
+
+	a1Cancelled := make(chan struct{}, 1)
+	a2Cancelled := make(chan struct{}, 1)
+	releaseB := make(chan struct{})
+	backend := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("backend response writer is not flushable")
+		}
+		switch r.URL.Query().Get("target") {
+		case "a1":
+			_, _ = io.WriteString(w, "data: a1\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
+			a1Cancelled <- struct{}{}
+		case "a2":
+			_, _ = io.WriteString(w, "data: a2\n\n")
+			flusher.Flush()
+			<-r.Context().Done()
+			a2Cancelled <- struct{}{}
+		case "b":
+			_, _ = io.WriteString(w, "data: b1\n\n")
+			flusher.Flush()
+			<-releaseB
+			_, _ = io.WriteString(w, "data: b2\n\n")
+			flusher.Flush()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+	defer func() {
+		select {
+		case <-releaseB:
+		default:
+			close(releaseB)
+		}
+	}()
+
+	upgrader := websocket.Upgrader{}
+	relay := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade relay websocket: %v", err)
+		}
+		defer conn.Close()
+
+		assertStreamCapability(t, readBridgeEnvelope(t, conn))
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{
+			Type:   "api_stream_request",
+			ID:     "stream-a",
+			Method: http.MethodGet,
+			Path:   "/api/dispatcher/feed/stream?target=a1",
+		})
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{
+			Type:   "api_stream_request",
+			ID:     "stream-b",
+			Method: http.MethodGet,
+			Path:   "/api/dispatcher/feed/stream?target=b",
+		})
+
+		started := map[string]bool{}
+		for len(started) < 2 {
+			env := readBridgeEnvelope(t, conn)
+			if env.Type == "api_stream_start" && (env.ID == "stream-a" || env.ID == "stream-b") {
+				started[env.ID] = true
+			}
+		}
+
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{Type: "api_stream_cancel", ID: "stream-a"})
+		select {
+		case <-a1Cancelled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first stream-a request was not cancelled")
+		}
+
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{
+			Type:   "api_stream_request",
+			ID:     "stream-a",
+			Method: http.MethodGet,
+			Path:   "/api/dispatcher/feed/stream?target=a2",
+		})
+		waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_start" && env.ID == "stream-a"
+		})
+
+		writeBridgeEnvelope(t, conn, bridgeEnvelope{Type: "api_stream_cancel", ID: "stream-a"})
+		select {
+		case <-a2Cancelled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("replacement stream-a request was not cancelled")
+		}
+
+		close(releaseB)
+		finalChunk := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			if env.Type != "api_stream_chunk" || env.ID != "stream-b" {
+				return false
+			}
+			decoded, err := base64.StdEncoding.DecodeString(env.ChunkBase64)
+			return err == nil && string(decoded) == "data: b2\n\n"
+		})
+		decoded, err := base64.StdEncoding.DecodeString(finalChunk.ChunkBase64)
+		if err != nil {
+			t.Fatalf("decode stream-b chunk: %v", err)
+		}
+		if string(decoded) != "data: b2\n\n" {
+			t.Fatalf("stream-b final chunk = %q", string(decoded))
+		}
+		end := waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
+			return env.Type == "api_stream_end" && env.ID == "stream-b"
+		})
+		if end.Error != "" {
+			t.Fatalf("stream-b end error = %q, want empty", end.Error)
+		}
+		if err := conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "test complete"),
+			time.Now().Add(time.Second),
+		); err != nil {
+			t.Fatalf("close relay websocket: %v", err)
+		}
+	}))
+	defer relay.Close()
+
+	done := runSessionAsync(context.Background(), sessionOptions{
+		relayURL:          relay.URL,
+		refreshToken:      "refresh-token",
+		scope:             "device-123",
+		hostname:          "test-host",
+		osName:            "test-os",
+		version:           "test-version",
+		stderr:            io.Discard,
+		heartbeatInterval: time.Hour,
+		backendBaseURL:    backend.URL,
+	})
+
+	select {
+	case result := <-done:
+		if !result.connected {
+			t.Fatal("runSession reported disconnected attempt after cancel test")
+		}
+		if result.err == nil {
+			t.Fatal("runSession returned nil error after relay closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runSession did not exit after cancel test")
+	}
+}
+
+func TestSendAPIStreamFailureResponseSynthesizesErrorLifecycle(t *testing.T) {
+	var messages []bridgeEnvelope
+	err := sendAPIStreamFailureResponse(func(env bridgeEnvelope) error {
+		messages = append(messages, env)
+		return nil
+	}, "stream-fail", http.StatusBadGateway, "backend unavailable")
+	if err != nil {
+		t.Fatalf("send failure lifecycle: %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("failure lifecycle message count = %d, want 3", len(messages))
+	}
+	start, chunk, end := messages[0], messages[1], messages[2]
+	if start.Type != "api_stream_start" || start.ID != "stream-fail" || start.Status != http.StatusBadGateway {
+		t.Fatalf("unexpected failure start: %+v", start)
+	}
+	if got := start.Headers["content-type"]; got != "application/json" {
+		t.Fatalf("failure start content-type = %q", got)
+	}
+	if chunk.Type != "api_stream_chunk" || chunk.ID != "stream-fail" {
+		t.Fatalf("unexpected failure chunk: %+v", chunk)
+	}
+	body, err := base64.StdEncoding.DecodeString(chunk.ChunkBase64)
+	if err != nil {
+		t.Fatalf("decode failure chunk: %v", err)
+	}
+	if !strings.Contains(string(body), `"error":`) {
+		t.Fatalf("failure chunk body = %q, want JSON error", string(body))
+	}
+	if end.Type != "api_stream_end" || end.ID != "stream-fail" || end.Error != "" {
+		t.Fatalf("unexpected failure end: %+v", end)
 	}
 }
