@@ -3072,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_delta_after_interleaved_status_updates_one_canonical_row() {
+    fn assistant_delta_after_interleaved_status_starts_a_new_assistant_segment() {
         let mut session = SessionRecord::new(
             "session-1".to_string(),
             "demo".to_string(),
@@ -3103,8 +3103,9 @@ mod tests {
             .iter()
             .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
             .collect::<Vec<_>>();
-        assert_eq!(assistant_entries.len(), 1);
-        assert_eq!(assistant_entries[0].text, "hello world");
+        assert_eq!(assistant_entries.len(), 2);
+        assert_eq!(assistant_entries[0].text, "hello");
+        assert_eq!(assistant_entries[1].text, " world");
         assert_eq!(
             session
                 .conversation

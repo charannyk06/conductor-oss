@@ -15,7 +15,7 @@ Implement and ship a focused streaming change from `origin/main`. Any separate d
 1. Runtime adapters expose a first-class byte-exact assistant delta event. Delta text must never be trimmed, newline-normalized, or heuristically deduplicated.
 2. Codex dispatcher turns use the Codex app-server protocol when available so `item/agentMessage/delta` notifications become live assistant deltas. Preserve model, reasoning, cwd, sandbox and approval behavior, the bounded pre-turn handshake, cancellation, stderr diagnostics, real legacy fallback if app-server startup fails before the turn begins, and the dispatcher rule that every headless turn rebuilds from the durable transcript instead of using a native resume target.
 3. Structured streaming adapters for Claude Code, Gemini, Qwen, and OpenClaw emit assistant deltas when their native protocols provide them. Completed or final frames must not duplicate already-streamed text.
-4. Dispatcher state keeps one canonical active assistant row per user turn. Tool and status rows may be interleaved without splitting subsequent assistant deltas into a new message.
+4. Dispatcher state keeps one stable assistant row per contiguous assistant segment. A newly appended runtime tool or status lifecycle row seals the prior assistant segment; later assistant deltas must create and then keep updating a new tail assistant row after that barrier. Tool lifecycle updates matched by `toolCallId` still update their original row in place and must not retroactively barrier a later assistant segment.
 5. Existing 50 ms publication batching remains the single server-side cadence control. Duplicate or no-op fragments must not churn timestamps or rebuild feeds.
 6. Protocol 2 SSE emits a compact patch for exactly one changed streaming entry by stable entry ID, even when that entry is not the tail because a tool card follows it. If identity, ordering, or multiple entries change, send a full replace snapshot.
 7. Compact patches carry UTF-16 offsets because browser string offsets use UTF-16 code units. Replayed duplicate patches are idempotent. Offset mismatch, server lag refresh, or reconnect must safely resync by replacement.
@@ -27,7 +27,7 @@ Implement and ship a focused streaming change from `origin/main`. Any separate d
 - Rust unit tests for byte-exact delta parsing and no duplicate final output across supported structured adapters.
 - Codex app-server protocol tests for initialize, thread start, turn start, delta forwarding, tool and status forwarding, completion, errors, cancellation, and paths with spaces.
 - Dispatcher regressions proving Codex ignores stale persisted native resume targets and app-server thread-start metadata exposes `codexThreadId` telemetry without claiming native resume.
-- Dispatcher-state tests proving one assistant row across interleaved tool cards and duplicate or no-op behavior.
+- Dispatcher-state tests proving exact user/assistant/tool chronology, one stable assistant row per contiguous segment, stable updates within each segment, tool completion updates in place, final-only snapshot fallback, and duplicate or no-op behavior.
 - SSE tests for non-tail single-entry patching, multi-entry replacement fallback, UTF-16 emoji offsets, lag refresh recovery, and keepalive.
 - Frontend reducer tests for delta apply, duplicate replay, offset mismatch replacement, non-tail entry update, and stable tool entries.
 - `cargo fmt --check`
@@ -38,7 +38,7 @@ Implement and ship a focused streaming change from `origin/main`. Any separate d
 - `bun run --cwd packages/web test`
 - `bun run typecheck`
 - `bun run build:frontend`
-- Real alternate-port source smoke using local Codex: observe multiple assistant text updates before turn completion, no chunk dump, one assistant row, and final text equality.
+- Real alternate-port source smoke using local Codex: observe multiple assistant text updates before turn completion, no chunk dump, one assistant row per contiguous assistant segment, preserved tool/assistant chronology, and final text equality.
 - Browser smoke against the source build with no relevant console errors.
 
 ## Delivery
