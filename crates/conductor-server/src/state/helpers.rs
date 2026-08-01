@@ -741,35 +741,45 @@ pub(crate) fn latest_turn_runtime_assistant_text(session: &SessionRecord) -> Opt
         .map(ToOwned::to_owned)
 }
 
+fn is_streamed_runtime_assistant(entry: &ConversationEntry) -> bool {
+    entry.kind == "assistant_message"
+        && entry.source == "runtime"
+        && entry
+            .metadata
+            .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
 pub(crate) fn find_streamed_runtime_assistant_anchor(
     session: &SessionRecord,
 ) -> Option<(usize, Vec<usize>)> {
     let turn_start = current_turn_start_index(session);
-    let mut canonical_index = None;
-    let mut duplicate_indexes = Vec::new();
+    let mut segment_indexes = Vec::new();
 
-    for index in turn_start..session.conversation.len() {
+    for index in (turn_start..session.conversation.len()).rev() {
         let Some(entry) = session.conversation.get(index) else {
             continue;
         };
-        let is_streamed_runtime_assistant = entry.kind == "assistant_message"
-            && entry.source == "runtime"
-            && entry
-                .metadata
-                .get(ASSISTANT_DELTA_STREAM_METADATA_KEY)
-                .and_then(Value::as_bool)
-                == Some(true);
-        if !is_streamed_runtime_assistant {
-            continue;
+        if !is_streamed_runtime_assistant(entry) {
+            break;
         }
-        if canonical_index.is_none() {
-            canonical_index = Some(index);
-        } else {
-            duplicate_indexes.push(index);
-        }
+
+        segment_indexes.push(index);
     }
 
-    canonical_index.map(|index| (index, duplicate_indexes))
+    segment_indexes.reverse();
+    let mut indexes = segment_indexes.into_iter();
+    let canonical_index = indexes.next()?;
+    Some((canonical_index, indexes.collect()))
+}
+
+fn active_streamed_runtime_assistant_id(session: &SessionRecord) -> Option<String> {
+    let (canonical_index, _) = find_streamed_runtime_assistant_anchor(session)?;
+    session
+        .conversation
+        .get(canonical_index)
+        .map(|entry| entry.id.clone())
 }
 
 pub(crate) fn merge_runtime_assistant_snapshot_text(current: &mut String, incoming: &str) -> bool {
@@ -1605,21 +1615,9 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let mut feed = Vec::new();
     let is_streaming = is_streaming_status(&session.status);
     let dispatcher = is_acp_dispatcher_session(session);
-    let last_runtime_assistant_id = if is_streaming {
-        session
-            .conversation
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.kind == "assistant_message"
-                    && entry.source == "runtime"
-                    && !is_runtime_internal_noise_text(&entry.text)
-                    && (dispatcher || !is_runtime_transport_dump(&entry.text))
-            })
-            .map(|entry| entry.id.clone())
-    } else {
-        None
-    };
+    let last_runtime_assistant_id = is_streaming
+        .then(|| active_streamed_runtime_assistant_id(session))
+        .flatten();
     let has_structured_runtime_entries = session.conversation.iter().any(|entry| {
         matches!(entry.kind.as_str(), "assistant_message" | "status_message")
             && entry.source == "runtime"
@@ -1701,21 +1699,9 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
 pub fn build_dispatcher_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let mut feed = Vec::new();
     let is_streaming = is_streaming_status(&session.status);
-    let last_runtime_assistant_id = if is_streaming {
-        session
-            .conversation
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.kind == "assistant_message"
-                    && entry.source == "runtime"
-                    && !is_runtime_internal_noise_text(&entry.text)
-                    && !is_runtime_transport_dump(&entry.text)
-            })
-            .map(|entry| entry.id.clone())
-    } else {
-        None
-    };
+    let last_runtime_assistant_id = is_streaming
+        .then(|| active_streamed_runtime_assistant_id(session))
+        .flatten();
 
     for entry in &session.conversation {
         let skip_runtime_dump = entry.source == "runtime"
@@ -2139,6 +2125,275 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(assistant_entries.len(), 1);
         assert_eq!(assistant_entries[0].text, "haha");
+    }
+
+    #[test]
+    fn streamed_runtime_assistant_segment_stays_sealed_after_tool_barrier_until_new_delta() {
+        let mut session = test_session("assistant-segment-tool-barrier");
+        session.status = SessionStatus::Working;
+        session.conversation.push(ConversationEntry {
+            id: "user-turn".to_string(),
+            kind: "user_message".to_string(),
+            source: "dispatcher_ui".to_string(),
+            text: "Inspect package.json".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            "I'll inspect only the requested package manifest",
+        ));
+        let first_assistant_id = session
+            .conversation
+            .last()
+            .expect("first assistant segment")
+            .id
+            .clone();
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            " and keep the response to the exact requested shape.",
+        ));
+        assert_eq!(session.conversation.len(), 2);
+
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Command",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("command-1")),
+                ("toolKind".to_string(), json!("command")),
+                ("toolTitle".to_string(), json!("Command")),
+                ("toolStatus".to_string(), json!("running")),
+            ])),
+        ));
+        let command_tool_id = session
+            .conversation
+            .last()
+            .expect("command tool row")
+            .id
+            .clone();
+
+        for build_feed in [
+            build_dispatcher_chat_feed as fn(&SessionRecord) -> Vec<Value>,
+            build_normalized_chat_feed as fn(&SessionRecord) -> Vec<Value>,
+        ] {
+            let feed = build_feed(&session);
+            assert_eq!(
+                feed.iter()
+                    .map(|entry| entry["id"].as_str().expect("feed id"))
+                    .collect::<Vec<_>>(),
+                vec![
+                    "user-turn",
+                    first_assistant_id.as_str(),
+                    command_tool_id.as_str(),
+                ]
+            );
+            assert_eq!(feed[1]["kind"].as_str(), Some("assistant"));
+            assert_eq!(feed[1]["streaming"].as_bool(), Some(false));
+            assert_eq!(
+                feed[1]["text"].as_str(),
+                Some(
+                    "I'll inspect only the requested package manifest and keep the response to the exact requested shape."
+                )
+            );
+            assert_eq!(feed[2]["kind"].as_str(), Some("tool"));
+            assert_eq!(feed[2]["metadata"]["toolStatus"].as_str(), Some("running"));
+            assert_eq!(feed[2]["streaming"].as_bool(), Some(false));
+        }
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            "1. The package"
+        ));
+        let second_assistant_id = session
+            .conversation
+            .last()
+            .expect("second assistant segment")
+            .id
+            .clone();
+        assert_ne!(second_assistant_id, first_assistant_id);
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            " manifest exists."
+        ));
+        assert_eq!(session.conversation.len(), 4);
+
+        let assistant_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_entries.len(), 2);
+        assert_eq!(
+            assistant_entries[0].text,
+            "I'll inspect only the requested package manifest and keep the response to the exact requested shape."
+        );
+        assert_eq!(assistant_entries[0].id, first_assistant_id);
+        assert_eq!(assistant_entries[1].text, "1. The package manifest exists.");
+        assert_eq!(assistant_entries[1].id, second_assistant_id);
+
+        for build_feed in [
+            build_dispatcher_chat_feed as fn(&SessionRecord) -> Vec<Value>,
+            build_normalized_chat_feed as fn(&SessionRecord) -> Vec<Value>,
+        ] {
+            let feed = build_feed(&session);
+            assert_eq!(
+                feed.iter()
+                    .map(|entry| entry["id"].as_str().expect("feed id"))
+                    .collect::<Vec<_>>(),
+                vec![
+                    "user-turn",
+                    first_assistant_id.as_str(),
+                    command_tool_id.as_str(),
+                    second_assistant_id.as_str(),
+                ]
+            );
+            assert_eq!(feed[1]["kind"].as_str(), Some("assistant"));
+            assert_eq!(feed[1]["streaming"].as_bool(), Some(false));
+            assert_eq!(feed[2]["kind"].as_str(), Some("tool"));
+            assert_eq!(feed[2]["streaming"].as_bool(), Some(false));
+            assert_eq!(feed[3]["kind"].as_str(), Some("assistant"));
+            assert_eq!(feed[3]["streaming"].as_bool(), Some(true));
+            assert_eq!(
+                feed[3]["text"].as_str(),
+                Some("1. The package manifest exists.")
+            );
+        }
+    }
+
+    #[test]
+    fn tool_updates_in_place_do_not_barrier_later_assistant_segment() {
+        let mut session = test_session("assistant-segment-tool-update");
+        session.conversation.push(ConversationEntry {
+            id: "user-turn".to_string(),
+            kind: "user_message".to_string(),
+            source: "dispatcher_ui".to_string(),
+            text: "Inspect package.json".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            "Preamble."
+        ));
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Command",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("command-1")),
+                ("toolKind".to_string(), json!("command")),
+                ("toolTitle".to_string(), json!("Command")),
+                ("toolStatus".to_string(), json!("running")),
+            ])),
+        ));
+        let tool_id = session.conversation.last().expect("tool row").id.clone();
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            "Answer"
+        ));
+        let second_assistant_id = session
+            .conversation
+            .last()
+            .expect("second assistant row")
+            .id
+            .clone();
+
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("command-1")),
+                ("toolStatus".to_string(), json!("success")),
+                ("toolContent".to_string(), json!(["done"])),
+            ])),
+        ));
+        assert_eq!(
+            session
+                .conversation
+                .iter()
+                .filter(
+                    |entry| entry.metadata.get("toolCallId").and_then(Value::as_str)
+                        == Some("command-1")
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            session
+                .conversation
+                .iter()
+                .find(|entry| entry.id == tool_id)
+                .and_then(|entry| entry.metadata.get("toolStatus"))
+                .and_then(Value::as_str),
+            Some("success")
+        );
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            " complete."
+        ));
+        assert_eq!(session.conversation.len(), 4);
+        let trailing_assistant = session.conversation.last().expect("trailing assistant");
+        assert_eq!(trailing_assistant.id, second_assistant_id);
+        assert_eq!(trailing_assistant.text, "Answer complete.");
+    }
+
+    #[test]
+    fn runtime_assistant_snapshot_after_tool_barrier_creates_new_tail_entry() {
+        let mut session = test_session("assistant-segment-final-only");
+        session.status = SessionStatus::Done;
+        session.conversation.push(ConversationEntry {
+            id: "user-turn".to_string(),
+            kind: "user_message".to_string(),
+            source: "dispatcher_ui".to_string(),
+            text: "Inspect package.json".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        assert!(append_streamed_runtime_assistant_delta(
+            &mut session,
+            "Preamble."
+        ));
+        assert!(upsert_runtime_status_entry(
+            &mut session,
+            "Command",
+            Some(HashMap::from([
+                ("toolCallId".to_string(), json!("command-1")),
+                ("toolKind".to_string(), json!("command")),
+                ("toolTitle".to_string(), json!("Command")),
+                ("toolStatus".to_string(), json!("success")),
+            ])),
+        ));
+        assert!(append_runtime_assistant_snapshot(
+            &mut session,
+            "1. The package manifest exists.",
+        ));
+
+        let assistant_entries = session
+            .conversation
+            .iter()
+            .filter(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_entries.len(), 2);
+        assert_eq!(assistant_entries[0].text, "Preamble.");
+        assert_eq!(assistant_entries[1].text, "1. The package manifest exists.");
+
+        let feed = build_dispatcher_chat_feed(&session);
+        let feed_kinds = feed
+            .iter()
+            .map(|entry| entry["kind"].as_str().expect("feed kind"))
+            .collect::<Vec<_>>();
+        assert_eq!(feed_kinds, vec!["user", "assistant", "tool", "assistant"]);
+        assert_eq!(
+            feed[3]["text"].as_str(),
+            Some("1. The package manifest exists.")
+        );
     }
 
     #[test]

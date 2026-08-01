@@ -9,11 +9,16 @@ import {
   updateDispatcherReconnectAttemptAfterConnection,
 } from "./dispatcherFeedState.js";
 
-function makeEntry(id: string, text: string, streaming = false) {
+function makeEntry(
+  id: string,
+  text: string,
+  streaming = false,
+  kind: "assistant" | "user" = "assistant",
+) {
   return {
     id,
-    kind: "assistant" as const,
-    label: "assistant",
+    kind,
+    label: kind,
     text,
     createdAt: "2026-04-10T00:00:00.000Z",
     attachments: [],
@@ -161,6 +166,77 @@ test("applyFeedDelta applies compact token patches by entry id when a tool row f
   assert.equal(next.entries[1]?.id, "tool-1");
   assert.equal(next.entries[1]?.text, "Bash");
   assert.equal(next.entries[1], current.entries[1]);
+});
+
+test("applyFeedDelta preserves a new assistant segment appended after tool barriers", () => {
+  const current = {
+    ...EMPTY_FEED_PAYLOAD,
+    entries: [
+      makeEntry("user-1", "Inspect package.json", false, "user"),
+      makeEntry("assistant-1", "I'll inspect only the requested package manifest.", false),
+      makeToolEntry("tool-1", "Command"),
+      {
+        ...makeToolEntry("tool-2", "Thinking"),
+        metadata: {
+          toolCallId: "thinking-1",
+          toolStatus: "running",
+          toolTitle: "Thinking",
+          toolKind: "thinking",
+        },
+      },
+    ],
+  };
+
+  const appended = applyFeedDelta(current, {
+    type: "append",
+    entries: [makeEntry("assistant-2", "1. The package", true)],
+    totalEntries: 5,
+    windowLimit: 200,
+    truncated: false,
+    sessionStatus: "working",
+    approvalState: null,
+    parserState: null,
+    runtimeStatus: null,
+    source: "stream",
+    error: null,
+    integration: null,
+  });
+
+  assert.deepEqual(
+    appended.entries.map((entry) => ({ id: entry.id, kind: entry.kind })),
+    [
+      { id: "user-1", kind: "user" },
+      { id: "assistant-1", kind: "assistant" },
+      { id: "tool-1", kind: "tool" },
+      { id: "tool-2", kind: "tool" },
+      { id: "assistant-2", kind: "assistant" },
+    ],
+  );
+  assert.equal(appended.entries[2], current.entries[2]);
+  assert.equal(appended.entries[3], current.entries[3]);
+
+  const patched = applyFeedDelta(appended, {
+    type: "patch",
+    entryId: "assistant-2",
+    entry: null,
+    textDelta: " manifest exists.",
+    textOffset: 14,
+    totalEntries: 5,
+    windowLimit: 200,
+    truncated: false,
+    sessionStatus: "working",
+    approvalState: null,
+    parserState: null,
+    runtimeStatus: null,
+    source: "stream",
+    error: null,
+    integration: null,
+  });
+
+  assert.equal(patched.entries[4]?.id, "assistant-2");
+  assert.equal(patched.entries[4]?.text, "1. The package manifest exists.");
+  assert.equal(patched.entries[2], appended.entries[2]);
+  assert.equal(patched.entries[3], appended.entries[3]);
 });
 
 test("compact token patches request a snapshot refresh after an offset gap", () => {
