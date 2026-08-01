@@ -754,6 +754,13 @@ func TestRunSessionAPIStreamCancelIsPerIDAndCleansUp(t *testing.T) {
 		}
 	}))
 	defer backend.Close()
+	defer func() {
+		select {
+		case <-releaseB:
+		default:
+			close(releaseB)
+		}
+	}()
 
 	upgrader := websocket.Upgrader{}
 	relay := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -777,12 +784,13 @@ func TestRunSessionAPIStreamCancelIsPerIDAndCleansUp(t *testing.T) {
 			Path:   "/api/dispatcher/feed/stream?target=b",
 		})
 
-		waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
-			return env.Type == "api_stream_start" && env.ID == "stream-a"
-		})
-		waitForBridgeEnvelope(t, conn, func(env bridgeEnvelope) bool {
-			return env.Type == "api_stream_start" && env.ID == "stream-b"
-		})
+		started := map[string]bool{}
+		for len(started) < 2 {
+			env := readBridgeEnvelope(t, conn)
+			if env.Type == "api_stream_start" && (env.ID == "stream-a" || env.ID == "stream-b") {
+				started[env.ID] = true
+			}
+		}
 
 		writeBridgeEnvelope(t, conn, bridgeEnvelope{Type: "api_stream_cancel", ID: "stream-a"})
 		select {
