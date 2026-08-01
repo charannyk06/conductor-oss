@@ -89,14 +89,34 @@ test("GET proxies bridge-backed output streams with streaming-safe headers", asy
     const body = JSON.parse(String(init?.body)) as {
       method: string;
       path: string;
+      headers: Record<string, string>;
     };
     assert.equal(body.method, "GET");
     seenPath = body.path;
+    assert.deepEqual(body.headers, {
+      accept: "text/event-stream",
+      "cache-control": "no-cache",
+      "last-event-id": "evt-99",
+    });
     return buildEventStreamResponse();
   }) as typeof fetch;
 
   const response = await GET(
-    new NextRequest("http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/output/stream?lines=80"),
+    new NextRequest(
+      "http://127.0.0.1:3000/api/sessions/bridge%3Abridge-1%3Asession-1/output/stream?lines=80",
+      {
+        headers: {
+          Accept: "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Last-Event-ID": "evt-99",
+          Forwarded: "for=198.51.100.10",
+          "X-Forwarded-For": "198.51.100.11",
+          "X-Real-IP": "198.51.100.12",
+          "Proxy-Authorization": "Basic test",
+          "Client-IP": "198.51.100.13",
+        },
+      },
+    ),
     { params: Promise.resolve({ id: "bridge:bridge-1:session-1" }) },
   );
 
