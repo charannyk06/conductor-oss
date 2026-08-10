@@ -76,6 +76,11 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 7
+    ignore:
+      # These releases require vulnerable cryptography<49. Re-evaluate a future fixed release.
+      - dependency-name: strix-agent
+        versions:
+          - ">=1.4.0, <=1.5.2"
 
   # GitHub Actions
   - package-ecosystem: github-actions

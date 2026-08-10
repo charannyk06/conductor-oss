@@ -13,16 +13,16 @@
   },
   "dependencies": {
     "@puppeteer/browsers": "^3.0.5",
-    "fastify": "^5.9.0",
-    "puppeteer-core": "^25.2.1"
+    "fastify": "^5.11.1",
+    "puppeteer-core": "^25.4.0"
   },
   "devDependencies": {
-    "@types/node": "^26.0.1",
-    "tsx": "^4.22.4",
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.5",
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "fast-uri": "4.1.1",
+    "fast-uri": "4.1.2",
     "find-my-way": "9.7.0"
   }
 }
