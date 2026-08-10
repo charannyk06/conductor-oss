@@ -109,7 +109,7 @@ jobs:
           echo "image_ref=${RELAY_IMAGE}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Attest relay image provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-name: ${{ env.RELAY_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
