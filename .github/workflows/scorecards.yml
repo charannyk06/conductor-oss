@@ -23,7 +23,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -45,6 +45,6 @@ jobs:
           retention-days: 7
 
       - name: Upload Scorecards SARIF
-        uses: github/codeql-action/upload-sarif@e03543dad62555ecf6606aabe9724fd07e1cd632 # v3.32.6
+        uses: github/codeql-action/upload-sarif@d1ba80a13dd99fba24a470575428917156a28b43 # v4.37.5
         with:
           sarif_file: results.sarif

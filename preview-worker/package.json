@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@puppeteer/browsers": "^3.0.5",
-    "fastify": "^5.11.1",
+    "fastify": "^5.11.2",
     "puppeteer-core": "^25.4.0"
   },
   "devDependencies": {
