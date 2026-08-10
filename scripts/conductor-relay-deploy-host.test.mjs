@@ -138,7 +138,7 @@ function installFakeCoreutils(binDir) {
   chmodSync(statPath, 0o755);
 }
 
-function runBackupScenario(prepareScenario) {
+function runBackupScenario(prepareScenario, { sourceName = "state.json" } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), "conductor-relay-deploy-host-test-"));
   const stateDir = join(rootDir, "state");
   const shmDir = join(rootDir, "shm");
@@ -151,7 +151,7 @@ function runBackupScenario(prepareScenario) {
   installFakeCoreutils(binDir);
   writeDirectoryMetadata(metaDir, stateDir);
 
-  const statePath = join(stateDir, "state.json");
+  const statePath = join(stateDir, sourceName);
   writeFileWithMetadata(metaDir, statePath, stateContent);
 
   prepareScenario({
@@ -174,7 +174,7 @@ function runBackupScenario(prepareScenario) {
     `state_backup_tmpfs_root=${JSON.stringify(shmDir)}`,
     'current_image_id="fake-image"',
     `candidate_state_owner=${JSON.stringify(expectedOwner)}`,
-    'state_filename_current="state.json"',
+    `state_filename_current=${JSON.stringify(sourceName)}`,
     "run_docker() {",
     '  if [ "$1" != "run" ]; then',
     '    echo "unsupported run_docker invocation: $*" >&2',
@@ -265,6 +265,29 @@ test("backup_relay_state removes validated stale readiness probes and snapshots 
     assert.equal(existsSync(join(result.stateDir, secondValidProbeName)), false);
     assert.equal(readFileSync(join(output.backup_dir, "state.json"), "utf8"), stateContent);
     assert.deepEqual(readdirSync(result.stateDir), ["state.json"]);
+  } finally {
+    rmSync(result.rootDir, { recursive: true, force: true });
+  }
+});
+
+test("backup_relay_state removes validated legacy relay-state readiness probes", () => {
+  const sourceName = "relay-state.json";
+  const probeName = "relay-state.0123456789abcdef0123456789abcdef.readiness";
+  const result = runBackupScenario(
+    ({ metaDir, stateDir }) => {
+      writeFileWithMetadata(metaDir, join(stateDir, probeName), readinessBytes);
+    },
+    { sourceName },
+  );
+
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const output = parseKeyValueOutput(result.stdout);
+    assert.equal(output.backup_ready, "1");
+    assert.equal(output.backup_existed, "1");
+    assert.equal(existsSync(join(result.stateDir, probeName)), false);
+    assert.equal(readFileSync(join(output.backup_dir, "state.json"), "utf8"), stateContent);
+    assert.deepEqual(readdirSync(result.stateDir), [sourceName]);
   } finally {
     rmSync(result.rootDir, { recursive: true, force: true });
   }

@@ -79,6 +79,7 @@ backup_relay_state() {
       esac
       source_path="/state/$source_name"
       other_path="/state/$other_name"
+      readiness_prefix="/state/${source_name%.json}."
       if [ ! -d /state ] \
         || [ "$(stat -c %a /state)" != "700" ] \
         || [ "$(stat -c %u:%g /state)" != "$expected_owner" ]; then
@@ -96,7 +97,7 @@ backup_relay_state() {
           continue
         fi
         case "$entry" in
-          /state/state.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].readiness)
+          "$readiness_prefix"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].readiness)
             if [ -L "$entry" ] \
               || [ ! -f "$entry" ] \
               || [ "$(stat -c %h "$entry")" != "1" ] \
