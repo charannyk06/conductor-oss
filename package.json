@@ -31,9 +31,9 @@
     "smoke:openclaw": "bun scripts/openclaw-dispatcher-smoke.mjs"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.0",
-    "@types/node": "^26.0.1",
-    "puppeteer": "^25.1.0",
+    "@changesets/cli": "^2.31.1",
+    "@types/node": "^26.1.2",
+    "puppeteer": "^25.4.0",
     "typescript": "^6.0.3"
   },
   "overrides": {
