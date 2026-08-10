@@ -18,6 +18,7 @@ state_filename_current=""
 public_health_url="https://relay.conductross.com/health"
 docker_command_timeout_seconds=45
 state_backup_max_bytes=67108864
+state_backup_tmpfs_root="/dev/shm"
 state_backup_dir=""
 state_backup_owner=""
 state_backup_size=0
@@ -41,13 +42,13 @@ cleanup_state_backup() {
 }
 
 backup_relay_state() {
-  if [ ! -d /dev/shm ] || [ ! -w /dev/shm ] \
+  if [ ! -d "$state_backup_tmpfs_root" ] || [ ! -w "$state_backup_tmpfs_root" ] \
     || ! command -v findmnt >/dev/null 2>&1 \
-    || [ "$(findmnt -n -o FSTYPE --target /dev/shm 2>/dev/null || true)" != "tmpfs" ]; then
-    echo "A writable memory-backed /dev/shm is required for the relay rollback snapshot." >&2
+    || [ "$(findmnt -n -o FSTYPE --target "$state_backup_tmpfs_root" 2>/dev/null || true)" != "tmpfs" ]; then
+    echo "A writable memory-backed $state_backup_tmpfs_root is required for the relay rollback snapshot." >&2
     return 1
   fi
-  state_backup_available_bytes=$(df -PB1 /dev/shm | awk 'NR == 2 { print $4 }')
+  state_backup_available_bytes=$(df -PB1 "$state_backup_tmpfs_root" | awk 'NR == 2 { print $4 }')
   if [[ ! "$state_backup_available_bytes" =~ ^[0-9]+$ ]] \
     || [ "$state_backup_available_bytes" -lt "$state_backup_max_bytes" ]; then
     echo "Insufficient memory-backed capacity for the relay rollback snapshot." >&2
@@ -55,7 +56,7 @@ backup_relay_state() {
   fi
 
   umask 077
-  state_backup_dir=$(mktemp -d /dev/shm/conductor-relay-state.XXXXXX)
+  state_backup_dir=$(mktemp -d "${state_backup_tmpfs_root%/}/conductor-relay-state.XXXXXX")
   if ! backup_result=$(run_docker run --rm \
     --network none \
     --read-only \
@@ -63,7 +64,7 @@ backup_relay_state() {
     --security-opt no-new-privileges:true \
     --cap-drop ALL \
     --cap-add DAC_OVERRIDE \
-    --mount "type=volume,src=${state_volume},dst=/state,readonly" \
+    --mount "type=volume,src=${state_volume},dst=/state" \
     --mount "type=bind,src=${state_backup_dir},dst=/backup" \
     --entrypoint /bin/sh \
     "$current_image_id" \
@@ -83,16 +84,42 @@ backup_relay_state() {
         || [ "$(stat -c %u:%g /state)" != "$expected_owner" ]; then
         exit 2
       fi
+      probe_entries=""
+      probe_count=0
       entry_count=0
       for entry in /state/.[!.]* /state/..?* /state/*; do
         if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
           continue
         fi
         entry_count=$((entry_count + 1))
-        if [ "$entry" != "$source_path" ]; then
-          exit 2
+        if [ "$entry" = "$source_path" ]; then
+          continue
         fi
+        case "$entry" in
+          /state/state.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].readiness)
+            if [ -L "$entry" ] \
+              || [ ! -f "$entry" ] \
+              || [ "$(stat -c %h "$entry")" != "1" ] \
+              || [ "$(stat -c %u:%g "$entry")" != "$expected_owner" ] \
+              || [ "$(stat -c %a "$entry")" != "600" ] \
+              || [ "$(stat -c %s "$entry")" != "15" ]; then
+              exit 2
+            fi
+            if ! printf relay-readiness | cmp -s -- "$entry" -; then
+              exit 2
+            fi
+            probe_entries="${probe_entries}${probe_entries:+ }$entry"
+            probe_count=$((probe_count + 1))
+            ;;
+          *)
+            exit 2
+            ;;
+        esac
       done
+      for probe_entry in $probe_entries; do
+        rm -f -- "$probe_entry"
+      done
+      entry_count=$((entry_count - probe_count))
       if [ -L "$source_path" ] || [ -L "$other_path" ]; then
         exit 2
       fi
@@ -379,6 +406,10 @@ finalize_relay_state_layout() {
   done
   return 1
 }
+
+if [ "${CONDUCTOR_RELAY_DEPLOY_HOST_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 original_command="${SSH_ORIGINAL_COMMAND:-}"
 if [[ "$original_command" =~ ^verify-script\ ([0-9a-f]{64})$ ]]; then
