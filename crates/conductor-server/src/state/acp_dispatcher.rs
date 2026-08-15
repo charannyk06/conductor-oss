@@ -1874,7 +1874,10 @@ impl AppState {
     }
 
     pub(crate) async fn persist_dispatcher_thread(&self, thread_id: &str) -> Result<()> {
-        self.persist_current_dispatcher_snapshot(thread_id).await?;
+        if let Err(err) = self.persist_current_dispatcher_snapshot(thread_id).await {
+            self.queue_dispatcher_flush(thread_id).await;
+            return Err(err);
+        }
         self.invalidate_dispatcher_caches(thread_id).await;
         Ok(())
     }
@@ -4942,6 +4945,84 @@ mod tests {
             .await
             .expect("persisted dispatcher snapshot");
         assert_eq!(persisted.summary.as_deref(), Some("persist after retry"));
+        assert!(!state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failed_direct_dispatcher_persist_queues_retry_and_recovers_latest_in_memory_state() {
+        let (root, state) = build_test_state("dispatcher-direct-persist-retry").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let store_dir = state.dispatcher_store_dir();
+        let blocked_store = root.join("dispatchers-blocked");
+
+        tokio::fs::rename(&store_dir, &blocked_store)
+            .await
+            .expect("dispatcher store should be movable");
+        tokio::fs::write(&store_dir, b"blocked store")
+            .await
+            .expect("dispatcher store path should be blockable");
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("failed direct persist state".to_string());
+        }
+
+        let persist_error = state
+            .persist_dispatcher_thread(&thread.id)
+            .await
+            .expect_err("direct persist should return the original storage failure");
+        assert!(
+            state
+                .pending_dispatcher_flushes
+                .lock()
+                .await
+                .contains(&thread.id),
+            "failed direct persist should queue a watchdog retry"
+        );
+        assert!(
+            !persist_error
+                .to_string()
+                .contains("queued dispatcher snapshot"),
+            "direct persist should return the original storage error"
+        );
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::NeedsInput;
+            current.summary = Some("recovered in-memory state".to_string());
+        }
+
+        tokio::fs::remove_file(&store_dir)
+            .await
+            .expect("blocking file should be removable");
+        tokio::fs::rename(&blocked_store, &store_dir)
+            .await
+            .expect("dispatcher store should be restorable");
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("queued retry should persist after storage recovers");
+
+        let persisted = read_json::<SessionRecord>(&state.dispatcher_snapshot_path(&thread.id))
+            .await
+            .expect("persisted dispatcher snapshot");
+        assert_eq!(persisted.status, SessionStatus::NeedsInput);
+        assert_eq!(
+            persisted.summary.as_deref(),
+            Some("recovered in-memory state")
+        );
         assert!(!state
             .pending_dispatcher_flushes
             .lock()
