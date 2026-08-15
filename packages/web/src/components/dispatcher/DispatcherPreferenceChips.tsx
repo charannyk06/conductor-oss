@@ -5,6 +5,7 @@ import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import type { ReactNode } from "react";
 import { Brain, Check, ChevronDown } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import { cn } from "@/lib/cn";
 import {
   getSelectableAgentModels,
@@ -77,19 +78,16 @@ function PreferenceChip({
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[rgba(255,255,255,0.55)] sm:h-2.5 sm:w-2.5" />
         </button>
       </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align="start"
-          collisionPadding={8}
-          sideOffset={6}
-          className={cn(
-            "z-50 max-h-[70vh] w-[calc(100vw-1rem)] max-w-[22rem] overflow-y-auto rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)] sm:max-h-[22rem] sm:w-auto sm:min-w-[200px] sm:max-w-[26rem] sm:rounded-[10px] sm:p-1.5",
-            contentClassName,
-          )}
-        >
+      <MobileDropdownMenuContent
+        align="start"
+        sideOffset={6}
+        className={cn(
+          "w-[calc(100vw-1rem)] max-w-[22rem] rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)] sm:w-auto sm:min-w-[200px] sm:max-w-[26rem] sm:rounded-[10px] sm:p-1.5",
+          contentClassName,
+        )}
+      >
           {children}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
+      </MobileDropdownMenuContent>
     </DropdownMenu.Root>
   );
 }

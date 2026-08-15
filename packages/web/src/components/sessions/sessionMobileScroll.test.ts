@@ -74,6 +74,26 @@ test("preview screen restores app surface scroll ownership", () => {
   assert.match(source, /lg:grid/);
 });
 
+test("skills screen keeps one app-level mobile scroller", () => {
+  const source = readFileSync(new URL("./SessionSkills.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /APP_SURFACE_SCROLL_CLASS_NAME/);
+  assert.match(source, /lg:overflow-y-auto/);
+  assert.doesNotMatch(source, /className={`[^`]*\soverflow-y-auto\s[^`]*\$\{MOBILE_MOMENTUM_SCROLL_CLASS_NAME\}/);
+});
+
+test("workspace overview lets the page, not the recent-session card, scroll on mobile", () => {
+  const source = readFileSync(
+    new URL("../../features/dashboard/components/WorkspaceOverview.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /APP_SURFACE_SCROLL_CLASS_NAME/);
+  assert.match(source, /lg:overflow-y-auto/);
+  assert.doesNotMatch(source, /gap-2 overflow-y-auto \$\{MOBILE_MOMENTUM_SCROLL_CLASS_NAME\}/);
+  assert.match(source, /lg:h-full lg:min-h-0 lg:flex-1/);
+});
+
 test("session detail keeps active tabs above hidden live surfaces", () => {
   const source = readFileSync(new URL("./SessionDetail.tsx", import.meta.url), "utf8");
 

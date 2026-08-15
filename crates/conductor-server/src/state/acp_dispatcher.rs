@@ -1873,20 +1873,50 @@ impl AppState {
         self.dispatcher_feed_payload_cache.lock().await.clear();
     }
 
-    pub(crate) async fn persist_dispatcher_thread(&self, thread: &SessionRecord) -> Result<()> {
+    pub(crate) async fn persist_dispatcher_thread(&self, thread_id: &str) -> Result<()> {
+        if let Err(err) = self.persist_current_dispatcher_snapshot(thread_id).await {
+            self.queue_dispatcher_flush(thread_id).await;
+            return Err(err);
+        }
+        self.invalidate_dispatcher_caches(thread_id).await;
+        Ok(())
+    }
+
+    async fn write_dispatcher_snapshot(&self, thread: &SessionRecord) -> Result<()> {
         let path = self.dispatcher_snapshot_path(&thread.id);
         let content = serde_json::to_string_pretty(thread)?;
         tokio::fs::write(path, content).await?;
-        self.invalidate_dispatcher_caches(&thread.id).await;
+        Ok(())
+    }
+
+    async fn dispatcher_snapshot_guard(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let mut guards = self.dispatcher_snapshot_guards.lock().await;
+        Arc::clone(
+            guards
+                .entry(thread_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    pub(crate) async fn persist_current_dispatcher_snapshot(&self, thread_id: &str) -> Result<()> {
+        let guard = self.dispatcher_snapshot_guard(thread_id).await;
+        let _write_lock = guard.lock().await;
+        let snapshot = self.dispatcher_threads.read().await.get(thread_id).cloned();
+        if let Some(snapshot) = snapshot {
+            self.write_dispatcher_snapshot(&snapshot).await?;
+        }
         Ok(())
     }
 
     pub(crate) async fn replace_dispatcher_thread(&self, thread: SessionRecord) -> Result<()> {
-        self.persist_dispatcher_thread(&thread).await?;
+        let snapshot_guard = self.dispatcher_snapshot_guard(&thread.id).await;
+        let _snapshot_lock = snapshot_guard.lock().await;
+        self.write_dispatcher_snapshot(&thread).await?;
         {
             let mut guard = self.dispatcher_threads.write().await;
             guard.insert(thread.id.clone(), thread.clone());
         }
+        self.invalidate_dispatcher_caches(&thread.id).await;
         self.publish_dispatcher_update(&thread.id).await;
         Ok(())
     }
@@ -1916,11 +1946,19 @@ impl AppState {
             }
         }
 
-        self.active_session_skills.lock().await.remove(thread_id);
+        let snapshot_guard = self.dispatcher_snapshot_guard(thread_id).await;
+        let _snapshot_lock = snapshot_guard.lock().await;
+        remove_optional_file(self.dispatcher_snapshot_path(thread_id)).await?;
         {
             let mut guard = self.dispatcher_threads.write().await;
             guard.remove(thread_id);
         }
+        self.pending_dispatcher_flushes
+            .lock()
+            .await
+            .remove(thread_id);
+        drop(_snapshot_lock);
+        self.active_session_skills.lock().await.remove(thread_id);
         self.invalidate_dispatcher_caches(thread_id).await;
         self.publish_dispatcher_update(thread_id).await;
 
@@ -1928,14 +1966,12 @@ impl AppState {
         let cleanup_thread_id = thread_id.to_string();
         let cleanup_project_id = thread.project_id.clone();
         tokio::spawn(async move {
-            let snapshot_path = cleanup_state.dispatcher_snapshot_path(&cleanup_thread_id);
             let session_json_path =
                 cleanup_state.acp_session_memory_json_path(&cleanup_project_id, &cleanup_thread_id);
             let session_md_path = cleanup_state
                 .acp_session_memory_markdown_path(&cleanup_project_id, &cleanup_thread_id);
 
             if let Err(err) = tokio::try_join!(
-                remove_optional_file(snapshot_path),
                 remove_optional_file(session_json_path),
                 remove_optional_file(session_md_path),
             ) {
@@ -1963,32 +1999,23 @@ impl AppState {
 
     pub(crate) async fn publish_dispatcher_update(&self, thread_id: &str) {
         self.invalidate_dispatcher_caches(thread_id).await;
-        let pending_updates: Arc<tokio::sync::Mutex<HashMap<String, u64>>> =
+        let pending_updates: Arc<tokio::sync::Mutex<HashSet<String>>> =
             Arc::clone(&self.pending_dispatcher_updates);
         let dispatcher_updates = self.dispatcher_updates.clone();
-        let notify_seq = {
+        let should_schedule = {
             let mut pending = self.pending_dispatcher_updates.lock().await;
-            let next_seq = pending
-                .get(thread_id)
-                .copied()
-                .unwrap_or_default()
-                .saturating_add(1);
-            pending.insert(thread_id.to_string(), next_seq);
-            next_seq
+            pending.insert(thread_id.to_string())
         };
+        if !should_schedule {
+            return;
+        }
 
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let should_send = {
                 let mut pending = pending_updates.lock().await;
-                match pending.get(&thread_id).copied() {
-                    Some(current) if current == notify_seq => {
-                        pending.remove(&thread_id);
-                        true
-                    }
-                    _ => false,
-                }
+                pending.remove(&thread_id)
             };
 
             if should_send {
@@ -2105,7 +2132,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.publish_dispatcher_update(thread_id).await;
 
         let state = Arc::clone(self);
@@ -2234,7 +2261,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
@@ -3381,7 +3408,7 @@ impl AppState {
             thread.clone()
         };
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
@@ -3619,7 +3646,7 @@ impl AppState {
             }
         }
         if let Some(updated) = self.get_dispatcher_thread(&thread.id).await {
-            self.persist_dispatcher_thread(&updated).await?;
+            self.persist_dispatcher_thread(&updated.id).await?;
             self.publish_dispatcher_update(&thread.id).await;
         }
 
@@ -3956,18 +3983,22 @@ impl AppState {
         }
 
         let should_sync_memory = should_sync_dispatcher_session_memory(thread, force_memory_sync);
-        let updated = thread.clone();
+        let memory_snapshot = should_sync_memory.then(|| thread.clone());
+        drop(threads);
         if clear_runtime {
             self.clear_dispatcher_runtime_if(thread_id, runtime_id)
                 .await;
         }
-        drop(threads);
-        self.persist_dispatcher_thread(&updated).await?;
-        if should_sync_memory {
-            self.sync_acp_dispatcher_state(&updated).await?;
-        }
         if feed_dirty {
             self.publish_dispatcher_update(thread_id).await;
+        }
+        if force_memory_sync {
+            self.persist_current_dispatcher_snapshot(thread_id).await?;
+        } else {
+            self.queue_dispatcher_flush(thread_id).await;
+        }
+        if let Some(memory_snapshot) = memory_snapshot.as_ref() {
+            self.sync_acp_dispatcher_state(memory_snapshot).await?;
         }
         Ok(())
     }
@@ -4103,7 +4134,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.publish_dispatcher_update(thread_id).await;
 
         if let Err(err) = self
@@ -4228,7 +4259,7 @@ impl AppState {
                 session.clone()
             };
 
-            if let Err(err) = self.persist_dispatcher_thread(&updated).await {
+            if let Err(err) = self.persist_dispatcher_thread(&updated.id).await {
                 tracing::warn!(session_id = %session_id, error = %err, "failed to persist ACP heartbeat");
                 continue;
             }
@@ -4300,6 +4331,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::process::Command;
@@ -4520,6 +4552,32 @@ mod tests {
         (root, state)
     }
 
+    async fn reopen_test_state(root: &Path) -> Arc<AppState> {
+        let repo = root.join("repo");
+        let config = ConductorConfig {
+            workspace: root.to_path_buf(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: repo.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("direct".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        AppState::new(root.join("conductor.yaml"), config, db).await
+    }
+
     async fn register_test_dispatcher_runtime(
         state: &Arc<AppState>,
         thread_id: &str,
@@ -4683,6 +4741,705 @@ mod tests {
             dispatcher_resume_target(&thread, &AgentKind::ClaudeCode),
             Some("session-123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn continuous_dispatcher_deltas_publish_inside_the_fixed_update_window() {
+        let (root, state) = build_test_state("dispatcher-update-window").await;
+        let mut updates = state.dispatcher_updates.subscribe();
+        let probe_id = "continuous-stream-probe".to_string();
+        let publisher_state = Arc::clone(&state);
+        let publisher_id = probe_id.clone();
+        let publisher = tokio::spawn(async move {
+            for _ in 0..12 {
+                publisher_state
+                    .publish_dispatcher_update(&publisher_id)
+                    .await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        });
+
+        timeout(Duration::from_millis(200), async {
+            loop {
+                if updates.recv().await.expect("dispatcher update channel") == probe_id {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("continuous deltas must publish inside the first fixed 50ms window");
+
+        publisher.await.expect("publisher task");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatcher_flush_coalesces_burst_queues_to_latest_state() {
+        let (root, state) = build_test_state("dispatcher-flush-burst-coalesced").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("first queued state".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("second queued state".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::NeedsInput;
+            current.summary = Some("latest queued state".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("explicit flush should persist the latest state");
+
+        let persisted = read_json::<SessionRecord>(&state.dispatcher_snapshot_path(&thread.id))
+            .await
+            .expect("persisted dispatcher snapshot");
+        assert_eq!(persisted.status, SessionStatus::NeedsInput);
+        assert_eq!(persisted.summary.as_deref(), Some("latest queued state"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatcher_flush_persists_without_waiting_for_watchdog_debounce() {
+        let (root, state) = build_test_state("dispatcher-flush-explicit-final").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let snapshot_path = state.dispatcher_snapshot_path(&thread.id);
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("final explicit flush state".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+
+        let persisted_before_flush = read_json::<SessionRecord>(&snapshot_path)
+            .await
+            .expect("initial dispatcher snapshot");
+        assert_ne!(
+            persisted_before_flush.summary.as_deref(),
+            Some("final explicit flush state")
+        );
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("explicit flush should persist immediately");
+
+        let persisted_after_flush = read_json::<SessionRecord>(&snapshot_path)
+            .await
+            .expect("updated dispatcher snapshot");
+        assert_eq!(
+            persisted_after_flush.summary.as_deref(),
+            Some("final explicit flush state")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatcher_flush_survives_restart_and_reads_back_latest_state() {
+        let (root, state) = build_test_state("dispatcher-flush-restart-readback").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::NeedsInput;
+            current.summary = Some("restart durable state".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("explicit flush should persist before restart");
+        drop(state);
+
+        let reloaded_state = reopen_test_state(&root).await;
+        let reloaded_thread = reloaded_state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should reload from disk");
+        assert_eq!(reloaded_thread.status, SessionStatus::NeedsInput);
+        assert_eq!(
+            reloaded_thread.summary.as_deref(),
+            Some("restart durable state")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatcher_flush_requeues_failed_snapshots_until_storage_recovers() {
+        let (root, state) = build_test_state("dispatcher-flush-retry").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let store_dir = state.dispatcher_store_dir();
+        let blocked_store = root.join("dispatchers-blocked");
+
+        tokio::fs::rename(&store_dir, &blocked_store)
+            .await
+            .expect("dispatcher store should be movable");
+        tokio::fs::write(&store_dir, b"blocked store")
+            .await
+            .expect("dispatcher store path should be blockable");
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("persist after retry".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+
+        let flush_error = state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect_err("explicit flush should report storage failures");
+        assert!(flush_error
+            .to_string()
+            .contains("Failed to persist 1 queued dispatcher snapshot"));
+        assert!(state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        tokio::fs::remove_file(&store_dir)
+            .await
+            .expect("blocking file should be removable");
+        tokio::fs::rename(&blocked_store, &store_dir)
+            .await
+            .expect("dispatcher store should be restorable");
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("explicit flush should retry persisted snapshots after recovery");
+
+        let persisted = read_json::<SessionRecord>(&state.dispatcher_snapshot_path(&thread.id))
+            .await
+            .expect("persisted dispatcher snapshot");
+        assert_eq!(persisted.summary.as_deref(), Some("persist after retry"));
+        assert!(!state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failed_direct_dispatcher_persist_queues_retry_and_recovers_latest_in_memory_state() {
+        let (root, state) = build_test_state("dispatcher-direct-persist-retry").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let store_dir = state.dispatcher_store_dir();
+        let blocked_store = root.join("dispatchers-blocked");
+
+        tokio::fs::rename(&store_dir, &blocked_store)
+            .await
+            .expect("dispatcher store should be movable");
+        tokio::fs::write(&store_dir, b"blocked store")
+            .await
+            .expect("dispatcher store path should be blockable");
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("failed direct persist state".to_string());
+        }
+
+        let persist_error = state
+            .persist_dispatcher_thread(&thread.id)
+            .await
+            .expect_err("direct persist should return the original storage failure");
+        assert!(
+            state
+                .pending_dispatcher_flushes
+                .lock()
+                .await
+                .contains(&thread.id),
+            "failed direct persist should queue a watchdog retry"
+        );
+        assert!(
+            !persist_error
+                .to_string()
+                .contains("queued dispatcher snapshot"),
+            "direct persist should return the original storage error"
+        );
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::NeedsInput;
+            current.summary = Some("recovered in-memory state".to_string());
+        }
+
+        tokio::fs::remove_file(&store_dir)
+            .await
+            .expect("blocking file should be removable");
+        tokio::fs::rename(&blocked_store, &store_dir)
+            .await
+            .expect("dispatcher store should be restorable");
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("queued retry should persist after storage recovers");
+
+        let persisted = read_json::<SessionRecord>(&state.dispatcher_snapshot_path(&thread.id))
+            .await
+            .expect("persisted dispatcher snapshot");
+        assert_eq!(persisted.status, SessionStatus::NeedsInput);
+        assert_eq!(
+            persisted.summary.as_deref(),
+            Some("recovered in-memory state")
+        );
+        assert!(!state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn replace_dispatcher_thread_does_not_advance_memory_when_persistence_fails() {
+        let (root, state) = build_test_state("dispatcher-replace-durability-first").await;
+        let mut baseline = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        baseline.status = SessionStatus::NeedsInput;
+        baseline.summary = Some("baseline durable state".to_string());
+        state
+            .replace_dispatcher_thread(baseline.clone())
+            .await
+            .expect("baseline dispatcher thread should persist");
+
+        let store_dir = state.dispatcher_store_dir();
+        let blocked_store = root.join("dispatchers-blocked");
+        let preserved_snapshot_path = blocked_store.join(format!("{}.json", baseline.id));
+        tokio::fs::rename(&store_dir, &blocked_store)
+            .await
+            .expect("dispatcher store should be movable");
+        tokio::fs::write(&store_dir, b"blocked store")
+            .await
+            .expect("dispatcher store path should be blockable");
+
+        let mut advanced = baseline.clone();
+        advanced.status = SessionStatus::Working;
+        advanced.summary = Some("should not advance".to_string());
+        state
+            .replace_dispatcher_thread(advanced)
+            .await
+            .expect_err("replace should fail when snapshot storage is unavailable");
+
+        let in_memory = state
+            .get_dispatcher_thread(&baseline.id)
+            .await
+            .expect("baseline dispatcher thread should remain in memory");
+        assert_eq!(in_memory.status, SessionStatus::NeedsInput);
+        assert_eq!(in_memory.summary.as_deref(), Some("baseline durable state"));
+
+        let preserved = read_json::<SessionRecord>(&preserved_snapshot_path)
+            .await
+            .expect("baseline dispatcher snapshot should remain durable");
+        assert_eq!(preserved.status, SessionStatus::NeedsInput);
+        assert_eq!(preserved.summary.as_deref(), Some("baseline durable state"));
+
+        tokio::fs::remove_file(&store_dir)
+            .await
+            .expect("blocking file should be removable");
+        tokio::fs::rename(&blocked_store, &store_dir)
+            .await
+            .expect("dispatcher store should be restorable");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shutdown_dispatcher_flush_stays_bounded_while_runtime_keeps_requeueing() {
+        let (root, state) = build_test_state("dispatcher-flush-shutdown-bounded").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let snapshot_path = state.dispatcher_snapshot_path(&thread.id);
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("pre-shutdown snapshot".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("baseline snapshot should persist");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let iterations = Arc::new(AtomicUsize::new(0));
+        let producer_state = Arc::clone(&state);
+        let producer_thread_id = thread.id.clone();
+        let producer_stop = Arc::clone(&stop);
+        let producer_iterations = Arc::clone(&iterations);
+        let producer = tokio::spawn(async move {
+            while !producer_stop.load(Ordering::Relaxed) {
+                let next = producer_iterations.fetch_add(1, Ordering::Relaxed) + 1;
+                {
+                    let mut threads = producer_state.dispatcher_threads.write().await;
+                    let current = threads
+                        .get_mut(&producer_thread_id)
+                        .expect("dispatcher state should stay live");
+                    current.summary = Some(format!("shutdown update {next}"));
+                }
+                producer_state
+                    .queue_dispatcher_flush(&producer_thread_id)
+                    .await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        timeout(Duration::from_millis(250), async {
+            loop {
+                if iterations.load(Ordering::Relaxed) >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("producer should requeue a few shutdown updates");
+
+        let write_guard = state.dispatcher_snapshot_guard(&thread.id).await;
+        let held_write = write_guard.lock().await;
+        let iterations_before_flush = iterations.load(Ordering::Relaxed);
+        let shutdown_state = Arc::clone(&state);
+        let shutdown_flush = tokio::spawn(async move {
+            shutdown_state
+                .flush_pending_dispatcher_snapshots_bounded(4, Duration::from_millis(80))
+                .await
+        });
+
+        timeout(Duration::from_millis(250), async {
+            loop {
+                if iterations.load(Ordering::Relaxed) >= iterations_before_flush + 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("producer should keep requeueing while shutdown drain is in flight");
+        let shutdown_flush_result = timeout(Duration::from_millis(500), shutdown_flush)
+            .await
+            .expect("bounded shutdown flush should return instead of hanging")
+            .expect("shutdown flush task should complete");
+        drop(held_write);
+        if let Err(err) = shutdown_flush_result {
+            assert!(
+                err.to_string()
+                    .contains("Dispatcher shutdown flush stopped after"),
+                "expected a bounded shutdown flush status, got {err:?}"
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        producer.await.expect("producer task should stop cleanly");
+
+        let persisted = read_json::<SessionRecord>(&snapshot_path)
+            .await
+            .expect("shutdown flush should leave behind the latest available snapshot");
+        let persisted_summary = persisted
+            .summary
+            .expect("persisted dispatcher snapshot should include a summary");
+        assert!(
+            persisted_summary == "pre-shutdown snapshot"
+                || persisted_summary.starts_with("shutdown update "),
+            "expected the last durable snapshot to survive the bounded flush timeout, got {persisted_summary:?}"
+        );
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("final explicit flush should settle once the producer stops");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn queued_snapshot_clones_current_state_after_write_guard() {
+        let (root, state) = build_test_state("dispatcher-snapshot-race").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::Working;
+            current.summary = Some("stale streaming state".to_string());
+        }
+
+        let write_guard = state.dispatcher_snapshot_guard(&thread.id).await;
+        let held_write = write_guard.lock().await;
+        let queued_state = Arc::clone(&state);
+        let queued_thread_id = thread.id.clone();
+        let queued_write = tokio::spawn(async move {
+            queued_state
+                .persist_current_dispatcher_snapshot(&queued_thread_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.status = SessionStatus::NeedsInput;
+            current.summary = Some("final durable state".to_string());
+        }
+        drop(held_write);
+        queued_write
+            .await
+            .expect("queued writer task")
+            .expect("queued snapshot should persist");
+
+        let persisted = read_json::<SessionRecord>(&state.dispatcher_snapshot_path(&thread.id))
+            .await
+            .expect("persisted dispatcher snapshot");
+        assert_eq!(persisted.status, SessionStatus::NeedsInput);
+        assert_eq!(persisted.summary.as_deref(), Some("final durable state"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleted_dispatcher_threads_are_not_repersisted_by_stale_snapshot_writes() {
+        let (root, state) = build_test_state("dispatcher-delete-stale-persist-race").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let snapshot_path = state.dispatcher_snapshot_path(&thread.id);
+        let stale_snapshot = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should exist");
+
+        let write_guard = state.dispatcher_snapshot_guard(&thread.id).await;
+        let (writer_started_tx, writer_started_rx) = oneshot::channel();
+        let (writer_release_tx, writer_release_rx) = oneshot::channel();
+        let persist_state = Arc::clone(&state);
+        let persist_thread = stale_snapshot.clone();
+        let persist_task = tokio::spawn(async move {
+            let _write_lock = write_guard.lock().await;
+            let _ = writer_started_tx.send(());
+            writer_release_rx
+                .await
+                .expect("writer release signal should arrive");
+            persist_state
+                .write_dispatcher_snapshot(&persist_thread)
+                .await
+        });
+        writer_started_rx
+            .await
+            .expect("stale writer should acquire the snapshot guard");
+
+        let delete_state = Arc::clone(&state);
+        let delete_thread_id = thread.id.clone();
+        let delete_task = tokio::spawn(async move {
+            delete_state
+                .delete_dispatcher_thread(&delete_thread_id)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !delete_task.is_finished(),
+            "delete should wait for the in-flight snapshot writer"
+        );
+
+        writer_release_tx
+            .send(())
+            .expect("writer release signal should be sendable");
+        persist_task
+            .await
+            .expect("stale persist task")
+            .expect("stale persist should succeed before delete removes the snapshot");
+        delete_task
+            .await
+            .expect("delete task should join cleanly")
+            .expect("dispatcher thread should be deleted");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(state.get_dispatcher_thread(&thread.id).await.is_none());
+        assert!(!snapshot_path.exists());
+        assert!(!state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleted_dispatcher_threads_are_not_resurrected_by_queued_snapshot_flushes() {
+        let (root, state) = build_test_state("dispatcher-delete-queued-flush-race").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let snapshot_path = state.dispatcher_snapshot_path(&thread.id);
+
+        let write_guard = state.dispatcher_snapshot_guard(&thread.id).await;
+        let held_write = write_guard.lock().await;
+        state.queue_dispatcher_flush(&thread.id).await;
+        let flush_state = Arc::clone(&state);
+        let flush_task =
+            tokio::spawn(
+                async move { flush_state.flush_pending_dispatcher_snapshots_once().await },
+            );
+        tokio::task::yield_now().await;
+
+        let delete_state = Arc::clone(&state);
+        let delete_thread_id = thread.id.clone();
+        let delete_task = tokio::spawn(async move {
+            delete_state
+                .delete_dispatcher_thread(&delete_thread_id)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !delete_task.is_finished(),
+            "delete should wait for the queued snapshot flush writer"
+        );
+
+        drop(held_write);
+        assert_eq!(
+            flush_task
+                .await
+                .expect("flush task should join cleanly")
+                .expect("flush task should succeed once the guard is released"),
+            1
+        );
+        delete_task
+            .await
+            .expect("delete task should join cleanly")
+            .expect("dispatcher thread should be deleted");
+
+        assert!(state.get_dispatcher_thread(&thread.id).await.is_none());
+        assert!(!snapshot_path.exists());
+        assert!(!state
+            .pending_dispatcher_flushes
+            .lock()
+            .await
+            .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicit_dispatcher_flush_teardown_skips_deleted_queued_threads() {
+        let (root, state) = build_test_state("dispatcher-flush-teardown").await;
+        let live_thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("live dispatcher thread should be created");
+        let deleted_thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    force_new: true,
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("deleted dispatcher thread should be created");
+        let live_snapshot_path = state.dispatcher_snapshot_path(&live_thread.id);
+        let deleted_snapshot_path = state.dispatcher_snapshot_path(&deleted_thread.id);
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads
+                .get_mut(&live_thread.id)
+                .expect("live dispatcher state");
+            current.summary = Some("live teardown state".to_string());
+        }
+        state.queue_dispatcher_flush(&live_thread.id).await;
+        state.queue_dispatcher_flush(&deleted_thread.id).await;
+        state
+            .delete_dispatcher_thread(&deleted_thread.id)
+            .await
+            .expect("dispatcher thread should be deleted");
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !deleted_snapshot_path.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("deleted dispatcher snapshot should be removed before teardown flush");
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("explicit teardown flush should skip deleted threads");
+
+        let live_persisted = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(snapshot) = read_json::<SessionRecord>(&live_snapshot_path).await {
+                    if snapshot.summary.as_deref() == Some("live teardown state") {
+                        break snapshot;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("live dispatcher snapshot should converge after teardown flush");
+        assert_eq!(
+            live_persisted.summary.as_deref(),
+            Some("live teardown state")
+        );
+        assert!(state
+            .get_dispatcher_thread(&deleted_thread.id)
+            .await
+            .is_none());
+        assert!(!deleted_snapshot_path.exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

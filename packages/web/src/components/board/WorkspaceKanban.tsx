@@ -37,9 +37,20 @@ import {
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import {
+  BOARD_CONTENT_CLASS_NAME,
+  BOARD_HEADER_CLASS_NAME,
+  BOARD_KANBAN_COLUMN_BODY_CLASS_NAME,
+  BOARD_KANBAN_COLUMN_CLASS_NAME,
+  BOARD_KANBAN_RAIL_CLASS_NAME,
+  BOARD_KANBAN_RAIL_TOUCH_STYLE,
+  BOARD_KANBAN_SHELL_CLASS_NAME,
+  BOARD_SCROLL_SURFACE_CLASS_NAME,
+} from "@/components/board/boardMobileLayout";
+import {
   KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
 } from "@/components/layout/keyboardSafeViewport";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import { usePreferences } from "@/hooks/usePreferences";
 import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -316,7 +327,7 @@ const PRIORITY_OPTIONS = [
   { value: "low", label: "Low" },
 ] as const;
 const MENU_PANEL_CLASS =
-  "z-[120] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
+  "rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
 const MENU_ITEM_CLASS =
   "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
 const BOARD_LAYOUT_STORAGE_KEY = "conductor:board-layout";
@@ -666,7 +677,7 @@ function ContextAttachmentChip({
       type="button"
       onClick={onOpen}
       disabled={opening}
-      className="inline-flex max-w-full items-center gap-1 rounded-[3px] bg-[color:#292929] px-2 py-1 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
+      className="inline-flex min-h-11 max-w-full items-center gap-1 rounded-[3px] bg-[color:#292929] px-2 py-1 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60 xl:min-h-0"
       title={attachment}
       aria-label={`Open ${attachment}`}
     >
@@ -834,12 +845,11 @@ function AgentSelectMenu({
         </button>
       </DropdownMenu.Trigger>
 
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align="start"
-          sideOffset={6}
-          className={`${MENU_PANEL_CLASS} min-w-[220px] max-w-[calc(100vw-2rem)] max-h-[min(360px,50vh)] overflow-y-auto sm:min-w-[280px]`}
-        >
+      <MobileDropdownMenuContent
+        align="start"
+        sideOffset={6}
+        className={`${MENU_PANEL_CLASS} w-[calc(100vw-2rem)] min-w-0 sm:w-auto sm:min-w-[280px]`}
+      >
           <p className="px-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
             Agents
           </p>
@@ -866,8 +876,7 @@ function AgentSelectMenu({
               </DropdownMenu.Item>
             );
           })}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
+      </MobileDropdownMenuContent>
     </DropdownMenu.Root>
   );
 }
@@ -1479,7 +1488,7 @@ function BoardTaskCard({
         <button
           type="button"
           onClick={() => onOpenEditor(task, role)}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
+          className="inline-flex h-11 w-11 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:h-6 xl:w-6"
           aria-label="Edit task"
           title="Edit task"
         >
@@ -1517,7 +1526,7 @@ function BoardTaskCard({
                 href={issueUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                className="inline-flex min-h-11 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] xl:min-h-5"
               >
                 <span>Issue #{task.issueId}</span>
                 <ExternalLink className="h-3 w-3" />
@@ -1564,7 +1573,7 @@ function BoardTaskCard({
               <button
                 type="button"
                 onClick={() => void onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession))}
-                className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)] xl:min-h-0"
                 title={primaryLinkedSession.id}
               >
                 <div className="flex min-w-0 items-center gap-2">
@@ -1605,7 +1614,7 @@ function BoardTaskCard({
                   key={session.id}
                   type="button"
                   onClick={() => void onOpenSessionView(session.id, getPrimaryTabForSession(session))}
-                  className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                  className="flex min-h-11 w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)] xl:min-h-0"
                   title={session.id}
                 >
                   <div className="flex min-w-0 items-center gap-2">
@@ -1638,7 +1647,7 @@ function BoardTaskCard({
               <button
                 type="button"
                 onClick={() => void onOpenSessionView(unresolvedPrimaryLink, "terminal")}
-                className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                className="flex min-h-11 w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)] xl:min-h-0"
                 title={unresolvedPrimaryLink}
               >
                 <div className="min-w-0">
@@ -1751,7 +1760,7 @@ function BoardListRow({
           onOpenEditor(task, role);
         }
       }}
-      className="group flex items-start gap-2 border-b border-[var(--vk-border)] py-2.5 pl-2 pr-3 text-sm text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] last:border-b-0 sm:items-center sm:py-2 sm:pl-1"
+      className="group flex min-h-11 items-start gap-2 border-b border-[var(--vk-border)] py-2.5 pl-2 pr-3 text-sm text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] last:border-b-0 sm:items-center sm:py-2 sm:pl-1"
     >
       <span className="shrink-0 pt-px sm:hidden">
         <span
@@ -1785,7 +1794,7 @@ function BoardListRow({
                   onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession));
                 }
               }}
-              className="inline-flex items-center gap-1 rounded-full bg-[color:color-mix(in_srgb,var(--status-working)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium text-[var(--status-working)]"
+              className="inline-flex min-h-11 items-center gap-1 rounded-full bg-[color:color-mix(in_srgb,var(--status-working)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium text-[var(--status-working)] xl:min-h-0"
             >
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-[var(--status-working)] opacity-75" />
@@ -1852,7 +1861,7 @@ function BoardListRow({
             target="_blank"
             rel="noreferrer"
             onClick={(event) => event.stopPropagation()}
-            className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)] xl:min-h-0 xl:min-w-0"
           >
             #{task.issueId}
           </a>
@@ -1864,7 +1873,7 @@ function BoardListRow({
               event.stopPropagation();
               onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession));
             }}
-            className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)] xl:min-h-0 xl:min-w-0"
           >
             {formatLinkedSessionLabel(primaryLinkedSession)}
           </button>
@@ -3227,11 +3236,11 @@ export function WorkspaceKanban({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden sm:overflow-hidden">
-      <header className="border-b border-[var(--vk-border)] px-3 py-3 sm:px-4 sm:py-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 sm:mb-4">
+    <section className={BOARD_SCROLL_SURFACE_CLASS_NAME}>
+      <header className={BOARD_HEADER_CLASS_NAME}>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 xl:mb-4 xl:gap-3">
           <div className="min-w-0">
-            <h1 className="truncate text-[20px] font-medium leading-[28px] text-[var(--vk-text-normal)] sm:text-[24px] sm:leading-[32px]">
+            <h1 className="truncate text-[18px] font-medium leading-[26px] text-[var(--vk-text-normal)] xl:text-[24px] xl:leading-[32px]">
               {projectLabel?.trim() || projectId}
             </h1>
           </div>
@@ -3244,14 +3253,15 @@ export function WorkspaceKanban({
 
         {boardLayout === "list" ? (
           <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
-            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <div className="flex w-full min-w-0 items-center gap-2 xl:w-auto xl:gap-3">
               <button
                 type="button"
                 onClick={() => openComposer("intake")}
-                className="inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] xl:h-[31px] xl:w-auto"
+                aria-label="New Issue"
               >
                 <Plus className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">New Issue</span>
+                <span className="hidden xl:inline">New Issue</span>
               </button>
               {collapsibleBoardListGroupKeys.length > 0 ? (
                 <button
@@ -3263,7 +3273,7 @@ export function WorkspaceKanban({
                         : collapsibleBoardListGroupKeys,
                     })
                   }
-                  className="hidden h-[31px] w-[31px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:inline-flex"
+                  className="hidden h-11 w-11 items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:inline-flex xl:h-[31px] xl:w-[31px]"
                   aria-label={allBoardListGroupsCollapsed ? "Expand groups" : "Collapse groups"}
                   title={allBoardListGroupsCollapsed ? "Expand groups" : "Collapse groups"}
                 >
@@ -3275,13 +3285,13 @@ export function WorkspaceKanban({
                 </button>
               ) : null}
 
-              <label className="relative w-48 sm:w-64 md:w-80">
+              <label className="relative min-w-0 flex-1 xl:w-80 xl:flex-none">
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vk-text-muted)]" />
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search issues..."
-                  className="h-[31px] w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-7 pr-3 text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                  className="h-11 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-7 pr-3 text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] xl:h-[31px]"
                 />
               </label>
             </div>
@@ -3291,7 +3301,7 @@ export function WorkspaceKanban({
                 <button
                   type="button"
                   className={cn(
-                    "p-1.5 transition-colors",
+                    "inline-flex h-11 w-11 items-center justify-center transition-colors xl:h-7 xl:w-7",
                     boardLayout === "list"
                       ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
                       : "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
@@ -3304,7 +3314,7 @@ export function WorkspaceKanban({
                 <button
                   type="button"
                   className={cn(
-                    "p-1.5 transition-colors",
+                    "inline-flex h-11 w-11 items-center justify-center transition-colors xl:h-7 xl:w-7",
                     "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
                   )}
                   onClick={() => setBoardLayout("kanban")}
@@ -3352,12 +3362,11 @@ export function WorkspaceKanban({
                     ) : null}
                   </button>
                 </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    align="end"
-                    sideOffset={6}
-                    className={`${MENU_PANEL_CLASS} w-[min(420px,calc(100vw-2rem))]`}
-                  >
+                <MobileDropdownMenuContent
+                  align="end"
+                  sideOffset={6}
+                  className={`${MENU_PANEL_CLASS} w-[min(420px,calc(100vw-2rem))]`}
+                >
                     <div className="space-y-3 p-1">
                       <div className="flex items-center justify-between px-2 pt-1">
                         <span className="text-[12px] font-semibold text-[var(--vk-text-normal)]">
@@ -3485,7 +3494,7 @@ export function WorkspaceKanban({
                             <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
                               Assignee
                             </span>
-                            <div className="max-h-40 space-y-0.5 overflow-y-auto">
+                            <div className="space-y-0.5">
                               <button
                                 type="button"
                                 onClick={() =>
@@ -3537,8 +3546,7 @@ export function WorkspaceKanban({
                         </div>
                       </div>
                     </div>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
+                </MobileDropdownMenuContent>
               </DropdownMenu.Root>
 
               <DropdownMenu.Root>
@@ -3551,12 +3559,11 @@ export function WorkspaceKanban({
                     <span className="hidden sm:inline">Sort</span>
                   </button>
                 </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    align="end"
-                    sideOffset={6}
-                    className={`${MENU_PANEL_CLASS} min-w-[180px]`}
-                  >
+                <MobileDropdownMenuContent
+                  align="end"
+                  sideOffset={6}
+                  className={`${MENU_PANEL_CLASS} min-w-[180px]`}
+                >
                     {(
                       [
                         ["status", "Status"],
@@ -3596,8 +3603,7 @@ export function WorkspaceKanban({
                         </button>
                       );
                     })}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
+                </MobileDropdownMenuContent>
               </DropdownMenu.Root>
 
               <DropdownMenu.Root>
@@ -3610,12 +3616,11 @@ export function WorkspaceKanban({
                     <span className="hidden sm:inline">Group</span>
                   </button>
                 </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    align="end"
-                    sideOffset={6}
-                    className={`${MENU_PANEL_CLASS} min-w-[180px]`}
-                  >
+                <MobileDropdownMenuContent
+                  align="end"
+                  sideOffset={6}
+                  className={`${MENU_PANEL_CLASS} min-w-[180px]`}
+                >
                     {(
                       [
                         ["status", "Status"],
@@ -3644,14 +3649,13 @@ export function WorkspaceKanban({
                         </button>
                       );
                     })}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
+                </MobileDropdownMenuContent>
               </DropdownMenu.Root>
             </div>
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
-            <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
+            <div className="inline-flex min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:flex-none">
               {(
                 [
                   ["active", "Active"],
@@ -3665,7 +3669,7 @@ export function WorkspaceKanban({
                   type="button"
                   onClick={() => setViewFilter(value)}
                   className={cn(
-                    "px-3 py-[5px] text-[13px]",
+                    "min-h-11 min-w-0 flex-1 px-1.5 py-1 text-[12px] xl:min-h-0 xl:flex-none xl:px-3 xl:py-[5px] xl:text-[13px]",
                     viewFilter === value
                       ? "rounded-[2px] bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
                       : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -3679,7 +3683,7 @@ export function WorkspaceKanban({
             <button
               type="button"
               onClick={() => setBoardLayout("list")}
-              className="inline-flex h-[31px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] xl:h-[31px] xl:w-auto"
               aria-label="Switch to list view"
               title="Switch to list view"
             >
@@ -3687,21 +3691,21 @@ export function WorkspaceKanban({
               <span className="hidden sm:inline">List view</span>
             </button>
 
-            <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
-              <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
+            <div className="ml-auto flex w-full min-w-0 flex-nowrap items-center gap-2 xl:w-auto xl:min-w-[220px] xl:flex-none">
+              <label className="flex h-11 min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 xl:h-[31px] xl:min-w-[200px] xl:w-[240px] xl:flex-none">
                 <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
                 <input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search issues..."
-                  className="ml-2 w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                  className="ml-2 h-full w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                 />
               </label>
 
               <button
                 type="button"
                 onClick={() => openComposer("intake")}
-                className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-orange)] px-3 text-[14px] text-white hover:bg-[var(--accent-hover)] sm:w-auto"
+                className="inline-flex h-11 w-auto shrink-0 items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-orange)] px-3 text-[14px] text-white hover:bg-[var(--accent-hover)] xl:h-[31px]"
               >
                 <span>New Issue</span>
                 <Plus className="h-3.5 w-3.5" />
@@ -3716,7 +3720,7 @@ export function WorkspaceKanban({
               <button
                 type="button"
                 onClick={() => setProjectSyncOpen(true)}
-                className="inline-flex h-[38px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
+                className="inline-flex h-11 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] xl:h-[31px]"
               >
                 <span className="hidden sm:inline">GitHub Project</span>
                 <span className="sm:hidden">GitHub</span>
@@ -3732,7 +3736,7 @@ export function WorkspaceKanban({
                   value={selectedGitHubProjectId}
                   onChange={handleGitHubProjectSelectChange}
                   disabled={projectSyncLoading || projectSyncSaving}
-                  className="h-9 min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] sm:min-w-[220px] sm:max-w-md sm:flex-none"
+                  className="h-11 min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] xl:h-9 xl:min-w-[220px] xl:max-w-md xl:flex-none"
                 >
                   <option value="">
                     {projectSyncLoading
@@ -3758,7 +3762,7 @@ export function WorkspaceKanban({
                     void handleSaveGitHubProjectLink(null);
                     setProjectSyncOpen(false);
                   }}
-                  className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  className="inline-flex h-11 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50 xl:h-9"
                 >
                   Disconnect
                 </button>
@@ -3767,7 +3771,7 @@ export function WorkspaceKanban({
                   type="button"
                   disabled={!board?.githubProject?.id || projectSyncSaving}
                   onClick={() => void handleGitHubProjectSync("pull")}
-                  className="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  className="inline-flex h-11 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50 xl:h-9"
                 >
                   {projectSyncSaving ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -3781,7 +3785,7 @@ export function WorkspaceKanban({
                   type="button"
                   disabled={!board?.githubProject?.id || projectSyncSaving}
                   onClick={() => void handleGitHubProjectSync("push")}
-                  className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  className="inline-flex h-11 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50 xl:h-9"
                 >
                   Push
                 </button>
@@ -3791,7 +3795,7 @@ export function WorkspaceKanban({
                     href={board.githubProject.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-9 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                    className="inline-flex h-11 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] xl:h-9"
                   >
                     <span>Open</span>
                     <ExternalLink className="h-3.5 w-3.5" />
@@ -3802,7 +3806,7 @@ export function WorkspaceKanban({
                   <button
                     type="button"
                     onClick={() => setProjectSyncOpen(false)}
-                    className="inline-flex h-9 items-center rounded-[3px] px-2 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                    className="inline-flex h-11 items-center rounded-[3px] px-2 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:h-9"
                   >
                     Cancel
                   </button>
@@ -3891,7 +3895,12 @@ export function WorkspaceKanban({
 
       </header>
 
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3 touch-pan-y sm:p-4 sm:touch-auto">
+      <div
+        className={cn(
+          BOARD_CONTENT_CLASS_NAME,
+          boardLayout === "kanban" && "xl:overflow-hidden"
+        )}
+      >
         {loading ? (
           <div className="flex h-full items-center justify-center text-[var(--vk-text-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -3903,9 +3912,12 @@ export function WorkspaceKanban({
           </div>
         ) : (
           boardLayout === "kanban" ? (
-            <div className="flex h-full min-h-0 flex-col gap-4">
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
-                <div className="flex min-w-0 flex-row items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-3 [-webkit-overflow-scrolling:touch] px-0.5 sm:h-full sm:gap-0 sm:overflow-x-auto sm:px-0 sm:pb-3">
+            <div className={BOARD_KANBAN_SHELL_CLASS_NAME}>
+              <div className="min-w-0 xl:min-h-0 xl:flex-1">
+                <div
+                  className={BOARD_KANBAN_RAIL_CLASS_NAME}
+                  style={BOARD_KANBAN_RAIL_TOUCH_STYLE}
+                >
                   {visibleColumns.map((column) => {
                     const fullColumn = allColumns.find(
                       (candidate) => candidate.role === column.role
@@ -3927,8 +3939,8 @@ export function WorkspaceKanban({
                       <article
                         key={column.role}
                         className={cn(
-                          "flex max-h-[min(560px,65dvh)] min-h-0 w-[min(85vw,320px)] shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:max-h-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
-                          draggingTask && "snap-start"
+                          BOARD_KANBAN_COLUMN_CLASS_NAME,
+                          draggingTask && "ring-1 ring-[var(--vk-border)]"
                         )}
                       >
                         <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
@@ -3950,7 +3962,7 @@ export function WorkspaceKanban({
                           <button
                             type="button"
                             onClick={() => openComposer(column.role)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] xl:h-7 xl:w-7"
                             aria-label={`Add task to ${column.heading}`}
                           >
                             <Plus className="h-3.5 w-3.5" />
@@ -3959,7 +3971,7 @@ export function WorkspaceKanban({
 
                         <div
                           className={cn(
-                            "flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 pt-2",
+                            BOARD_KANBAN_COLUMN_BODY_CLASS_NAME,
                             draggingTask?.role === column.role &&
                               "bg-[rgba(255,255,255,0.02)]"
                           )}
@@ -4068,7 +4080,7 @@ export function WorkspaceKanban({
               <button
                 type="button"
                 onClick={() => openComposer("intake")}
-                className="mt-4 inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                className="mt-4 inline-flex h-11 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] xl:h-[31px]"
               >
                 <Plus className="h-3.5 w-3.5" />
                 <span>New Issue</span>
@@ -4123,7 +4135,7 @@ export function WorkspaceKanban({
                         <button
                           type="button"
                           onClick={() => openComposer(composerRole)}
-                          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] xl:h-7 xl:w-7"
                           aria-label={`Add task to ${group.label}`}
                         >
                           <Plus className="h-3.5 w-3.5" />

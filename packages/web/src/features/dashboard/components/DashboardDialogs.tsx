@@ -1,5 +1,6 @@
 "use client";
 
+import * as Dialog from "@radix-ui/react-dialog";
 import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
 import {
   getAgentModelCatalog,
@@ -10,7 +11,7 @@ import {
   type DashboardRole,
   type ModelAccessPreferences,
 } from "@conductor-oss/core/types";
-import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IconType } from "react-icons";
 import { SiNotion, SiObsidian } from "react-icons/si";
 import { VscVscode } from "react-icons/vsc";
@@ -73,6 +74,11 @@ import {
   resolveReasoningSelectionValue,
   type ModelSelectionState,
 } from "@/lib/agentModelSelection";
+import {
+  captureDialogOpener,
+  findVisibleWorkspacePanelOpener,
+  restoreDialogOpener,
+} from "./dialogFocusRestore";
 
 const DEFAULT_AGENT = "claude-code";
 
@@ -767,6 +773,7 @@ export function NewWorkspaceDialog({
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   bridgeId?: string | null;
 }) {
+  const openerRef = useRef<HTMLElement | null>(null);
   const [mode, setMode] = useState<"git" | "local">("git");
   const [step, setStep] = useState<"source" | "details" | "review">("source");
   const [projectId, setProjectId] = useState("");
@@ -1081,7 +1088,10 @@ export function NewWorkspaceDialog({
     setStep("review");
   };
 
-  if (!open) return null;
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (nextOpen || creating || folderPickerOpen) return;
+    onClose();
+  };
 
   const canSubmit = sourceReady && defaultBranch.trim().length > 0;
 
@@ -1119,19 +1129,42 @@ export function NewWorkspaceDialog({
 
   return (
     <>
-      <div
-        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[80] flex items-start justify-center overflow-y-auto bg-black/65 px-0 py-0 sm:items-center sm:px-3 sm:py-3`}
-        onClick={() => {
-          if (creating || folderPickerOpen) return;
-          onClose();
-        }}
-        role="presentation"
-      >
-        <form
-          onSubmit={handleSubmit}
-          onClick={(event) => event.stopPropagation()}
-          className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full max-w-none flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-auto sm:max-w-[860px] sm:rounded-[10px] sm:border`}
-        >
+      <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[80] bg-black/65`} />
+          <Dialog.Content
+            asChild
+            onOpenAutoFocus={() => {
+              captureDialogOpener(openerRef);
+            }}
+            onCloseAutoFocus={(event) => {
+              if (restoreDialogOpener(openerRef, event)) return;
+              const workspacePanelOpener = findVisibleWorkspacePanelOpener();
+              if (!workspacePanelOpener) return;
+              event.preventDefault();
+              workspacePanelOpener.focus({ preventScroll: true });
+            }}
+            onEscapeKeyDown={(event) => {
+              if (creating || folderPickerOpen) {
+                event.preventDefault();
+              }
+            }}
+            onPointerDownOutside={(event) => {
+              if (creating || folderPickerOpen) {
+                event.preventDefault();
+              }
+            }}
+          >
+            <form
+              onSubmit={handleSubmit}
+              className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[81] flex items-start justify-center overflow-y-auto px-0 py-0 sm:items-center sm:px-3 sm:py-3`}
+            >
+              <Dialog.Description className="sr-only">
+                Add a repository or local folder and configure the workspace before Conductor creates it.
+              </Dialog.Description>
+              <div
+                className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full max-w-none flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-auto sm:max-w-[860px] sm:rounded-[10px] sm:border`}
+              >
           <header className="border-b border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_92%,transparent)] px-4 py-3 backdrop-blur">
             <div className="mb-3 flex justify-center sm:hidden">
               <span className="h-1 w-10 rounded-full bg-[color:color-mix(in_srgb,var(--vk-text-muted)_36%,transparent)]" />
@@ -1139,7 +1172,9 @@ export function NewWorkspaceDialog({
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
+                  <Dialog.Title asChild>
+                    <h2 id="new-workspace-dialog-title" className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
+                  </Dialog.Title>
                   <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
                     {step === "source" ? "Step 1 of 3" : step === "details" ? "Step 2 of 3" : "Step 3 of 3"}
                   </span>
@@ -1813,8 +1848,11 @@ export function NewWorkspaceDialog({
               </div>
             )}
           </footer>
-        </form>
-      </div>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <FolderPickerDialog
         open={folderPickerOpen}
@@ -1864,6 +1902,7 @@ function FolderPickerDialog({
   onClose: () => void;
   onSelect: (path: string | null) => void;
 }) {
+  const openerRef = useRef<HTMLElement | null>(null);
   const [currentPath, setCurrentPath] = useState("");
   const [manualPath, setManualPath] = useState(initialPath ?? "");
   const [entries, setEntries] = useState<DirectoryEntry[]>([]);
@@ -1964,24 +2003,36 @@ function FolderPickerDialog({
     }
   };
 
-  if (!open) return null;
-
   return (
-    <div
-      className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[95] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0`}
-      onClick={() => {
+    <Dialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) return;
         onClose();
         onSelect(null);
       }}
-      role="presentation"
     >
-      <div
-        className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]`}
-        onClick={(event) => event.stopPropagation()}
-      >
+      <Dialog.Portal>
+        <Dialog.Overlay className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[95] bg-black/70`} />
+        <Dialog.Content
+          className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[96] flex items-start justify-center overflow-y-auto px-3 py-3 outline-none sm:items-center sm:py-0`}
+          onOpenAutoFocus={() => {
+            captureDialogOpener(openerRef);
+          }}
+          onCloseAutoFocus={(event) => {
+            restoreDialogOpener(openerRef, event);
+          }}
+        >
+          <div
+            className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]`}
+          >
         <header className="border-b border-[var(--vk-border)] px-4 py-3">
-          <h3 className="text-[16px] text-[var(--vk-text-strong)]">{title}</h3>
-          <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">{description}</p>
+          <Dialog.Title asChild>
+            <h3 id="folder-picker-dialog-title" className="text-[16px] text-[var(--vk-text-strong)]">{title}</h3>
+          </Dialog.Title>
+          <Dialog.Description asChild>
+            <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">{description}</p>
+          </Dialog.Description>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 py-3">
@@ -2102,8 +2153,10 @@ function FolderPickerDialog({
             Use this folder
           </button>
         </footer>
-      </div>
-    </div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -2170,6 +2223,7 @@ export function SettingsDialog({
   onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<boolean>;
   bridgeId?: string | null;
 }) {
+  const openerRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
   const [ide, setIde] = useState(current.ide);
@@ -2604,8 +2658,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     } as ModelAccessPreferences));
   }
 
-  if (!open) return null;
-
   const canSubmitPreferences = codingAgent.trim().length > 0
     && ide.trim().length > 0
     && markdownEditor.trim().length > 0;
@@ -2719,25 +2771,69 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     onOnboardingComplete?.({ needsProject: false });
   }
 
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (
+      nextOpen
+      || isBusy
+      || mode === "onboarding"
+      || repositoryFolderPickerOpen
+      || notesFolderPickerOpen
+      || filesystemRootPickerOpen
+    ) {
+      return;
+    }
+    onClose();
+  };
+
   return (
     <>
-      <div
-        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-6`}
-        onClick={() => {
-          if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen || filesystemRootPickerOpen) return;
-          onClose();
-        }}
-        role="presentation"
-      >
-        <div
-          className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row`}
-          onClick={(event) => event.stopPropagation()}
-        >
+      <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[89] bg-black/70`} />
+          <Dialog.Content
+            className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-hidden px-0 py-0 outline-none sm:items-center sm:overflow-y-auto sm:px-3 sm:py-6`}
+            onOpenAutoFocus={() => {
+              captureDialogOpener(openerRef);
+            }}
+            onCloseAutoFocus={(event) => {
+              restoreDialogOpener(openerRef, event);
+            }}
+            onEscapeKeyDown={(event) => {
+              if (
+                isBusy
+                || mode === "onboarding"
+                || repositoryFolderPickerOpen
+                || notesFolderPickerOpen
+                || filesystemRootPickerOpen
+              ) {
+                event.preventDefault();
+              }
+            }}
+            onPointerDownOutside={(event) => {
+              if (
+                isBusy
+                || mode === "onboarding"
+                || repositoryFolderPickerOpen
+                || notesFolderPickerOpen
+                || filesystemRootPickerOpen
+              ) {
+                event.preventDefault();
+              }
+            }}
+          >
+            <Dialog.Description className="sr-only">
+              Review and update dashboard preferences, repository defaults, and organization settings.
+            </Dialog.Description>
+            <div
+              className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row`}
+            >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
             <header className="border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
-              <h2 className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
-                {isOnboarding ? "Setup" : "Settings"}
-              </h2>
+              <Dialog.Title asChild>
+                <h2 id="settings-dialog-title" className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
+                  {isOnboarding ? "Setup" : "Settings"}
+                </h2>
+              </Dialog.Title>
             </header>
             <nav className="-mx-0.5 flex gap-1 overflow-x-auto px-2 py-2 sm:mx-0 sm:block sm:space-y-1 sm:overflow-auto sm:px-2">
               {visibleTabs.map((tab) => {
@@ -3966,9 +4062,11 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                 )}
               </div>
             </footer>
+            </div>
           </div>
-        </div>
-      </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <FolderPickerDialog
         open={repositoryFolderPickerOpen}

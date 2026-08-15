@@ -12,7 +12,7 @@ interface TopBarProps {
 
 export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightContent }: TopBarProps) {
   return (
-    <header className="flex h-[33px] items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-14 pr-2 text-[12px] text-[var(--vk-text-muted)] sm:pl-5 sm:pr-5 sm:text-[13px]">
+    <header className="oc-mobile-touch-target flex h-11 shrink-0 items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-14 pr-2 text-[12px] text-[var(--vk-text-muted)] sm:h-[33px] sm:pl-5 sm:pr-5 sm:text-[13px]">
       <div className="min-w-0 flex-1 text-left sm:text-center">
         <span className="block truncate font-medium tracking-[0.01em] text-[var(--vk-text-muted)]">
           {title ?? "All Projects"}
@@ -28,7 +28,7 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           href={CONDUCTOR_SUPPORT_DISCUSSIONS_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+          className="oc-mobile-touch-target inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-8 sm:w-8"
           aria-label="Open Conductor support"
           title="Support"
         >
@@ -38,7 +38,7 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           <button
             type="button"
             onClick={onOpenPreferences}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            className="oc-mobile-touch-target inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-8 sm:w-8"
             aria-label="Open preferences"
             title="Preferences"
           >

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ArrowUpRight, ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
 import { BridgeLocalRepairNotice } from "@/components/bridge/BridgeLocalRepairNotice";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
@@ -404,12 +405,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
           />
         </button>
       </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align="end"
-          sideOffset={8}
-          className="z-[90] w-[320px] rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 text-[var(--vk-text-normal)] shadow-[0_22px_48px_rgba(0,0,0,0.34)]"
-        >
+      <MobileDropdownMenuContent
+        align="end"
+        className="w-[min(320px,calc(100vw-1rem))] rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 text-[var(--vk-text-normal)] shadow-[0_22px_48px_rgba(0,0,0,0.34)]"
+      >
           <div className="rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
             <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
               Conductor Bridge
@@ -447,7 +446,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
             ) : null}
           </div>
 
-          <div className="mt-2 max-h-[280px] overflow-y-auto">
+          <div className="mt-2">
             {devices.length > 0 ? (
               devices.map((device) => {
                 const updateInFlight = isBridgeAutoUpdateInFlight(autoUpdate, device.device_id);
@@ -595,8 +594,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
               <Laptop className="h-4 w-4 text-[var(--vk-text-muted)]" />
             </Link>
           </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
+      </MobileDropdownMenuContent>
     </DropdownMenu.Root>
   );
 }

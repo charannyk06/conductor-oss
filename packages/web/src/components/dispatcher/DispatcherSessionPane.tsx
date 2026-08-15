@@ -34,6 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import {
   DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME,
   DISPATCHER_CHAT_FRAME_CLASS_NAME,
@@ -1034,12 +1035,10 @@ function ProjectAgentSelect({
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
         </button>
       </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align="start"
-          sideOffset={8}
-          className="z-50 min-w-[250px] max-w-[calc(100vw-2rem)] rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
-        >
+      <MobileDropdownMenuContent
+        align="start"
+        className="w-[calc(100vw-1rem)] min-w-0 max-w-[250px] rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)] sm:w-auto sm:min-w-[250px]"
+      >
           <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
             Coding agent
           </p>
@@ -1076,8 +1075,7 @@ function ProjectAgentSelect({
               </DropdownMenu.Item>
             );
           })}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
+      </MobileDropdownMenuContent>
     </DropdownMenu.Root>
   );
 }

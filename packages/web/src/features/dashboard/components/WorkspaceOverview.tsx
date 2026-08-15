@@ -110,7 +110,7 @@ export function WorkspaceOverview({
   if (showProjectRecovery || showProjectError || showProjectLoading) {
     return (
       <div className={`flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
-        <div className="flex h-full min-h-0 w-full flex-1 items-center justify-center px-3 py-3 sm:px-4 sm:py-4">
+        <div className="flex min-h-full w-full items-center justify-center px-3 py-3 sm:px-4 sm:py-4">
           <Card className="w-full max-w-[680px] border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_88%,transparent)]">
             <CardContent className="flex flex-col items-center px-6 py-10 text-center sm:px-10 sm:py-12">
               <span className="inline-flex h-12 w-12 items-center justify-center rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
@@ -142,7 +142,7 @@ export function WorkspaceOverview({
   if (showWelcomeState) {
     return (
       <div className={`flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
-        <div className="mx-auto flex h-full min-h-0 w-full max-w-[1200px] flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
+        <div className="mx-auto flex min-h-full w-full max-w-[1200px] flex-col px-3 py-3 sm:px-4 sm:py-4">
           <div className="mb-4 flex justify-end">
             <Button variant="outline" size="md" onClick={onCreateWorkspace}>
               Add workspace
@@ -184,7 +184,7 @@ export function WorkspaceOverview({
 
   return (
     <div className={`flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] ${APP_SURFACE_SCROLL_CLASS_NAME}`}>
-      <div className="flex h-full min-h-0 w-full flex-1 flex-col gap-4 px-3 py-3 sm:px-4">
+      <div className="flex w-full flex-col gap-4 px-3 py-3 sm:px-4 lg:h-full lg:min-h-0 lg:flex-1">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">
             <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
@@ -225,8 +225,8 @@ export function WorkspaceOverview({
           ))}
         </div>
 
-        <div className="flex min-h-0 w-full flex-1">
-          <Card className="flex min-h-0 w-full flex-1 flex-col">
+        <div className="flex w-full lg:min-h-0 lg:flex-1">
+          <Card className="flex w-full flex-col lg:min-h-0 lg:flex-1">
             <CardHeader className="justify-between">
               <div>
                 <p className="text-[14px] font-semibold text-[var(--vk-text-strong)]">Recent sessions</p>
@@ -236,7 +236,7 @@ export function WorkspaceOverview({
               </div>
               <Badge variant="outline">{visibleSessions.length}</Badge>
             </CardHeader>
-            <CardContent className={`flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
+            <CardContent className={`flex flex-col gap-2 lg:min-h-0 lg:flex-1 lg:overflow-y-auto ${MOBILE_MOMENTUM_SCROLL_CLASS_NAME}`}>
               {recentSessions.length === 0 ? (
                 <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
                   No sessions yet. Create or open a workspace to start work.

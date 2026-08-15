@@ -22,6 +22,10 @@ import { PublicPageShell } from "@/components/public/PublicPageShell";
 import { SessionTerminal } from "@/components/sessions/SessionTerminal";
 import { Button } from "@/components/ui/Button";
 import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
+import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
@@ -1474,7 +1478,7 @@ export default function BridgeConnectClient({
       </PublicPageShell>
 
       {testConnectionOpen ? (
-        <div className="fixed inset-0 z-[85] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0">
+        <div className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[140] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0`}>
           <button
             type="button"
             className="absolute inset-0"
@@ -1487,7 +1491,7 @@ export default function BridgeConnectClient({
             role="dialog"
             aria-modal="true"
             aria-labelledby="bridge-test-title"
-            className="relative z-10 flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.4)]"
+            className={`relative z-10 flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.4)]`}
           >
             <div className="flex flex-col gap-4 border-b border-[var(--vk-border)] px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
               <div>

@@ -11,6 +11,10 @@ import {
   upsertDispatcherThread,
 } from "@/components/dispatcher/threadState";
 import { Button } from "@/components/ui/Button";
+import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 import { cn } from "@/lib/cn";
 import {
   buildModelSelection,
@@ -70,17 +74,22 @@ function CreateDispatcherConversationDialog({
   onImplementationModelSelectionChange,
 }: CreateDispatcherConversationDialogProps) {
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 px-4">
-      <div className="w-full max-w-[720px] rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
+    <div className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center`}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-dispatcher-conversation-title"
+        className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-[720px] flex-col overflow-hidden rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]`}
+      >
         <div className="border-b border-[var(--vk-border)] px-5 py-4">
-          <h2 className="text-[18px] font-semibold text-[var(--vk-text-strong)]">
+          <h2 id="create-dispatcher-conversation-title" className="text-[18px] font-semibold text-[var(--vk-text-strong)]">
             Start new dispatcher conversation
           </h2>
           <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
             Choose the runtime agent for the conversation and the default agent for implementation handoffs.
           </p>
         </div>
-        <div className="space-y-4 px-5 py-5">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 [-webkit-overflow-scrolling:touch] sm:px-5 sm:py-5">
           <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.16)] p-3">
             <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
               Dispatcher runtime
@@ -120,10 +129,10 @@ function CreateDispatcherConversationDialog({
           ) : null}
         </div>
         <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-5 py-4">
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={creating}>
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={creating} className="oc-mobile-touch-target">
             Cancel
           </Button>
-          <Button type="button" onClick={onConfirm} disabled={creating}>
+          <Button type="button" onClick={onConfirm} disabled={creating} className="oc-mobile-touch-target">
             {creating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             Start conversation
           </Button>

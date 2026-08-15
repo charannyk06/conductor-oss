@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronDown, ExternalLink, Loader2, Settings2 } from "lucide-react";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { usePreferences } from "@/hooks/usePreferences";
 import { cn } from "@/lib/cn";
@@ -96,7 +97,7 @@ export function SessionProjectOpenMenu({
     }
   }
 
-  const menuClass = "z-50 min-w-[240px] rounded-[8px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]";
+  const menuClass = "w-[calc(100vw-1rem)] min-w-0 rounded-[8px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)] sm:w-auto sm:min-w-[240px]";
   const menuItemClass = "flex min-h-[44px] cursor-default items-center gap-3 rounded-[6px] px-3 py-2 text-[14px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)]";
 
   return (
@@ -121,8 +122,7 @@ export function SessionProjectOpenMenu({
           <ChevronDown className="h-3.5 w-3.5 text-current" />
         </button>
       </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content align="end" sideOffset={8} className={menuClass}>
+      <MobileDropdownMenuContent align="end" className={menuClass}>
           {IDE_OPTIONS.map((option) => (
             <DropdownMenu.Item
               key={option.id}
@@ -136,8 +136,7 @@ export function SessionProjectOpenMenu({
               ) : null}
             </DropdownMenu.Item>
           ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
+      </MobileDropdownMenuContent>
     </DropdownMenu.Root>
   );
 }

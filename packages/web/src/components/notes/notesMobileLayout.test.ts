@@ -11,6 +11,7 @@ test("project notes workspace keeps a compact mobile mode with dedicated file an
   assert.match(source, /compactViewport/);
   assert.match(source, /<Dialog\.Root open=\{mobileSidebarOpen\}/);
   assert.match(source, /<Dialog\.Root open=\{mobileShareOpen\}/);
+  assert.match(source, /oc-mobile-touch-target min-h-11 min-w-0/);
 });
 
 test("notes toolbar exposes a compact actions menu for mobile", () => {
@@ -21,6 +22,8 @@ test("notes toolbar exposes a compact actions menu for mobile", () => {
   assert.match(source, /Files/);
   assert.match(source, /More/);
   assert.match(source, /Share note/);
+  assert.match(source, /BUTTON_CLASS_NAME = "oc-mobile-touch-target[^\n]*min-h-11/);
+  assert.ok((source.match(/oc-mobile-touch-target/g) ?? []).length >= 4);
 });
 
 test("notes graph exposes obsidian-style search, groups, local graph, and force controls", () => {
@@ -34,4 +37,5 @@ test("notes graph exposes obsidian-style search, groups, local graph, and force 
   assert.match(source, /Node size/);
   assert.match(source, /showArrows/);
   assert.match(source, /Zoom in/);
+  assert.ok((source.match(/oc-mobile-touch-target/g) ?? []).length >= 7);
 });

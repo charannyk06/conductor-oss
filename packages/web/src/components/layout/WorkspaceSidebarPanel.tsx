@@ -7,6 +7,10 @@ import { cn } from "@/lib/cn";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Button } from "@/components/ui/Button";
+import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 
 interface ProjectItem {
   id: string;
@@ -31,6 +35,7 @@ interface WorkspaceSidebarPanelProps {
   }) => void;
   onArchiveSession?: (sessionId: string) => Promise<void> | void;
   onCreateWorkspace: () => void;
+  onCloseMobile?: () => void;
 }
 
 export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
@@ -46,6 +51,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   onSelectSession,
   onArchiveSession,
   onCreateWorkspace,
+  onCloseMobile,
 }: WorkspaceSidebarPanelProps) {
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [confirmUnlinkProjectId, setConfirmUnlinkProjectId] = useState<string | null>(null);
@@ -109,17 +115,27 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   return (
     <>
       <div className="flex h-full min-h-0 w-full flex-col bg-[var(--vk-bg-panel)]">
-        <section className="border-b border-[var(--vk-border)] px-4 py-4">
+        <section className="relative border-b border-[var(--vk-border)] px-4 py-4">
           <div className="flex justify-center text-center">
             <p className="font-brand-header text-[22px] font-bold leading-none uppercase tracking-[0.32em] text-[var(--vk-text-strong)]">
               Conductor
             </p>
           </div>
+          {onCloseMobile ? (
+            <button
+              type="button"
+              onClick={onCloseMobile}
+              className="oc-mobile-touch-target absolute right-4 top-4 inline-flex h-11 w-11 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] lg:hidden"
+              aria-label="Close workspace panel"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          ) : null}
 
           <button
             type="button"
             onClick={onCreateWorkspace}
-            className="mt-3 inline-flex h-11 w-full items-center justify-center gap-1 rounded-[6px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-8"
+            className="oc-mobile-touch-target mt-3 inline-flex h-11 w-full items-center justify-center gap-1 rounded-[6px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-8"
             aria-label="Add workspace"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -136,7 +152,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
               type="button"
               onClick={() => onSelectProject(null)}
               className={cn(
-                "mb-1.5 flex w-full items-center gap-3 rounded-[6px] px-3 py-2.5 text-left text-[14px] leading-[21px]",
+                "oc-mobile-touch-target mb-1.5 flex min-h-11 w-full items-center gap-3 rounded-[6px] px-3 py-2.5 text-left text-[14px] leading-[21px] sm:min-h-0",
                 selectedProjectId === null
                   ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
                   : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
@@ -192,7 +208,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                     type="button"
                     onClick={() => onSelectProject(project.id)}
                     className={cn(
-                      "flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left text-[14px] leading-[21px]",
+                      "oc-mobile-touch-target flex min-h-11 min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left text-[14px] leading-[21px] sm:min-h-0",
                       selected
                         ? "text-[var(--vk-text-normal)]"
                         : "text-[var(--vk-text-muted)]",
@@ -226,7 +242,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                         setUnlinkError(null);
                         setConfirmUnlinkProjectId(project.id);
                       }}
-                      className="mr-2 inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-[var(--vk-text-muted)] hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)] disabled:opacity-50"
+                      className="oc-mobile-touch-target mr-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)] disabled:opacity-50 sm:mr-2 sm:h-7 sm:w-7"
                       aria-label={`Unlink ${project.id}`}
                       title="Unlink project"
                     >
@@ -254,7 +270,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
       {confirmUnlinkProject && typeof document !== "undefined"
         ? createPortal(
           <div
-            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
+            className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[140] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center`}
             onClick={() => {
               if (unlinkingId) return;
               setConfirmUnlinkProjectId(null);
@@ -262,7 +278,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
             }}
           >
             <div
-              className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]"
+              className={`surface-card flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-md flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]`}
               onClick={(event) => event.stopPropagation()}
               role="dialog"
               aria-modal="true"
@@ -277,7 +293,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                 </p>
               </div>
 
-              <div className="space-y-3 px-4 py-4">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
                 <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
                   This only removes the project from Conductor. Repository files on disk are not deleted.
                 </p>
@@ -298,6 +314,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                     setUnlinkError(null);
                   }}
                   disabled={unlinkingId !== null}
+                  className="oc-mobile-touch-target"
                 >
                   Cancel
                 </Button>
@@ -306,6 +323,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                   variant="danger"
                   onClick={() => void handleConfirmUnlink()}
                   disabled={unlinkingId !== null}
+                  className="oc-mobile-touch-target"
                 >
                   {unlinkingId === confirmUnlinkProject.id ? "Unlinking..." : "Unlink Project"}
                 </Button>

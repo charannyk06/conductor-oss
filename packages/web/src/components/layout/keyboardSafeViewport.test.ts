@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  APP_SHELL_DOCUMENT_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
@@ -15,6 +16,7 @@ import {
   resolveKeyboardSafeViewportHeight,
   resolveKeyboardSafeViewportMetrics,
   resolveStableLayoutViewportHeight,
+  shouldResetStableLayoutViewportHeight,
 } from "./keyboardSafeViewport";
 
 test("stable layout height survives keyboard-driven innerHeight shrinkage", () => {
@@ -25,6 +27,18 @@ test("stable layout height survives keyboard-driven innerHeight shrinkage", () =
     resolveStableLayoutViewportHeight(844, 600, 600, Number.NaN, Number.NaN),
     600,
   );
+});
+
+test("stable layout height follows a normal visual viewport contraction", () => {
+  assert.equal(resolveStableLayoutViewportHeight(844, 600, 600, 600, 0), 600);
+  assert.equal(resolveStableLayoutViewportHeight(844, 390, 390, 390, 0), 390);
+});
+
+test("layout width changes reset a keyboard-panned stable viewport", () => {
+  assert.equal(shouldResetStableLayoutViewportHeight(390, 844), true);
+  assert.equal(shouldResetStableLayoutViewportHeight(390.4, 390.3), false);
+  assert.equal(shouldResetStableLayoutViewportHeight(0, 390), false);
+  assert.equal(shouldResetStableLayoutViewportHeight(Number.NaN, 390), false);
 });
 
 test("keyboard-safe viewport metrics fill through the visual viewport bottom edge", () => {
@@ -91,11 +105,13 @@ test("keyboard-safe viewport css helpers expose literal Tailwind-detectable cont
   );
 });
 
-test("AppShell writes and cleans up every shared keyboard-safe viewport css variable", () => {
-  const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+test("viewport metrics provider writes and cleans up every shared keyboard-safe viewport css variable", () => {
+  const source = readFileSync(new URL("./KeyboardSafeViewportMetricsProvider.tsx", import.meta.url), "utf8");
 
   assert.match(source, /resolveStableLayoutViewportHeight/);
+  assert.match(source, /shouldResetStableLayoutViewportHeight/);
   assert.match(source, /resolveKeyboardSafeViewportMetrics/);
+  assert.match(source, /lockDocumentScrolling/);
   for (const cssVarName of [
     "KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR",
     "KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR",
@@ -104,6 +120,28 @@ test("AppShell writes and cleans up every shared keyboard-safe viewport css vari
     assert.match(source, new RegExp(`setProperty\\(\\s*${cssVarName}`));
     assert.match(source, new RegExp(`removeProperty\\(${cssVarName}\\)`));
   }
+});
+
+test("AppShell and PublicPageShell both reuse the shared viewport metrics provider", () => {
+  const appShellSource = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const publicShellSource = readFileSync(new URL("../public/PublicPageShell.tsx", import.meta.url), "utf8");
+
+  assert.match(appShellSource, /KeyboardSafeViewportMetricsProvider/);
+  assert.match(appShellSource, /lockDocumentScrolling/);
+  assert.match(publicShellSource, /KeyboardSafeViewportMetricsProvider/);
+  assert.match(publicShellSource, /KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE/);
+  assert.match(publicShellSource, /style=\{\{ height: KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE \}\}/);
+  assert.doesNotMatch(publicShellSource, /className="h-\[100dvh\]/);
+});
+
+test("app shell locks only dashboard document scrolling and opts into safe-area viewport coverage", () => {
+  const globalStyles = readFileSync(new URL("../../app/globals.css", import.meta.url), "utf8");
+  const layoutSource = readFileSync(new URL("../../app/layout.tsx", import.meta.url), "utf8");
+
+  assert.equal(APP_SHELL_DOCUMENT_CLASS_NAME, "conductor-app-shell-active");
+  assert.match(globalStyles, /html\.conductor-app-shell-active body/);
+  assert.match(globalStyles, /overflow-y:\s*hidden/);
+  assert.match(layoutSource, /viewportFit:\s*"cover"/);
 });
 
 test("dashboard dialogs use shared keyboard-safe frames for mobile forms", () => {

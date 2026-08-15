@@ -197,22 +197,64 @@ a:hover {
   animation: pulse-ring 1.8s ease-out infinite;
 }
 
-/* Mobile responsiveness: prevent iOS auto-zoom on input focus */
-@media (max-width: 767px) {
-  input,
-  textarea,
-  select {
-    font-size: 16px !important;
-  }
-}
-
 /* Mobile responsiveness: touch-friendly scrolling */
 @media (pointer: coarse) {
   .overflow-x-auto,
   .overflow-y-auto,
   .overflow-auto {
     -webkit-overflow-scrolling: touch;
+  }
+
+  .overflow-x-auto {
+    overscroll-behavior-x: contain;
+  }
+
+  .overflow-y-auto {
+    overscroll-behavior-y: contain;
+  }
+
+  .overflow-auto {
     overscroll-behavior: contain;
+  }
+}
+
+/* Mobile overlays: reliable taps and scrollable, viewport-contained menus. */
+@media (max-width: 767px), (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  button[aria-haspopup="menu"],
+  button[aria-haspopup="listbox"],
+  .oc-mobile-touch-target {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .oc-mobile-menu-content [role="menuitem"],
+  .oc-mobile-menu-content [role="menuitemcheckbox"],
+  .oc-mobile-menu-content [role="menuitemradio"],
+  .oc-mobile-menu-content button,
+  .oc-mobile-menu-content a {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  [role="dialog"] button,
+  [role="dialog"] [role="button"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  [role="dialog"] input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+  [role="dialog"] textarea {
+    min-height: 44px;
+  }
+
+  select {
+    min-height: 44px;
   }
 }
 
@@ -220,6 +262,16 @@ a:hover {
 html,
 body {
   overflow-x: hidden;
+}
+
+/* The dashboard uses explicit inner scroll owners. Keep the document itself
+   passive so iOS Safari cannot hand a boundary swipe to the body and leave the
+   visible workspace stuck between two scroll positions. Public/auth pages do
+   not mount AppShell and retain normal document scrolling. */
+html.conductor-app-shell-active,
+html.conductor-app-shell-active body {
+  height: 100%;
+  overflow-y: hidden;
 }
 
 .conductor-auth-form .cl-formButtonPrimary {

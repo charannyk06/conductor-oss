@@ -28,7 +28,7 @@ export const TabsTrigger = forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex min-h-[34px] shrink-0 items-center gap-1.5 rounded-[3px] px-2.5 py-1.5 text-[12px] text-[var(--vk-text-muted)]",
+      "oc-mobile-touch-target inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-[3px] px-2.5 py-1.5 text-[12px] text-[var(--vk-text-muted)] sm:min-h-[34px]",
       "data-[state=active]:bg-[var(--vk-bg-active)] data-[state=active]:text-[var(--vk-text-normal)]",
       "hover:text-[var(--vk-text-normal)]",
       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]",

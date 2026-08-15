@@ -10,6 +10,11 @@ import {
 } from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherSessionPane } from "@/components/dispatcher/DispatcherSessionPane";
 import { Button } from "@/components/ui/Button";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
+import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 import {
   buildModelSelection,
   resolveModelSelectionValue,
@@ -118,14 +123,14 @@ function DeleteDispatcherThreadDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
+      className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[140] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center`}
       onClick={() => {
         if (deleting) return;
         onCancel();
       }}
     >
       <div
-        className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]"
+        className={`surface-card flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-md flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]`}
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -143,7 +148,7 @@ function DeleteDispatcherThreadDialog({
           </p>
         </div>
 
-        <div className="space-y-3 px-4 py-4">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
           <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
             This removes the dispatcher conversation and its saved thread state. Repository files on disk are not changed.
           </p>
@@ -165,10 +170,10 @@ function DeleteDispatcherThreadDialog({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={deleting}>
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={deleting} className="oc-mobile-touch-target">
             Cancel
           </Button>
-          <Button type="button" variant="danger" onClick={() => void onConfirm()} disabled={deleting}>
+          <Button type="button" variant="danger" onClick={() => void onConfirm()} disabled={deleting} className="oc-mobile-touch-target">
             {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             Delete Thread
           </Button>
@@ -546,17 +551,14 @@ export function DispatcherPane({
               <ListTodo className="h-3.5 w-3.5" />
             </button>
           </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="end"
-              collisionPadding={8}
-              sideOffset={8}
-              className="z-50 w-[calc(100vw-1rem)] max-w-[26rem] overflow-hidden rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
-            >
+          <MobileDropdownMenuContent
+            align="end"
+            className="w-[calc(100vw-1rem)] max-w-[26rem] rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
+          >
               <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
                 Threads
               </div>
-              <div className="max-h-[70vh] space-y-1 overflow-y-auto pr-1">
+              <div className="space-y-1 pr-1">
                 {threads.map((candidate) => {
                   const selected = candidate.id === thread.id;
                   const deleting = deletingThreadId === candidate.id;
@@ -611,8 +613,7 @@ export function DispatcherPane({
                   );
                 })}
               </div>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
+          </MobileDropdownMenuContent>
         </DropdownMenu.Root>
       ) : null}
       {onStartNewConversation ? (

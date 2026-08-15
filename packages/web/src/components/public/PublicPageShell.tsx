@@ -2,6 +2,8 @@
 
 import Image from "next/image";
 import type { ReactNode } from "react";
+import { KeyboardSafeViewportMetricsProvider } from "@/components/layout/KeyboardSafeViewportMetricsProvider";
+import { KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE } from "@/components/layout/keyboardSafeViewport";
 import { cn } from "@/lib/cn";
 
 type PublicPageShellProps = {
@@ -11,29 +13,34 @@ type PublicPageShellProps = {
 
 export function PublicPageShell({ children, className }: PublicPageShellProps) {
   return (
-    <main className="h-[100dvh] overflow-x-hidden overflow-y-auto bg-[var(--bg-canvas)] text-[var(--text-strong)]">
-      <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10">
-        <header className="flex items-center gap-3 border-b border-[var(--border-soft)] pb-6">
-          <img
-            src="/icon.svg"
-            alt="Conductor icon"
-            width={40}
-            height={40}
-            className="h-10 w-10 rounded-[10px] border border-[var(--border-soft)] bg-[var(--bg-panel)] p-1.5"
-          />
-          <Image
-            src="/brand/conductor-wordmark-dark.png"
-            alt="Conductor"
-            width={320}
-            height={62}
-            priority
-            className="h-auto w-[168px] sm:w-[220px]"
-          />
-        </header>
+    <KeyboardSafeViewportMetricsProvider>
+      <main
+        className="overflow-x-hidden overflow-y-auto bg-[var(--bg-canvas)] text-[var(--text-strong)]"
+        style={{ height: KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE }}
+      >
+        <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10">
+          <header className="flex items-center gap-3 border-b border-[var(--border-soft)] pb-6">
+            <img
+              src="/icon.svg"
+              alt="Conductor icon"
+              width={40}
+              height={40}
+              className="h-10 w-10 rounded-[10px] border border-[var(--border-soft)] bg-[var(--bg-panel)] p-1.5"
+            />
+            <Image
+              src="/brand/conductor-wordmark-dark.png"
+              alt="Conductor"
+              width={320}
+              height={62}
+              priority
+              className="h-auto w-[168px] sm:w-[220px]"
+            />
+          </header>
 
-        <div className={cn("flex-1 py-10 sm:py-12", className)}>{children}</div>
-      </div>
-    </main>
+          <div className={cn("flex-1 py-10 sm:py-12", className)}>{children}</div>
+        </div>
+      </main>
+    </KeyboardSafeViewportMetricsProvider>
   );
 }
 
