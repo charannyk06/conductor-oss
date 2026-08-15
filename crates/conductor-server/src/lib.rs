@@ -253,7 +253,10 @@ async fn finish_graceful_shutdown(
     if let Err(error) = gc_handle.await {
         tracing::warn!(error = %error, "session GC task panicked during shutdown");
     }
-    if let Err(error) = state.flush_pending_dispatcher_snapshots().await {
+    if let Err(error) = state
+        .flush_pending_dispatcher_snapshots_for_shutdown()
+        .await
+    {
         tracing::warn!(
             error = %error,
             "failed to flush pending dispatcher snapshots during shutdown"

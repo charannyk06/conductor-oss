@@ -117,6 +117,8 @@ struct FeedPayloadCacheEntry {
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
 const SESSION_FLUSH_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(125);
 const DISPATCHER_FLUSH_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(125);
+const DISPATCHER_SHUTDOWN_FLUSH_ROUND_BUDGET: usize = 8;
+const DISPATCHER_SHUTDOWN_FLUSH_TIME_BUDGET: Duration = Duration::from_secs(2);
 const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 64 * 1024;
@@ -732,6 +734,7 @@ impl AppState {
         ))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn flush_pending_dispatcher_snapshots(&self) -> Result<()> {
         let mut retries_remaining = 2usize;
 
@@ -750,6 +753,91 @@ impl AppState {
                 }
             }
         }
+    }
+
+    pub(crate) async fn flush_pending_dispatcher_snapshots_for_shutdown(&self) -> Result<()> {
+        self.flush_pending_dispatcher_snapshots_bounded(
+            DISPATCHER_SHUTDOWN_FLUSH_ROUND_BUDGET,
+            DISPATCHER_SHUTDOWN_FLUSH_TIME_BUDGET,
+        )
+        .await
+    }
+
+    pub(crate) async fn flush_pending_dispatcher_snapshots_bounded(
+        &self,
+        round_budget: usize,
+        time_budget: Duration,
+    ) -> Result<()> {
+        let round_budget = round_budget.max(1);
+        let deadline = Instant::now() + time_budget.max(Duration::from_millis(1));
+        let mut retries_remaining = 2usize;
+        let mut rounds = 0usize;
+        let mut exhausted_budget = false;
+
+        while rounds < round_budget && Instant::now() < deadline {
+            rounds += 1;
+
+            match self.flush_pending_dispatcher_snapshots_once().await {
+                Ok(0) => return Ok(()),
+                Ok(_) => {
+                    retries_remaining = 2;
+                }
+                Err(err) => {
+                    if retries_remaining == 0 {
+                        tracing::warn!(
+                            rounds,
+                            round_budget,
+                            error = %err,
+                            "dispatcher shutdown flush exhausted retry budget before queues settled"
+                        );
+                        break;
+                    }
+                    retries_remaining -= 1;
+                    tracing::debug!(
+                        rounds,
+                        round_budget,
+                        retries_remaining,
+                        error = %err,
+                        "dispatcher shutdown flush will retry queued snapshot persistence"
+                    );
+                }
+            }
+
+            if rounds >= round_budget || Instant::now() >= deadline {
+                exhausted_budget = true;
+                break;
+            }
+
+            tokio::task::yield_now().await;
+        }
+
+        rounds += 1;
+        let final_result = self.flush_pending_dispatcher_snapshots_once().await;
+        let pending_after_final = self.pending_dispatcher_flushes.lock().await.len();
+
+        match final_result {
+            Ok(0) if pending_after_final == 0 => Ok(()),
+            Ok(_) if pending_after_final == 0 => Ok(()),
+            Ok(_) => Err(anyhow!(
+                "Dispatcher shutdown flush stopped after {rounds} round(s) across a {time_budget:?} budget; {pending_after_final} queued snapshot(s) remain pending"
+            )),
+            Err(err) => Err(anyhow!(
+                "Dispatcher shutdown flush stopped after {rounds} round(s) across a {time_budget:?} budget; {pending_after_final} queued snapshot(s) remain pending after final best-effort flush: {err}"
+            )),
+        }
+        .map_err(|err| {
+            if exhausted_budget || pending_after_final > 0 {
+                tracing::warn!(
+                    rounds,
+                    round_budget,
+                    time_budget_ms = time_budget.as_millis(),
+                    pending_after_final,
+                    error = %err,
+                    "dispatcher shutdown flush exited before queued snapshots fully settled"
+                );
+            }
+            err
+        })
     }
 
     pub(crate) async fn queue_hot_path_session_update(

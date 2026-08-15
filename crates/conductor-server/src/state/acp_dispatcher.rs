@@ -4323,6 +4323,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::process::Command;
@@ -4941,6 +4942,117 @@ mod tests {
             .lock()
             .await
             .contains(&thread.id));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shutdown_dispatcher_flush_stays_bounded_while_runtime_keeps_requeueing() {
+        let (root, state) = build_test_state("dispatcher-flush-shutdown-bounded").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let snapshot_path = state.dispatcher_snapshot_path(&thread.id);
+
+        {
+            let mut threads = state.dispatcher_threads.write().await;
+            let current = threads.get_mut(&thread.id).expect("dispatcher state");
+            current.summary = Some("pre-shutdown snapshot".to_string());
+        }
+        state.queue_dispatcher_flush(&thread.id).await;
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("baseline snapshot should persist");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let iterations = Arc::new(AtomicUsize::new(0));
+        let producer_state = Arc::clone(&state);
+        let producer_thread_id = thread.id.clone();
+        let producer_stop = Arc::clone(&stop);
+        let producer_iterations = Arc::clone(&iterations);
+        let producer = tokio::spawn(async move {
+            while !producer_stop.load(Ordering::Relaxed) {
+                let next = producer_iterations.fetch_add(1, Ordering::Relaxed) + 1;
+                {
+                    let mut threads = producer_state.dispatcher_threads.write().await;
+                    let current = threads
+                        .get_mut(&producer_thread_id)
+                        .expect("dispatcher state should stay live");
+                    current.summary = Some(format!("shutdown update {next}"));
+                }
+                producer_state
+                    .queue_dispatcher_flush(&producer_thread_id)
+                    .await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        timeout(Duration::from_millis(250), async {
+            loop {
+                if iterations.load(Ordering::Relaxed) >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("producer should requeue a few shutdown updates");
+
+        let write_guard = state.dispatcher_snapshot_guard(&thread.id).await;
+        let held_write = write_guard.lock().await;
+        let iterations_before_flush = iterations.load(Ordering::Relaxed);
+        let shutdown_state = Arc::clone(&state);
+        let shutdown_flush = tokio::spawn(async move {
+            shutdown_state
+                .flush_pending_dispatcher_snapshots_bounded(4, Duration::from_millis(80))
+                .await
+        });
+
+        timeout(Duration::from_millis(250), async {
+            loop {
+                if iterations.load(Ordering::Relaxed) >= iterations_before_flush + 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("producer should keep requeueing while shutdown drain is in flight");
+        drop(held_write);
+
+        let shutdown_flush_result = timeout(Duration::from_millis(500), shutdown_flush)
+            .await
+            .expect("bounded shutdown flush should return instead of hanging")
+            .expect("shutdown flush task should complete");
+        if let Err(err) = shutdown_flush_result {
+            assert!(
+                err.to_string()
+                    .contains("Dispatcher shutdown flush stopped after"),
+                "expected a bounded shutdown flush status, got {err:?}"
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        producer.await.expect("producer task should stop cleanly");
+
+        let persisted = read_json::<SessionRecord>(&snapshot_path)
+            .await
+            .expect("shutdown flush should leave behind the latest available snapshot");
+        let persisted_summary = persisted
+            .summary
+            .expect("persisted dispatcher snapshot should include a summary");
+        assert_ne!(persisted_summary, "pre-shutdown snapshot");
+        assert!(
+            persisted_summary.starts_with("shutdown update "),
+            "expected a best-effort shutdown update, got {persisted_summary:?}"
+        );
+
+        state
+            .flush_pending_dispatcher_snapshots()
+            .await
+            .expect("final explicit flush should settle once the producer stops");
 
         let _ = fs::remove_dir_all(root);
     }
