@@ -324,7 +324,7 @@ export function Sidebar({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {showHeader && (
-        <div className="flex h-[33px] items-center gap-1 px-2">
+        <div className="flex h-11 items-center gap-1 px-2 sm:h-[33px]">
           <p className="text-[16px] text-[var(--vk-text-normal)]">Workspaces</p>
           {onCreateWorkspace && (
             <button

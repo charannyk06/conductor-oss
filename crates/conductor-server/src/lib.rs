@@ -30,6 +30,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_TERMINAL_SESSION_SECRET";
+const SERVER_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShutdownSignalKind {
@@ -197,15 +198,23 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
     });
 
     // Graceful shutdown: Ctrl-C and Unix SIGTERM trigger GC stop + server drain.
-    let server = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    );
+    let server_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let server_shutdown_wait = server_shutdown.clone();
+    let mut server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            server_shutdown_wait.notified().await;
+        })
+        .await
+    });
 
     tokio::select! {
-        result = server => {
+        result = &mut server => {
             finish_graceful_shutdown(&shutdown_state, &gc_cancel, gc_handle).await;
-            result.map_err(Into::into)
+            flatten_server_result(result)
         }
         shutdown = shutdown_signal() => {
             match shutdown {
@@ -215,8 +224,10 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
                     "failed to install shutdown signal handler; proceeding with graceful shutdown"
                 ),
             }
+            server_shutdown.notify_one();
+            let server_result = await_graceful_server_shutdown(&mut server).await;
             finish_graceful_shutdown(&shutdown_state, &gc_cancel, gc_handle).await;
-            Ok(())
+            server_result
         }
     }
 }
@@ -231,10 +242,20 @@ async fn shutdown_signal() -> std::io::Result<ShutdownSignalKind> {
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut terminate = signal(SignalKind::terminate())?;
-        tokio::select! {
-            result = ctrl_c => result,
-            _ = terminate.recv() => Ok(ShutdownSignalKind::Sigterm),
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    result = ctrl_c => result,
+                    _ = terminate.recv() => Ok(ShutdownSignalKind::Sigterm),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to install SIGTERM handler; falling back to Ctrl-C only"
+                );
+                ctrl_c.await
+            }
         }
     }
 
@@ -262,6 +283,29 @@ async fn finish_graceful_shutdown(
             "failed to flush pending dispatcher snapshots during shutdown"
         );
     }
+}
+
+async fn await_graceful_server_shutdown(
+    server: &mut tokio::task::JoinHandle<std::io::Result<()>>,
+) -> Result<()> {
+    match tokio::time::timeout(SERVER_GRACEFUL_SHUTDOWN_TIMEOUT, &mut *server).await {
+        Ok(result) => flatten_server_result(result),
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = SERVER_GRACEFUL_SHUTDOWN_TIMEOUT.as_millis(),
+                "graceful shutdown exceeded deadline; forcing server stop"
+            );
+            server.abort();
+            let _ = server.await;
+            Ok(())
+        }
+    }
+}
+
+fn flatten_server_result(
+    result: std::result::Result<std::io::Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    Ok(result??)
 }
 
 fn ensure_terminal_token_secret(workspace_path: &Path) -> Result<()> {
@@ -372,7 +416,10 @@ fn harden_terminal_secret_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_terminal_token_secret, ShutdownSignalKind, TERMINAL_TOKEN_SECRET_ENV};
+    use super::{
+        ensure_terminal_token_secret, shutdown_signal, ShutdownSignalKind,
+        TERMINAL_TOKEN_SECRET_ENV,
+    };
     use std::fs;
 
     struct TerminalSecretEnvScope {
@@ -467,10 +514,25 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn shutdown_signal_source_listens_for_sigterm_on_unix() {
-        let source = include_str!("lib.rs");
-        assert!(source.contains("SignalKind::terminate()"));
-        assert!(source.contains("shutdown_signal()"));
+    #[tokio::test]
+    async fn shutdown_signal_returns_sigterm_on_unix() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        let shutdown = tokio::spawn(async { shutdown_signal().await });
+        tokio::task::yield_now().await;
+
+        // SAFETY: The test installs the process SIGTERM handler via `shutdown_signal`
+        // before raising SIGTERM to the current process.
+        let signal_result = unsafe { libc::raise(libc::SIGTERM) };
+        assert_eq!(
+            signal_result, 0,
+            "SIGTERM should be delivered to the test process"
+        );
+
+        let kind = tokio::time::timeout(std::time::Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown signal future should resolve")
+            .expect("shutdown signal task should complete")
+            .expect("shutdown signal should resolve successfully");
+        assert_eq!(kind, ShutdownSignalKind::Sigterm);
     }
 }

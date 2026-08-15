@@ -105,14 +105,13 @@ test("keyboard-safe viewport css helpers expose literal Tailwind-detectable cont
   );
 });
 
-test("AppShell writes and cleans up every shared keyboard-safe viewport css variable", () => {
-  const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+test("viewport metrics provider writes and cleans up every shared keyboard-safe viewport css variable", () => {
+  const source = readFileSync(new URL("./KeyboardSafeViewportMetricsProvider.tsx", import.meta.url), "utf8");
 
   assert.match(source, /resolveStableLayoutViewportHeight/);
   assert.match(source, /shouldResetStableLayoutViewportHeight/);
   assert.match(source, /resolveKeyboardSafeViewportMetrics/);
-  assert.match(source, /classList\.add\(APP_SHELL_DOCUMENT_CLASS_NAME\)/);
-  assert.match(source, /classList\.remove\(APP_SHELL_DOCUMENT_CLASS_NAME\)/);
+  assert.match(source, /lockDocumentScrolling/);
   for (const cssVarName of [
     "KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR",
     "KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR",
@@ -121,6 +120,18 @@ test("AppShell writes and cleans up every shared keyboard-safe viewport css vari
     assert.match(source, new RegExp(`setProperty\\(\\s*${cssVarName}`));
     assert.match(source, new RegExp(`removeProperty\\(${cssVarName}\\)`));
   }
+});
+
+test("AppShell and PublicPageShell both reuse the shared viewport metrics provider", () => {
+  const appShellSource = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const publicShellSource = readFileSync(new URL("../public/PublicPageShell.tsx", import.meta.url), "utf8");
+
+  assert.match(appShellSource, /KeyboardSafeViewportMetricsProvider/);
+  assert.match(appShellSource, /lockDocumentScrolling/);
+  assert.match(publicShellSource, /KeyboardSafeViewportMetricsProvider/);
+  assert.match(publicShellSource, /KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE/);
+  assert.match(publicShellSource, /style=\{\{ height: KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE \}\}/);
+  assert.doesNotMatch(publicShellSource, /className="h-\[100dvh\]/);
 });
 
 test("app shell locks only dashboard document scrolling and opts into safe-area viewport coverage", () => {

@@ -4,15 +4,9 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { AppUpdateNotice } from "@/components/layout/AppUpdateNotice";
+import { KeyboardSafeViewportMetricsProvider } from "@/components/layout/KeyboardSafeViewportMetricsProvider";
 import {
-  APP_SHELL_DOCUMENT_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
-  KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR,
-  KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR,
-  KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR,
-  resolveKeyboardSafeViewportMetrics,
-  resolveStableLayoutViewportHeight,
-  shouldResetStableLayoutViewportHeight,
 } from "@/components/layout/keyboardSafeViewport";
 
 interface AppShellProps {
@@ -82,145 +76,86 @@ export function AppShell({
     };
   }, [resizing, sidebarWidth]);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    const initialVisualViewport = window.visualViewport;
-    const getLayoutViewportWidth = () => Math.max(0, window.innerWidth, root.clientWidth);
-    let stableLayoutViewportWidth = getLayoutViewportWidth();
-    let stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
-      0,
-      window.innerHeight,
-      root.clientHeight,
-      initialVisualViewport?.height ?? Number.NaN,
-      initialVisualViewport?.offsetTop ?? Number.NaN,
-    );
-
-    const syncViewportMetrics = () => {
-      const visualViewport = window.visualViewport;
-      const layoutViewportWidth = getLayoutViewportWidth();
-      if (shouldResetStableLayoutViewportHeight(stableLayoutViewportWidth, layoutViewportWidth)) {
-        stableLayoutViewportHeight = 0;
-      }
-      stableLayoutViewportWidth = layoutViewportWidth;
-      stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
-        stableLayoutViewportHeight,
-        window.innerHeight,
-        root.clientHeight,
-        visualViewport?.height ?? Number.NaN,
-        visualViewport?.offsetTop ?? Number.NaN,
-      );
-      const viewportMetrics = resolveKeyboardSafeViewportMetrics(
-        stableLayoutViewportHeight,
-        visualViewport?.height ?? Number.NaN,
-        visualViewport?.offsetTop ?? Number.NaN,
-      );
-      root.style.setProperty(KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR, `${viewportMetrics.bottom}px`);
-      root.style.setProperty(
-        KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR,
-        `${viewportMetrics.visibleHeight}px`,
-      );
-      root.style.setProperty(
-        KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR,
-        `${viewportMetrics.offsetTop}px`,
-      );
-    };
-
-    root.classList.add(APP_SHELL_DOCUMENT_CLASS_NAME);
-    syncViewportMetrics();
-    const visualViewport = window.visualViewport;
-    visualViewport?.addEventListener("resize", syncViewportMetrics);
-    visualViewport?.addEventListener("scroll", syncViewportMetrics);
-    window.addEventListener("resize", syncViewportMetrics);
-
-    return () => {
-      visualViewport?.removeEventListener("resize", syncViewportMetrics);
-      visualViewport?.removeEventListener("scroll", syncViewportMetrics);
-      window.removeEventListener("resize", syncViewportMetrics);
-      root.classList.remove(APP_SHELL_DOCUMENT_CLASS_NAME);
-      root.style.removeProperty(KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR);
-      root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR);
-      root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR);
-    };
-  }, []);
-
   const shellStyle = {
     "--workspace-sidebar-width": `${sidebarWidth}px`,
     "--oc-shell-height": KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
   } as CSSProperties;
 
   return (
-    <div
-      style={shellStyle}
-      className="relative flex h-[var(--oc-shell-height)] min-h-[var(--oc-shell-height)] max-h-[var(--oc-shell-height)] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
-    >
-      {mobileSidebarOpen && (
-        <button
-          type="button"
-          className="absolute inset-0 z-20 bg-black/45 lg:hidden"
-          onClick={onToggleSidebar}
-          aria-label="Close workspace panel"
-        />
-      )}
-
-      <aside
-        className={cn(
-          "absolute inset-y-0 left-0 z-30 flex h-full w-full max-w-none flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-[transform,width] duration-200 sm:w-[min(90vw,var(--workspace-sidebar-width))] sm:max-w-[28rem]",
-          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full",
-          desktopSidebarOpen
-            ? "lg:w-[var(--workspace-sidebar-width)]"
-            : "lg:w-0 lg:overflow-hidden lg:border-r-0",
-          "lg:relative lg:left-auto lg:translate-x-0",
-        )}
+    <KeyboardSafeViewportMetricsProvider lockDocumentScrolling>
+      <div
+        style={shellStyle}
+        className="relative flex h-[var(--oc-shell-height)] min-h-[var(--oc-shell-height)] max-h-[var(--oc-shell-height)] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
       >
-        {sidebar}
-      </aside>
+        {mobileSidebarOpen && (
+          <button
+            type="button"
+            className="absolute inset-0 z-20 bg-black/45 lg:hidden"
+            onClick={onToggleSidebar}
+            aria-label="Close workspace panel"
+          />
+        )}
 
-      {desktopSidebarOpen ? (
-        <div
-          className="absolute bottom-0 left-[var(--workspace-sidebar-width)] top-0 z-30 hidden w-2 -translate-x-1/2 cursor-col-resize lg:block"
-          onMouseDown={() => setResizing(true)}
-          aria-hidden="true"
+        <aside
+          className={cn(
+            "absolute inset-y-0 left-0 z-30 flex h-full w-full max-w-none flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-[transform,width] duration-200 sm:w-[min(90vw,var(--workspace-sidebar-width))] sm:max-w-[28rem]",
+            mobileSidebarOpen ? "translate-x-0" : "-translate-x-full",
+            desktopSidebarOpen
+              ? "lg:w-[var(--workspace-sidebar-width)]"
+              : "lg:w-0 lg:overflow-hidden lg:border-r-0",
+            "lg:relative lg:left-auto lg:translate-x-0",
+          )}
         >
-          <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
-        </div>
-      ) : null}
+          {sidebar}
+        </aside>
 
-      {desktopSidebarOpen && (
-        <button
-          type="button"
-          onClick={onToggleSidebar}
-          className="absolute left-[var(--workspace-sidebar-width)] top-2 z-40 hidden h-7 w-7 -translate-x-1/2 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_0_0_1px_rgba(0,0,0,0.25)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
-          aria-label="Hide workspace panel"
-        >
-          <PanelRightClose className="h-5 w-5" />
-        </button>
-      )}
+        {desktopSidebarOpen ? (
+          <div
+            className="absolute bottom-0 left-[var(--workspace-sidebar-width)] top-0 z-30 hidden w-2 -translate-x-1/2 cursor-col-resize lg:block"
+            onMouseDown={() => setResizing(true)}
+            aria-hidden="true"
+          >
+            <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
+          </div>
+        ) : null}
 
-      <main className="relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-        {!mobileSidebarOpen && !hideMobileSidebarToggle && (
+        {desktopSidebarOpen && (
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="oc-mobile-touch-target absolute left-2 top-2 z-40 inline-flex h-11 w-11 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
-            aria-label="Open workspace panel"
+            className="absolute left-[var(--workspace-sidebar-width)] top-2 z-40 hidden h-7 w-7 -translate-x-1/2 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_0_0_1px_rgba(0,0,0,0.25)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
+            aria-label="Hide workspace panel"
           >
-            <PanelLeftOpen className="h-5 w-5" />
+            <PanelRightClose className="h-5 w-5" />
           </button>
         )}
-        {!desktopSidebarOpen && (
-          <button
-            type="button"
-            onClick={onToggleSidebar}
-            className="absolute left-2 top-2 z-40 hidden h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
-            aria-label="Open workspace panel"
-          >
-            <PanelLeftOpen className="h-5 w-5" />
-          </button>
-        )}
-        {children}
-      </main>
 
-      <AppUpdateNotice />
-    </div>
+        <main className="relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+          {!mobileSidebarOpen && !hideMobileSidebarToggle && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="oc-mobile-touch-target absolute left-2 top-2 z-40 inline-flex h-11 w-11 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
+              aria-label="Open workspace panel"
+            >
+              <PanelLeftOpen className="h-5 w-5" />
+            </button>
+          )}
+          {!desktopSidebarOpen && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="absolute left-2 top-2 z-40 hidden h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
+              aria-label="Open workspace panel"
+            >
+              <PanelLeftOpen className="h-5 w-5" />
+            </button>
+          )}
+          {children}
+        </main>
+
+        <AppUpdateNotice />
+      </div>
+    </KeyboardSafeViewportMetricsProvider>
   );
 }

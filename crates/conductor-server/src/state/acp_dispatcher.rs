@@ -1873,9 +1873,9 @@ impl AppState {
         self.dispatcher_feed_payload_cache.lock().await.clear();
     }
 
-    pub(crate) async fn persist_dispatcher_thread(&self, thread: &SessionRecord) -> Result<()> {
-        self.persist_current_dispatcher_snapshot(&thread.id).await?;
-        self.invalidate_dispatcher_caches(&thread.id).await;
+    pub(crate) async fn persist_dispatcher_thread(&self, thread_id: &str) -> Result<()> {
+        self.persist_current_dispatcher_snapshot(thread_id).await?;
+        self.invalidate_dispatcher_caches(thread_id).await;
         Ok(())
     }
 
@@ -2129,7 +2129,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.publish_dispatcher_update(thread_id).await;
 
         let state = Arc::clone(self);
@@ -2258,7 +2258,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
@@ -3405,7 +3405,7 @@ impl AppState {
             thread.clone()
         };
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
@@ -3643,7 +3643,7 @@ impl AppState {
             }
         }
         if let Some(updated) = self.get_dispatcher_thread(&thread.id).await {
-            self.persist_dispatcher_thread(&updated).await?;
+            self.persist_dispatcher_thread(&updated.id).await?;
             self.publish_dispatcher_update(&thread.id).await;
         }
 
@@ -3981,11 +3981,11 @@ impl AppState {
 
         let should_sync_memory = should_sync_dispatcher_session_memory(thread, force_memory_sync);
         let memory_snapshot = should_sync_memory.then(|| thread.clone());
+        drop(threads);
         if clear_runtime {
             self.clear_dispatcher_runtime_if(thread_id, runtime_id)
                 .await;
         }
-        drop(threads);
         if feed_dirty {
             self.publish_dispatcher_update(thread_id).await;
         }
@@ -4131,7 +4131,7 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
 
-        self.persist_dispatcher_thread(&updated).await?;
+        self.persist_dispatcher_thread(&updated.id).await?;
         self.publish_dispatcher_update(thread_id).await;
 
         if let Err(err) = self
@@ -4256,7 +4256,7 @@ impl AppState {
                 session.clone()
             };
 
-            if let Err(err) = self.persist_dispatcher_thread(&updated).await {
+            if let Err(err) = self.persist_dispatcher_thread(&updated.id).await {
                 tracing::warn!(session_id = %session_id, error = %err, "failed to persist ACP heartbeat");
                 continue;
             }
@@ -5080,12 +5080,11 @@ mod tests {
         })
         .await
         .expect("producer should keep requeueing while shutdown drain is in flight");
-        drop(held_write);
-
         let shutdown_flush_result = timeout(Duration::from_millis(500), shutdown_flush)
             .await
             .expect("bounded shutdown flush should return instead of hanging")
             .expect("shutdown flush task should complete");
+        drop(held_write);
         if let Err(err) = shutdown_flush_result {
             assert!(
                 err.to_string()
@@ -5103,10 +5102,10 @@ mod tests {
         let persisted_summary = persisted
             .summary
             .expect("persisted dispatcher snapshot should include a summary");
-        assert_ne!(persisted_summary, "pre-shutdown snapshot");
         assert!(
-            persisted_summary.starts_with("shutdown update "),
-            "expected a best-effort shutdown update, got {persisted_summary:?}"
+            persisted_summary == "pre-shutdown snapshot"
+                || persisted_summary.starts_with("shutdown update "),
+            "expected the last durable snapshot to survive the bounded flush timeout, got {persisted_summary:?}"
         );
 
         state

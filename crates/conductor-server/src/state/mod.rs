@@ -736,23 +736,11 @@ impl AppState {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn flush_pending_dispatcher_snapshots(&self) -> Result<()> {
-        let mut retries_remaining = 2usize;
-
-        loop {
-            match self.flush_pending_dispatcher_snapshots_once().await {
-                Ok(0) => return Ok(()),
-                Ok(_) => {
-                    retries_remaining = 2;
-                }
-                Err(err) => {
-                    if retries_remaining == 0 {
-                        return Err(err);
-                    }
-                    retries_remaining -= 1;
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
+        self.flush_pending_dispatcher_snapshots_bounded(
+            DISPATCHER_SHUTDOWN_FLUSH_ROUND_BUDGET,
+            DISPATCHER_SHUTDOWN_FLUSH_TIME_BUDGET,
+        )
+        .await
     }
 
     pub(crate) async fn flush_pending_dispatcher_snapshots_for_shutdown(&self) -> Result<()> {
@@ -774,15 +762,23 @@ impl AppState {
         let mut rounds = 0usize;
         let mut exhausted_budget = false;
 
-        while rounds < round_budget && Instant::now() < deadline {
+        while rounds < round_budget {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                exhausted_budget = true;
+                break;
+            }
+
             rounds += 1;
 
-            match self.flush_pending_dispatcher_snapshots_once().await {
-                Ok(0) => return Ok(()),
-                Ok(_) => {
+            match tokio::time::timeout(remaining, self.flush_pending_dispatcher_snapshots_once())
+                .await
+            {
+                Ok(Ok(0)) => return Ok(()),
+                Ok(Ok(_)) => {
                     retries_remaining = 2;
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     if retries_remaining == 0 {
                         tracing::warn!(
                             rounds,
@@ -801,9 +797,19 @@ impl AppState {
                         "dispatcher shutdown flush will retry queued snapshot persistence"
                     );
                 }
+                Err(_) => {
+                    exhausted_budget = true;
+                    tracing::warn!(
+                        rounds,
+                        round_budget,
+                        time_budget_ms = time_budget.as_millis(),
+                        "dispatcher shutdown flush timed out before queues settled"
+                    );
+                    break;
+                }
             }
 
-            if rounds >= round_budget || Instant::now() >= deadline {
+            if rounds >= round_budget {
                 exhausted_budget = true;
                 break;
             }
@@ -811,8 +817,25 @@ impl AppState {
             tokio::task::yield_now().await;
         }
 
-        rounds += 1;
-        let final_result = self.flush_pending_dispatcher_snapshots_once().await;
+        let final_result = match deadline.saturating_duration_since(Instant::now()) {
+            remaining if remaining.is_zero() => Err(anyhow!(
+                "timed out before a final best-effort flush could start"
+            )),
+            remaining => {
+                rounds += 1;
+                match tokio::time::timeout(
+                    remaining,
+                    self.flush_pending_dispatcher_snapshots_once(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "timed out during the final best-effort flush after waiting {remaining:?}"
+                    )),
+                }
+            }
+        };
         let pending_after_final = self.pending_dispatcher_flushes.lock().await.len();
 
         match final_result {

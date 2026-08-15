@@ -72,6 +72,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
+import { focusVisibleWorkspacePanelOpenerIfNeeded } from "@/features/dashboard/components/dialogFocusRestore";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
@@ -1042,6 +1043,7 @@ export default function DashboardClient({
   const [dispatcherPanelResizing, setDispatcherPanelResizing] = useState(false);
   const launchpadSessionIdRef = useRef<string | null>(null);
   const previousBoardProjectIdRef = useRef<string | null>(selectedProjectId);
+  const previousNewWorkspaceOpenRef = useRef(newWorkspaceOpen);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1064,6 +1066,23 @@ export default function DashboardClient({
       mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
     };
   }, []);
+
+  useEffect(() => {
+    const wasNewWorkspaceOpen = previousNewWorkspaceOpenRef.current;
+    previousNewWorkspaceOpenRef.current = newWorkspaceOpen;
+
+    if (!wasNewWorkspaceOpen || newWorkspaceOpen || typeof window === "undefined") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      focusVisibleWorkspacePanelOpenerIfNeeded();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [newWorkspaceOpen]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2593,7 +2612,6 @@ export default function DashboardClient({
         </div>
       </AppShell>
 
-      {newWorkspaceOpen ? (
       <NewWorkspaceDialog
         open={newWorkspaceOpen}
         onClose={handleCloseNewWorkspaceDialog}
@@ -2606,31 +2624,28 @@ export default function DashboardClient({
         runtimeModelCatalogs={runtimeModelCatalogs}
         bridgeId={effectiveBridgeId}
       />
-      ) : null}
 
-      {preferencesDialogOpen || onboardingRequired ? (
-        <SettingsDialog
-          open={preferencesDialogOpen}
-          mode={onboardingRequired ? "onboarding" : "settings"}
-          creating={preferencesSaving}
-          error={preferencesError}
-          current={resolvedPreferences}
-          projectCount={projects.length}
-          agentOptions={agentOptions}
-          agentStates={agentStatesByName}
-          runtimeModelCatalogs={runtimeModelCatalogs}
-          onRepositoriesChanged={refreshConfig}
-          onOnboardingComplete={({ needsProject }) => {
-            if (needsProject) {
-              setPendingWorkspaceSetup(true);
-            }
-          }}
-          onOpenAgentSetup={openAgentSetup}
-          onClose={handleClosePreferencesDialog}
-          onSave={handleSavePreferences}
-          bridgeId={effectiveBridgeId}
-        />
-      ) : null}
+      <SettingsDialog
+        open={preferencesDialogOpen}
+        mode={onboardingRequired ? "onboarding" : "settings"}
+        creating={preferencesSaving}
+        error={preferencesError}
+        current={resolvedPreferences}
+        projectCount={projects.length}
+        agentOptions={agentOptions}
+        agentStates={agentStatesByName}
+        runtimeModelCatalogs={runtimeModelCatalogs}
+        onRepositoriesChanged={refreshConfig}
+        onOnboardingComplete={({ needsProject }) => {
+          if (needsProject) {
+            setPendingWorkspaceSetup(true);
+          }
+        }}
+        onOpenAgentSetup={openAgentSetup}
+        onClose={handleClosePreferencesDialog}
+        onSave={handleSavePreferences}
+        bridgeId={effectiveBridgeId}
+      />
     </>
   );
 }
