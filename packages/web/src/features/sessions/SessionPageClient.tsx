@@ -212,6 +212,7 @@ export default function SessionPageClient({
           onCreateWorkspace={() => {
             router.push(dashboardRootHref);
           }}
+          onCloseMobile={closeSidebarOnMobile}
         />
       ) : null}
     >

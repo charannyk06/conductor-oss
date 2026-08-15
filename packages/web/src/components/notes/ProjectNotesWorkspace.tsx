@@ -662,14 +662,14 @@ export function ProjectNotesWorkspace({
               value={newNotePath}
               onChange={(e) => setNewNotePath(e.target.value)}
               placeholder="New note path, e.g. architecture/overview.md"
-              className="min-h-[34px] min-w-0 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] sm:min-w-[260px]"
+              className="oc-mobile-touch-target min-h-11 min-w-0 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] sm:min-h-[34px] sm:min-w-[260px]"
               onKeyDown={(e) => { if (e.key === "Enter") void handleCreateNote(); }}
             />
             <button
               type="button"
               onClick={() => void handleCreateNote()}
               disabled={creatingNote || newNotePath.trim().length === 0 || !supportedLocalNotes}
-              className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+              className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60 sm:min-h-[34px]"
             >
               {creatingNote ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookText className="h-3.5 w-3.5" />}
               New note

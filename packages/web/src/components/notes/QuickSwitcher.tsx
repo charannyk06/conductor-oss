@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, FileText } from "lucide-react";
+import {
+  KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
+  KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
+} from "@/components/layout/keyboardSafeViewport";
 import { fuzzyMatch } from "./utils";
 
 interface QuickSwitcherProps {
@@ -95,8 +99,12 @@ export function QuickSwitcher({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50" />
-        <Dialog.Content className="fixed left-1/2 top-[20%] z-50 w-full max-w-lg -translate-x-1/2 rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_20px_48px_rgba(0,0,0,0.3)]">
+        <Dialog.Overlay className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[140] bg-black/50`} />
+        <Dialog.Content className={`fixed inset-x-3 top-[calc(var(--oc-visual-viewport-offset-top,0px)+0.75rem)] z-[141] flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} flex-col overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_20px_48px_rgba(0,0,0,0.3)] sm:left-1/2 sm:right-auto sm:top-[calc(var(--oc-visual-viewport-offset-top,0px)+10vh)] sm:w-[min(32rem,calc(100vw-2rem))] sm:-translate-x-1/2`}>
+          <Dialog.Title className="sr-only">Switch note</Dialog.Title>
+          <Dialog.Description className="sr-only">
+            Search for a note and open it in the notes workspace.
+          </Dialog.Description>
           {/* Search input */}
           <div className="flex items-center gap-3 border-b border-[var(--vk-border)] px-4 py-3">
             <Search className="h-4 w-4 shrink-0 text-[var(--vk-text-muted)]" />
@@ -114,7 +122,7 @@ export function QuickSwitcher({
           </div>
 
           {/* Results */}
-          <div ref={listRef} className="max-h-[320px] overflow-auto py-1">
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1 [-webkit-overflow-scrolling:touch]">
             {results.length === 0 ? (
               <div className="px-4 py-6 text-center text-[13px] text-[var(--vk-text-muted)]">
                 No notes found
@@ -127,7 +135,7 @@ export function QuickSwitcher({
                   data-index={idx}
                   onClick={() => handleSelect(file.path)}
                   onMouseEnter={() => setSelectedIndex(idx)}
-                  className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-[13px] ${
+                  className={`flex min-h-11 w-full touch-manipulation items-center gap-2.5 px-4 py-2 text-left text-[13px] ${
                     idx === selectedIndex
                       ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
                       : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"

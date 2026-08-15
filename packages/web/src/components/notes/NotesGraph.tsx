@@ -466,7 +466,7 @@ export function NotesGraph({
           <button
             type="button"
             onClick={() => setSettingsOpen((current) => !current)}
-            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-2.5 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+            className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-2.5 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:min-h-[32px]"
           >
             <Settings2 className="h-3.5 w-3.5" />
             Settings
@@ -474,7 +474,7 @@ export function NotesGraph({
           <button
             type="button"
             onClick={() => void fetchGraph()}
-            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-2.5 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+            className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-2.5 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:min-h-[32px]"
           >
             <Network className="h-3.5 w-3.5" />
             Refresh
@@ -702,7 +702,7 @@ export function NotesGraph({
                     <button
                       type="button"
                       onClick={() => onNavigate(focusedNode.id)}
-                      className="inline-flex min-h-[32px] items-center gap-1.5 rounded-[8px] border border-[var(--vk-accent)] bg-[rgba(139,92,246,0.16)] px-3 text-[12px] text-[var(--vk-text-strong)] hover:bg-[rgba(139,92,246,0.22)]"
+                      className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[8px] border border-[var(--vk-accent)] bg-[rgba(139,92,246,0.16)] px-3 text-[12px] text-[var(--vk-text-strong)] hover:bg-[rgba(139,92,246,0.22)] sm:min-h-[32px]"
                     >
                       <ArrowUpRight className="h-3.5 w-3.5" />
                       Open note
@@ -713,7 +713,7 @@ export function NotesGraph({
                         setFocusedNodeId(focusedNode.id);
                         setLocalGraphEnabled(true);
                       }}
-                      className="inline-flex min-h-[32px] items-center gap-1.5 rounded-[8px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                      className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[8px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:min-h-[32px]"
                     >
                       <LocateFixed className="h-3.5 w-3.5" />
                       Use as local root
@@ -748,7 +748,7 @@ export function NotesGraph({
               title="Zoom out"
               aria-label="Zoom out"
               onClick={() => zoomAtPoint(transform.k * 0.88)}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55"
+              className="oc-mobile-touch-target inline-flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55 sm:h-9 sm:w-9"
             >
               <ZoomOut className="h-4 w-4" />
             </button>
@@ -757,7 +757,7 @@ export function NotesGraph({
               title="Zoom in"
               aria-label="Zoom in"
               onClick={() => zoomAtPoint(transform.k * 1.12)}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55"
+              className="oc-mobile-touch-target inline-flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55 sm:h-9 sm:w-9"
             >
               <ZoomIn className="h-4 w-4" />
             </button>
@@ -766,7 +766,7 @@ export function NotesGraph({
               title="Fit graph"
               aria-label="Fit graph"
               onClick={() => setTransform(getFittedTransform(layout.nodes, viewport.width, viewport.height))}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55"
+              className="oc-mobile-touch-target inline-flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(148,163,184,0.16)] bg-black/35 text-[var(--vk-text-normal)] hover:bg-black/55 sm:h-9 sm:w-9"
             >
               <LocateFixed className="h-4 w-4" />
             </button>

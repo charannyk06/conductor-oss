@@ -37,4 +37,9 @@ test("mobile update notice collapses into a compact card instead of covering the
   assert.match(source, /compactNotice/);
   assert.match(source, /mobileExpanded/);
   assert.match(source, /Details/);
+  assert.match(source, /oc-mobile-touch-target inline-flex min-h-11 min-w-11/);
+  assert.match(source, /sm:min-h-7 sm:min-w-0 sm:px-2/);
+  assert.match(source, /Dismiss update notice/);
+  assert.match(source, /oc-mobile-touch-target inline-flex h-11 w-11/);
+  assert.match(source, /sm:h-7 sm:w-7/);
 });

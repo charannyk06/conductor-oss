@@ -349,7 +349,7 @@ export function AppUpdateNotice() {
               <button
                 type="button"
                 onClick={() => setMobileExpanded((current) => !current)}
-                className="inline-flex min-h-[28px] items-center rounded-[7px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                className="oc-mobile-touch-target inline-flex min-h-11 min-w-11 items-center justify-center rounded-[7px] border border-[var(--vk-border)] px-3 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:min-h-7 sm:min-w-0 sm:px-2"
               >
                 {showDetailedBody ? "Hide" : "Details"}
               </button>
@@ -357,7 +357,7 @@ export function AppUpdateNotice() {
             <button
               type="button"
               onClick={handleDismiss}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              className="oc-mobile-touch-target inline-flex h-11 w-11 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-7 sm:w-7"
               aria-label="Dismiss update notice"
             >
               <X className="h-4 w-4" />

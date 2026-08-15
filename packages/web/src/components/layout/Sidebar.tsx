@@ -330,7 +330,7 @@ export function Sidebar({
             <button
               type="button"
               onClick={onCreateWorkspace}
-              className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded-[3px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
+              className="oc-mobile-touch-target ml-auto inline-flex h-11 w-11 items-center justify-center rounded-[3px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
               aria-label="New workspace"
             >
               <span className="text-[14px]">+</span>
@@ -341,11 +341,11 @@ export function Sidebar({
 
       <div
         className={cn(
-          "flex h-[38px] items-center px-2 pb-1.5",
+          "flex h-[46px] items-center px-2 pb-1.5 sm:h-[38px]",
           !showHeader && "pt-1.5"
         )}
       >
-        <label className="flex h-[38px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:h-[30px]">
+        <label className="oc-mobile-touch-target flex h-11 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:h-[30px]">
           <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
           <input
             value={search}
@@ -455,7 +455,7 @@ export function Sidebar({
                       onClick={(event) => void handleArchive(event, session.id)}
                       disabled={isArchiving}
                       className={cn(
-                        "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition sm:h-7 sm:w-7",
+                        "oc-mobile-touch-target mt-0.5 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition sm:h-7 sm:w-7",
                         "opacity-70 group-hover:opacity-100 focus-visible:opacity-100",
                         "hover:border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]",
                         isArchiving && "cursor-wait opacity-100"

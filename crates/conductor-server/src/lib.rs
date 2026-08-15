@@ -62,6 +62,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
 
     // Clone for GC before state is moved into the router.
     let gc_state = state.clone();
+    let shutdown_state = state.clone();
 
     let app = Router::new()
         .merge(routes::app_update::router())
@@ -186,20 +187,31 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
 
     tokio::select! {
         result = server => {
-            gc_cancel.notify_one();
-            if let Err(e) = gc_handle.await {
-                tracing::warn!(error = %e, "session GC task panicked during shutdown");
-            }
+            finish_graceful_shutdown(&shutdown_state, &gc_cancel, gc_handle).await;
             result.map_err(Into::into)
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("received shutdown signal");
-            gc_cancel.notify_one();
-            if let Err(e) = gc_handle.await {
-                tracing::warn!(error = %e, "session GC task panicked during shutdown");
-            }
+            finish_graceful_shutdown(&shutdown_state, &gc_cancel, gc_handle).await;
             Ok(())
         }
+    }
+}
+
+async fn finish_graceful_shutdown(
+    state: &AppState,
+    gc_cancel: &std::sync::Arc<tokio::sync::Notify>,
+    gc_handle: tokio::task::JoinHandle<()>,
+) {
+    gc_cancel.notify_one();
+    if let Err(error) = gc_handle.await {
+        tracing::warn!(error = %error, "session GC task panicked during shutdown");
+    }
+    if let Err(error) = state.flush_pending_dispatcher_snapshots().await {
+        tracing::warn!(
+            error = %error,
+            "failed to flush pending dispatcher snapshots during shutdown"
+        );
     }
 }
 

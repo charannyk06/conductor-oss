@@ -1,6 +1,7 @@
 export const KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR = "--oc-safe-viewport-height";
 export const KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR = "--oc-visual-viewport-height";
 export const KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR = "--oc-visual-viewport-offset-top";
+export const APP_SHELL_DOCUMENT_CLASS_NAME = "conductor-app-shell-active";
 
 export const KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE = "var(--oc-safe-viewport-height,100dvh)";
 export const KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VALUE = "var(--oc-visual-viewport-height,100dvh)";
@@ -45,6 +46,16 @@ export function resolveStableLayoutViewportHeight(
   const safeOffsetTop = Number.isFinite(visualViewportOffsetTop)
     ? Math.max(0, visualViewportOffsetTop)
     : 0;
+
+  // With no obscured area above the visual viewport, follow the current
+  // layout size. Retaining the largest height forever makes the app stay
+  // portrait-height after rotation and prevents short-window resizing.
+  // A positive offset still uses the stable maximum below so a panned
+  // keyboard viewport keeps its original layout bottom as the reference.
+  if (safeOffsetTop === 0) {
+    return Math.round(currentLayoutHeight);
+  }
+
   const candidates = [previousHeight, currentLayoutHeight, visualViewportHeight + safeOffsetTop];
 
   return Math.round(
@@ -53,6 +64,22 @@ export function resolveStableLayoutViewportHeight(
       ...candidates.map((value) => (Number.isFinite(value) ? Math.max(0, value) : 0)),
     ),
   );
+}
+
+export function shouldResetStableLayoutViewportHeight(
+  previousLayoutWidth: number,
+  currentLayoutWidth: number,
+): boolean {
+  if (
+    !Number.isFinite(previousLayoutWidth)
+    || !Number.isFinite(currentLayoutWidth)
+    || previousLayoutWidth <= 0
+    || currentLayoutWidth <= 0
+  ) {
+    return false;
+  }
+
+  return Math.round(previousLayoutWidth) !== Math.round(currentLayoutWidth);
 }
 
 export function resolveKeyboardSafeViewportMetrics(

@@ -5,12 +5,14 @@ import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { AppUpdateNotice } from "@/components/layout/AppUpdateNotice";
 import {
+  APP_SHELL_DOCUMENT_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE,
   KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR,
   KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR,
   KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR,
   resolveKeyboardSafeViewportMetrics,
   resolveStableLayoutViewportHeight,
+  shouldResetStableLayoutViewportHeight,
 } from "@/components/layout/keyboardSafeViewport";
 
 interface AppShellProps {
@@ -83,6 +85,8 @@ export function AppShell({
   useEffect(() => {
     const root = document.documentElement;
     const initialVisualViewport = window.visualViewport;
+    const getLayoutViewportWidth = () => Math.max(0, window.innerWidth, root.clientWidth);
+    let stableLayoutViewportWidth = getLayoutViewportWidth();
     let stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
       0,
       window.innerHeight,
@@ -93,6 +97,11 @@ export function AppShell({
 
     const syncViewportMetrics = () => {
       const visualViewport = window.visualViewport;
+      const layoutViewportWidth = getLayoutViewportWidth();
+      if (shouldResetStableLayoutViewportHeight(stableLayoutViewportWidth, layoutViewportWidth)) {
+        stableLayoutViewportHeight = 0;
+      }
+      stableLayoutViewportWidth = layoutViewportWidth;
       stableLayoutViewportHeight = resolveStableLayoutViewportHeight(
         stableLayoutViewportHeight,
         window.innerHeight,
@@ -116,6 +125,7 @@ export function AppShell({
       );
     };
 
+    root.classList.add(APP_SHELL_DOCUMENT_CLASS_NAME);
     syncViewportMetrics();
     const visualViewport = window.visualViewport;
     visualViewport?.addEventListener("resize", syncViewportMetrics);
@@ -126,6 +136,7 @@ export function AppShell({
       visualViewport?.removeEventListener("resize", syncViewportMetrics);
       visualViewport?.removeEventListener("scroll", syncViewportMetrics);
       window.removeEventListener("resize", syncViewportMetrics);
+      root.classList.remove(APP_SHELL_DOCUMENT_CLASS_NAME);
       root.style.removeProperty(KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VAR);
       root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_HEIGHT_CSS_VAR);
       root.style.removeProperty(KEYBOARD_SAFE_VISUAL_VIEWPORT_OFFSET_TOP_CSS_VAR);
@@ -190,7 +201,7 @@ export function AppShell({
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="absolute left-2 top-2 z-40 inline-flex h-11 w-11 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
+            className="oc-mobile-touch-target absolute left-2 top-2 z-40 inline-flex h-11 w-11 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
             aria-label="Open workspace panel"
           >
             <PanelLeftOpen className="h-5 w-5" />

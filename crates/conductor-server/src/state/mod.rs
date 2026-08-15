@@ -57,7 +57,7 @@ pub use types::{
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use board_collaboration::BoardCollaborationStore;
 use chrono::{DateTime, Utc};
 use conductor_core::config::{
@@ -116,6 +116,7 @@ struct FeedPayloadCacheEntry {
 
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
 const SESSION_FLUSH_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(125);
+const DISPATCHER_FLUSH_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(125);
 const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 64 * 1024;
@@ -180,7 +181,7 @@ pub struct AppState {
     pub output_updates: broadcast::Sender<(String, String)>,
     pub feed_updates: broadcast::Sender<String>,
     pub dispatcher_updates: broadcast::Sender<String>,
-    pub pending_dispatcher_updates: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
+    pub pending_dispatcher_updates: Arc<tokio::sync::Mutex<HashSet<String>>>,
     pub app_update_config: AppUpdateConfig,
     app_update: Mutex<app_update::AppUpdateRuntime>,
     pub started_at: DateTime<Utc>,
@@ -193,6 +194,10 @@ pub struct AppState {
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
     pending_session_flushes: Mutex<HashSet<String>>,
     session_flush_notify: Arc<Notify>,
+    pending_dispatcher_flushes: Mutex<HashSet<String>>,
+    dispatcher_flush_notify: Arc<Notify>,
+    dispatcher_flush_round_guard: Mutex<()>,
+    dispatcher_snapshot_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     dispatcher_feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
     dispatcher_runtimes: Mutex<HashMap<String, DispatcherRuntimeHandle>>,
     dispatcher_transition_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -225,7 +230,7 @@ impl AppState {
             output_updates,
             feed_updates,
             dispatcher_updates,
-            pending_dispatcher_updates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_dispatcher_updates: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             app_update: Mutex::new(app_update_state),
             app_update_config,
             started_at: Utc::now(),
@@ -237,6 +242,10 @@ impl AppState {
             feed_payload_cache: Mutex::new(HashMap::new()),
             pending_session_flushes: Mutex::new(HashSet::new()),
             session_flush_notify: Arc::new(Notify::new()),
+            pending_dispatcher_flushes: Mutex::new(HashSet::new()),
+            dispatcher_flush_notify: Arc::new(Notify::new()),
+            dispatcher_flush_round_guard: Mutex::new(()),
+            dispatcher_snapshot_guards: Mutex::new(HashMap::new()),
             dispatcher_feed_payload_cache: Mutex::new(HashMap::new()),
             dispatcher_runtimes: Mutex::new(HashMap::new()),
             dispatcher_transition_guards: Mutex::new(HashMap::new()),
@@ -252,6 +261,7 @@ impl AppState {
         state.load_dispatcher_bindings_from_disk().await;
         state.load_board_collaboration_from_disk().await;
         state.start_session_flush_watchdog();
+        state.start_dispatcher_flush_watchdog();
         state
     }
 
@@ -664,6 +674,84 @@ impl AppState {
         self.session_flush_notify.notify_one();
     }
 
+    pub(crate) async fn queue_dispatcher_flush(&self, thread_id: &str) {
+        self.pending_dispatcher_flushes
+            .lock()
+            .await
+            .insert(thread_id.to_string());
+        self.dispatcher_flush_notify.notify_one();
+    }
+
+    async fn drain_pending_dispatcher_flushes(&self) -> Vec<String> {
+        let mut pending = self.pending_dispatcher_flushes.lock().await;
+        if pending.is_empty() {
+            Vec::new()
+        } else {
+            pending.drain().collect::<Vec<_>>()
+        }
+    }
+
+    async fn requeue_dispatcher_flushes(&self, thread_ids: Vec<String>) {
+        if thread_ids.is_empty() {
+            return;
+        }
+        self.pending_dispatcher_flushes
+            .lock()
+            .await
+            .extend(thread_ids);
+        self.dispatcher_flush_notify.notify_one();
+    }
+
+    pub(crate) async fn flush_pending_dispatcher_snapshots_once(&self) -> Result<usize> {
+        let _flush_round_lock = self.dispatcher_flush_round_guard.lock().await;
+        let pending_ids = self.drain_pending_dispatcher_flushes().await;
+        if pending_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut failed_ids = Vec::new();
+        let mut first_error = None;
+        for thread_id in &pending_ids {
+            if let Err(err) = self.persist_current_dispatcher_snapshot(thread_id).await {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                failed_ids.push(thread_id.clone());
+            }
+        }
+
+        if failed_ids.is_empty() {
+            return Ok(pending_ids.len());
+        }
+
+        let failed_count = failed_ids.len();
+        let first_error = first_error.expect("failed dispatcher flush should capture an error");
+        self.requeue_dispatcher_flushes(failed_ids).await;
+        Err(anyhow!(
+            "Failed to persist {failed_count} queued dispatcher snapshot(s): {first_error}"
+        ))
+    }
+
+    pub(crate) async fn flush_pending_dispatcher_snapshots(&self) -> Result<()> {
+        let mut retries_remaining = 2usize;
+
+        loop {
+            match self.flush_pending_dispatcher_snapshots_once().await {
+                Ok(0) => return Ok(()),
+                Ok(_) => {
+                    retries_remaining = 2;
+                }
+                Err(err) => {
+                    if retries_remaining == 0 {
+                        return Err(err);
+                    }
+                    retries_remaining -= 1;
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+
     pub(crate) async fn queue_hot_path_session_update(
         &self,
         session_id: &str,
@@ -764,6 +852,38 @@ impl AppState {
                     }
 
                     app_state.publish_snapshot().await;
+                }
+            }
+        });
+    }
+
+    fn start_dispatcher_flush_watchdog(self: &Arc<Self>) {
+        let notify = Arc::clone(&self.dispatcher_flush_notify);
+        let state = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+
+                loop {
+                    tokio::time::sleep(DISPATCHER_FLUSH_DEBOUNCE_INTERVAL).await;
+
+                    let Some(app_state) = state.upgrade() else {
+                        return;
+                    };
+                    let flushed = match app_state.flush_pending_dispatcher_snapshots_once().await {
+                        Ok(flushed) => flushed,
+                        Err(err) => {
+                            tracing::debug!(
+                                error = %err,
+                                "Failed to persist queued dispatcher snapshot"
+                            );
+                            break;
+                        }
+                    };
+
+                    if flushed == 0 {
+                        break;
+                    }
                 }
             }
         });

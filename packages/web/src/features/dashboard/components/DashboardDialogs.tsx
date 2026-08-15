@@ -1130,6 +1130,9 @@ export function NewWorkspaceDialog({
         <form
           onSubmit={handleSubmit}
           onClick={(event) => event.stopPropagation()}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-workspace-dialog-title"
           className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full max-w-none flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-auto sm:max-w-[860px] sm:rounded-[10px] sm:border`}
         >
           <header className="border-b border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_92%,transparent)] px-4 py-3 backdrop-blur">
@@ -1139,7 +1142,7 @@ export function NewWorkspaceDialog({
             <div className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
+                  <h2 id="new-workspace-dialog-title" className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
                   <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
                     {step === "source" ? "Step 1 of 3" : step === "details" ? "Step 2 of 3" : "Step 3 of 3"}
                   </span>
@@ -1978,9 +1981,12 @@ function FolderPickerDialog({
       <div
         className={`flex ${KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME} w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]`}
         onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="folder-picker-dialog-title"
       >
         <header className="border-b border-[var(--vk-border)] px-4 py-3">
-          <h3 className="text-[16px] text-[var(--vk-text-strong)]">{title}</h3>
+          <h3 id="folder-picker-dialog-title" className="text-[16px] text-[var(--vk-text-strong)]">{title}</h3>
           <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">{description}</p>
         </header>
 
@@ -2722,7 +2728,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   return (
     <>
       <div
-        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-6`}
+        className={`fixed ${KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME} z-[90] flex items-start justify-center overflow-hidden bg-black/70 px-0 py-0 sm:items-center sm:overflow-y-auto sm:px-3 sm:py-6`}
         onClick={() => {
           if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen || filesystemRootPickerOpen) return;
           onClose();
@@ -2732,10 +2738,13 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
         <div
           className={`flex ${KEYBOARD_SAFE_VIEWPORT_FRAME_CLASS_NAME} ${KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME} w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(90vh,820px)] sm:max-w-[1180px] sm:rounded-[6px] sm:border sm:flex-row`}
           onClick={(event) => event.stopPropagation()}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-dialog-title"
         >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
             <header className="border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
-              <h2 className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
+              <h2 id="settings-dialog-title" className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
                 {isOnboarding ? "Setup" : "Settings"}
               </h2>
             </header>

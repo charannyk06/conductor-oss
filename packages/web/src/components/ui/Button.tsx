@@ -35,7 +35,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       <Comp
         ref={ref}
         className={cn(
-          "inline-flex items-center justify-center rounded-[var(--radius-sm)] border font-medium",
+          "oc-mobile-touch-target inline-flex items-center justify-center rounded-[var(--radius-sm)] border font-medium",
           "transition-colors duration-150",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]",
           "disabled:pointer-events-none disabled:opacity-45",

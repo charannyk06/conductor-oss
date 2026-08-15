@@ -293,7 +293,7 @@ export function SessionDetail({
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const reviewTabActive = active && activeTab === "diff";
-  const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
+  const tabTriggerClass = "min-h-11 gap-1.5 px-2.5 text-[12px] sm:min-h-[34px] sm:px-3";
   const compactDisplaySessionId = getDisplaySessionId(sessionId).slice(0, 7);
 
   const sessionTabs = (

@@ -73,6 +73,7 @@ import { TopBar } from "@/components/layout/TopBar";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { DISPATCHER_DESKTOP_XL_MEDIA_QUERY } from "@/components/dispatcher/dispatcherMobileLayout";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -2056,9 +2057,11 @@ export default function DashboardClient({
         onSelectSession={handleSelectSession}
         onArchiveSession={handleArchiveSession}
         onCreateWorkspace={openWorkspaceDialog}
+        onCloseMobile={closeSidebarOnMobile}
       />
     );
   }, [
+    closeSidebarOnMobile,
     dashboardSessions,
     configError,
     configLoading,
@@ -2212,7 +2215,7 @@ export default function DashboardClient({
           type="button"
           aria-pressed={workspaceView === "direct"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
-          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
+          className={`${compact ? "min-h-11 px-3 text-[12px] sm:min-h-[30px]" : "min-h-11 px-3 text-[13px] sm:min-h-[32px]"} oc-mobile-touch-target flex-1 touch-manipulation rounded-[4px] ${
             workspaceView === "direct"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -2224,7 +2227,7 @@ export default function DashboardClient({
           type="button"
           aria-pressed={workspaceView === "board"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
-          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
+          className={`${compact ? "min-h-11 px-3 text-[12px] sm:min-h-[30px]" : "min-h-11 px-3 text-[13px] sm:min-h-[32px]"} oc-mobile-touch-target flex-1 touch-manipulation rounded-[4px] ${
             workspaceView === "board"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -2236,7 +2239,7 @@ export default function DashboardClient({
           type="button"
           aria-pressed={workspaceView === "notes"}
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "notes" }, "replace")}
-          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
+          className={`${compact ? "min-h-11 px-3 text-[12px] sm:min-h-[30px]" : "min-h-11 px-3 text-[13px] sm:min-h-[32px]"} oc-mobile-touch-target flex-1 touch-manipulation rounded-[4px] ${
             workspaceView === "notes"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -2263,7 +2266,7 @@ export default function DashboardClient({
           }}
           aria-pressed={workspaceView === "board" && boardMobilePane === "board"}
           className={`inline-flex flex-1 items-center justify-center rounded-[4px] font-medium transition-colors ${
-            compact ? "min-h-[30px] gap-1 px-2.5 text-[11px]" : "min-h-[34px] gap-1.5 px-3 text-[12px]"
+            compact ? "oc-mobile-touch-target min-h-11 gap-1 px-2.5 text-[11px] sm:min-h-[30px]" : "oc-mobile-touch-target min-h-11 gap-1.5 px-3 text-[12px] sm:min-h-[34px]"
           } ${
             workspaceView === "board" && boardMobilePane === "board"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
@@ -2281,7 +2284,7 @@ export default function DashboardClient({
           }}
           aria-pressed={workspaceView === "board" && boardMobilePane === "chat"}
           className={`inline-flex flex-1 items-center justify-center rounded-[4px] font-medium transition-colors ${
-            compact ? "min-h-[30px] gap-1 px-2.5 text-[11px]" : "min-h-[34px] gap-1.5 px-3 text-[12px]"
+            compact ? "oc-mobile-touch-target min-h-11 gap-1 px-2.5 text-[11px] sm:min-h-[30px]" : "oc-mobile-touch-target min-h-11 gap-1.5 px-3 text-[12px] sm:min-h-[34px]"
           } ${
             workspaceView === "board" && boardMobilePane === "chat"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
@@ -2559,7 +2562,7 @@ export default function DashboardClient({
             rightContent={(
               <>
                 <span
-                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${scopeBadgeClassName}`}
+                  className={`hidden items-center rounded-full border px-2 py-0.5 text-[11px] font-medium sm:inline-flex ${scopeBadgeClassName}`}
                   title={scopeBadgeTitle}
                 >
                   {scopeBadgeLabel}
@@ -2887,7 +2890,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     if (selectedReasoningValue) return selectedReasoningValue;
     return availableReasoningOptions[0]?.label ?? "Default";
   }, [availableReasoningOptions, selectedReasoningValue]);
-  const lightMenuClass = "z-50 min-w-[240px] max-w-[calc(100vw-32px)] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)] sm:max-w-none";
+  const lightMenuClass = "w-[calc(100vw-2rem)] min-w-0 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)] sm:w-auto sm:min-w-[240px] sm:max-w-none";
   const scrollMenuClass = `${lightMenuClass} max-h-[min(360px,50vh)] overflow-y-auto`;
   const lightMenuItemClass = "flex min-h-[44px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)] sm:min-h-[36px]";
   const permissionOptions: Array<{ id: CreatePermissionMode; label: string; icon: LucideIcon }> = [
@@ -3066,12 +3069,11 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   </button>
                 </DropdownMenu.Trigger>
 
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    align="start"
-                    sideOffset={6}
-                    className={scrollMenuClass}
-                  >
+                <MobileDropdownMenuContent
+                  align="start"
+                  sideOffset={6}
+                  className={scrollMenuClass}
+                >
                     <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
                       Agents
                     </p>
@@ -3100,8 +3102,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         </DropdownMenu.Item>
                       );
                     })}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
+                </MobileDropdownMenuContent>
               </DropdownMenu.Root>
             </div>
 
@@ -3125,13 +3126,12 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   <ChevronDown className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
                 </button>
               </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  align="end"
-                  side="bottom"
-                  sideOffset={6}
-                  className={scrollMenuClass}
-                >
+              <MobileDropdownMenuContent
+                align="end"
+                side="bottom"
+                sideOffset={6}
+                className={scrollMenuClass}
+              >
                   <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
                     Tasks
                   </p>
@@ -3160,7 +3160,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         <DropdownMenu.Item
                           key={taskValue}
                           onSelect={() => setIssueId(taskValue)}
-                          className={`${lightMenuItemClass} min-w-[320px] items-start`}
+                          className={`${lightMenuItemClass} w-full min-w-0 items-start sm:min-w-[320px]`}
                         >
                           <div className="min-w-0 flex-1">
                             <div className="truncate">
@@ -3182,8 +3182,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                       No existing tasks were found for this project.
                     </div>
                   )}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
+              </MobileDropdownMenuContent>
             </DropdownMenu.Root>
           </div>
 
@@ -3195,11 +3194,11 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder="Optional launch prompt. Leave empty to open the native CLI."
                   rows={1}
-                  className="min-h-[24px] w-full resize-none bg-transparent pr-16 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                  className="min-h-11 w-full resize-none bg-transparent pr-24 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                 />
                 <label
                   htmlFor={attachmentInputId}
-                  className={`absolute right-[18px] top-0 inline-flex h-[24px] w-[24px] items-center justify-center rounded-[4px] ${
+                  className={`oc-mobile-touch-target absolute right-11 top-0 inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[4px] ${
                     launchPayloadProjectId
                       ? "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                       : "cursor-not-allowed opacity-50"
@@ -3219,7 +3218,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                 <button
                   type="button"
                   aria-label="Preview"
-                  className="absolute right-0 top-0 inline-flex h-[24px] w-[24px] items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  className="oc-mobile-touch-target absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 >
                   <Eye className="h-[14px] w-[14px]" />
                 </button>
@@ -3241,7 +3240,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         type="button"
                         aria-label={`Remove attachment ${file.name}`}
                         onClick={() => removeAttachment(index)}
-                        className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                        className="oc-mobile-touch-target inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-6 sm:w-6"
                       >
                         <X className="h-3 w-3" />
                       </button>
@@ -3262,8 +3261,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         <SlidersHorizontal className="h-[15px] w-[15px]" />
                       </button>
                     </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" sideOffset={6} className={scrollMenuClass}>
+                    <MobileDropdownMenuContent align="start" sideOffset={6} className={scrollMenuClass}>
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Projects</p>
                         {projectOptions.map((project) => {
                           const displayName = getProjectDisplayName(project);
@@ -3274,7 +3272,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             <DropdownMenu.Item
                               key={project.id}
                               onSelect={() => onSelectProject(project.id)}
-                              className={`${lightMenuItemClass} min-w-[280px] items-start`}
+                              className={`${lightMenuItemClass} w-full min-w-0 items-start sm:min-w-[280px]`}
                             >
                               <div className="min-w-0 flex-1">
                                 <div className="truncate">{displayName}</div>
@@ -3295,8 +3293,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                           <FolderOpen className="h-4 w-4" />
                           <span>Add Workspace</span>
                         </DropdownMenu.Item>
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
+                    </MobileDropdownMenuContent>
                   </DropdownMenu.Root>
 
                   {availableReasoningOptions.length > 0 ? (
@@ -3311,8 +3308,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                           <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
                         </button>
                       </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                      <MobileDropdownMenuContent align="start" sideOffset={6} className={lightMenuClass}>
                           <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
                             Reasoning
                           </p>
@@ -3331,8 +3327,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                               </span>
                             </DropdownMenu.Item>
                           ))}
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
+                      </MobileDropdownMenuContent>
                     </DropdownMenu.Root>
                   ) : null}
 
@@ -3346,8 +3341,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
                       </button>
                     </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                    <MobileDropdownMenuContent align="start" sideOffset={6} className={lightMenuClass}>
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Model</p>
                         <DropdownMenu.Item
                           onSelect={() => setModelSelection(buildModelSelection(
@@ -3393,8 +3387,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             </button>
                           </>
                         ) : null}
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
+                    </MobileDropdownMenuContent>
                   </DropdownMenu.Root>
 
                   <DropdownMenu.Root>
@@ -3407,8 +3400,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
                       </button>
                     </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                    <MobileDropdownMenuContent align="start" sideOffset={6} className={lightMenuClass}>
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Permissions</p>
                         {permissionOptions.map(({ id, label, icon: Icon }) => (
                           <DropdownMenu.Item
@@ -3423,14 +3415,13 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             </span>
                           </DropdownMenu.Item>
                         ))}
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
+                    </MobileDropdownMenuContent>
                   </DropdownMenu.Root>
 
 
 
                   {availableBridges.length > 0 ? (
-                    <label className="inline-flex h-[29px] max-w-[260px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)]">
+                    <label className="oc-mobile-touch-target inline-flex min-h-11 max-w-[260px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] sm:min-h-[29px]">
                       <PlugZap className="h-[14px] w-[14px] text-[var(--vk-text-muted)]" />
                       <select
                         value={selectedBridgeId}
@@ -3446,7 +3437,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                       </select>
                     </label>
                   ) : (
-                    <div className="inline-flex h-[29px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-muted)]">
+                    <div className="oc-mobile-touch-target inline-flex min-h-11 items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-muted)] sm:min-h-[29px]">
                       <PlugZap className="h-[14px] w-[14px]" />
                       <span>
                         {selectedBridgeId && !selectedBridgeOnline
@@ -3468,14 +3459,12 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         {currentProjectLabel}
                       </button>
                     </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content
-                        align="start"
-                        side="bottom"
-                        sideOffset={6}
-                        avoidCollisions={false}
-                        className={scrollMenuClass}
-                      >
+                    <MobileDropdownMenuContent
+                      align="start"
+                      side="bottom"
+                      sideOffset={6}
+                      className={scrollMenuClass}
+                    >
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Branch</p>
                         {selectedProjectLabel ? (
                           <p className="px-3 pb-2 text-[12px] leading-[16px] text-[var(--text-faint)]">
@@ -3498,8 +3487,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             </DropdownMenu.Item>
                           ))
                         )}
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
+                    </MobileDropdownMenuContent>
                   </DropdownMenu.Root>
                 </div>
 
@@ -3508,7 +3496,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     type="button"
                     onClick={handleLaunch}
                     disabled={isCreatingSession || !effectiveProjectId}
-                    className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] bg-[var(--vk-bg-hover)] px-[8px] py-[6.5px] text-[16px] leading-[16px] text-[var(--vk-text-strong)] transition-colors hover:bg-[var(--vk-bg-active)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="oc-mobile-touch-target inline-flex min-h-11 touch-manipulation items-center justify-center rounded-[3px] bg-[var(--vk-bg-hover)] px-[8px] py-[6.5px] text-[16px] leading-[16px] text-[var(--vk-text-strong)] transition-colors hover:bg-[var(--vk-bg-active)] disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-[29px]"
                   >
                     {isCreatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : "Launch"}
                   </button>
@@ -3531,7 +3519,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     <button
                       type="button"
                       onClick={() => onOpenAgentSetup(selectedAgent)}
-                      className="inline-flex h-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)]"
+                      className="oc-mobile-touch-target inline-flex h-11 items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)] sm:h-[29px]"
                     >
                       {selectedAgentState.installed ? "Open setup" : "Open install"}
                     </button>

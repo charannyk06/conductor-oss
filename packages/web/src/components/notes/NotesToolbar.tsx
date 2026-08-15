@@ -13,6 +13,7 @@ import {
   Send,
   TriangleAlert,
 } from "lucide-react";
+import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 
 import type { ViewMode } from "./types";
 
@@ -38,9 +39,9 @@ interface NotesToolbarProps {
   onOpenShare?: () => void;
 }
 
-const BUTTON_CLASS_NAME = "inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60";
+const BUTTON_CLASS_NAME = "oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60 sm:min-h-[34px]";
 const SEGMENT_CLASS_NAME = "inline-flex rounded-[6px] border border-[var(--vk-border)] p-0.5 text-[12px]";
-const MENU_CONTENT_CLASS_NAME = "z-[120] min-w-[190px] rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-1 shadow-[0_20px_48px_rgba(0,0,0,0.35)]";
+const MENU_CONTENT_CLASS_NAME = "min-w-[190px] rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-1 shadow-[0_20px_48px_rgba(0,0,0,0.35)]";
 const MENU_ITEM_CLASS_NAME = "flex min-h-[36px] cursor-default items-center gap-2 rounded-[6px] px-3 text-[12px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)] data-[disabled]:pointer-events-none data-[disabled]:opacity-45";
 
 function ViewModeSwitcher({
@@ -63,7 +64,7 @@ function ViewModeSwitcher({
           key={mode}
           type="button"
           onClick={() => onViewModeChange(mode)}
-          className={`rounded-[4px] px-3 py-1.5 ${
+          className={`oc-mobile-touch-target min-h-11 rounded-[4px] px-3 py-1.5 sm:min-h-0 ${
             viewMode === mode
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -117,7 +118,7 @@ export function NotesToolbar({
           <button
             type="button"
             onClick={onToggleGraph}
-            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border px-3 text-[12px] hover:bg-[var(--vk-bg-hover)] ${
+            className={`oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border px-3 text-[12px] hover:bg-[var(--vk-bg-hover)] sm:min-h-[34px] ${
               graphOpen
                 ? "border-[var(--vk-accent)] bg-[rgba(139,92,246,0.12)] text-[var(--vk-accent)]"
                 : "border-[var(--vk-border)] text-[var(--vk-text-normal)]"
@@ -134,8 +135,7 @@ export function NotesToolbar({
                 More
               </button>
             </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content align="end" sideOffset={8} className={MENU_CONTENT_CLASS_NAME}>
+            <MobileDropdownMenuContent align="end" className={MENU_CONTENT_CLASS_NAME}>
                 <DropdownMenu.Item onSelect={onRefresh} className={MENU_ITEM_CLASS_NAME} disabled={indexLoading}>
                   {indexLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="h-3.5 w-3.5" />}
                   Refresh
@@ -158,8 +158,7 @@ export function NotesToolbar({
                   <Send className="h-3.5 w-3.5" />
                   Share note
                 </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
+            </MobileDropdownMenuContent>
           </DropdownMenu.Root>
 
           {dirty ? (
@@ -198,7 +197,7 @@ export function NotesToolbar({
           <button
             type="button"
             onClick={onToggleGraph}
-            className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-[6px] border px-3 text-[12px] hover:bg-[var(--vk-bg-hover)] ${
+            className={`oc-mobile-touch-target inline-flex min-h-11 items-center gap-1.5 rounded-[6px] border px-3 text-[12px] hover:bg-[var(--vk-bg-hover)] sm:min-h-[34px] ${
               graphOpen
                 ? "border-[var(--vk-accent)] bg-[rgba(139,92,246,0.12)] text-[var(--vk-accent)]"
                 : "border-[var(--vk-border)] text-[var(--vk-text-normal)]"
