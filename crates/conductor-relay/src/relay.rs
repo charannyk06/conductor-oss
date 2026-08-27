@@ -2130,7 +2130,7 @@ async fn browser_ws(
     let (bridge_key, user_id) =
         match resolve_browser_connection(&scope, &headers, query.token.as_deref()).await {
             Ok(value) => value,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
@@ -2215,21 +2215,25 @@ async fn resolve_browser_connection(
     scope: &str,
     headers: &HeaderMap,
     token: Option<&str>,
-) -> Result<(String, String), Response> {
+) -> Result<(String, String), Box<Response>> {
     let Some(jwt) = resolve_token(headers, token) else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing bridge relay token." })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Missing bridge relay token." })),
+            )
+                .into_response(),
+        ));
     };
 
     let Some(user_id) = decode_relay_user_id(&jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok() else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Invalid bridge relay token." })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid bridge relay token." })),
+            )
+                .into_response(),
+        ));
     };
 
     Ok((scope.trim().to_string(), user_id))

@@ -1395,12 +1395,7 @@ fn gateway_scope_key(url: &Url, scopes: &[String]) -> String {
 }
 
 fn platform_name() -> &'static str {
-    match env::consts::OS {
-        "macos" => "macos",
-        "windows" => "windows",
-        "linux" => "linux",
-        other => other,
-    }
+    env::consts::OS
 }
 
 fn locale_name() -> String {

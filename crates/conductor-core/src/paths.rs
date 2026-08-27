@@ -329,8 +329,8 @@ fn sha256(input: &[u8]) -> [u8; 32] {
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut schedule = [0u32; 64];
-    for chunk in padded.chunks_exact(64) {
-        for (index, word) in chunk.chunks_exact(4).take(16).enumerate() {
+    for chunk in padded.as_chunks::<64>().0 {
+        for (index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             schedule[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for index in 16..64 {
