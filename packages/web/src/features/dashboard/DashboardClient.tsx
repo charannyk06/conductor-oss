@@ -95,6 +95,7 @@ import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import {
   type RuntimeAgentModelCatalog,
 } from "@/lib/runtimeAgentModelsShared";
+import { useDashboardWebMcpBridge } from "@/features/webmcp/dashboardBridge";
 import {
   buildModelSelection,
   emptyModelSelection,
@@ -1420,6 +1421,14 @@ export default function DashboardClient({
     sessionsError,
     sessionsLoading,
   ]);
+
+  useDashboardWebMcpBridge({
+    bridgeId: effectiveBridgeId,
+    selectedSessionId,
+    selectedProjectId,
+    navigateDashboard,
+    refreshSessions,
+  });
 
   useEffect(() => {
     if (!selectedSessionId) {

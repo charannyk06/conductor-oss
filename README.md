@@ -26,9 +26,14 @@ It helps you:
 - reach the same local runtime from a hosted dashboard through the paired-device bridge
 - keep project state in normal local files like `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db`
 
-## Read this first, there are two ways to use Conductor
+## WebMCP challenge extension
 
-A lot of confusion comes from mixing the local app and the hosted bridge flow.
+The challenge branch adds seven bounded browser-native WebMCP tools for projects, sessions, and diffs. State changes require `confirmed: true`.
+
+- Public demo: https://app.conductross.com/webmcp
+- Technical notes: [`docs/webmcp-challenge-2026.md`](docs/webmcp-challenge-2026.md)
+
+## Read this first, there are two ways to use Conductor
 
 ### 1. Local dashboard on the same machine
 Use this when Conductor and your repos live on the same laptop or desktop.
