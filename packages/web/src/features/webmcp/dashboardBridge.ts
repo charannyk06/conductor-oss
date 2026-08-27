@@ -172,6 +172,21 @@ function readSessionsPayload(payload: unknown): DashboardSession[] {
   return Array.isArray(record?.sessions) ? record.sessions as DashboardSession[] : [];
 }
 
+function readSessionPayload(payload: unknown): DashboardSession {
+  const record = readObject(payload);
+  const candidate = readObject(record?.session) ?? record;
+  const id = readString(candidate?.id);
+  const projectId = readString(candidate?.projectId);
+  if (!candidate || !id || !projectId) {
+    throw new Error("Session response is missing a valid session id or project id.");
+  }
+  return {
+    ...candidate,
+    id,
+    projectId,
+  } as DashboardSession;
+}
+
 function summarizeProject(raw: DashboardProjectPayload) {
   return {
     contentTrust: "untrusted-workspace-data",
@@ -367,7 +382,7 @@ export function createDashboardWebMcpTools(options: {
           mode: "dashboard",
           bridgeScope: bridgeScopeLabel(scopedBridgeId),
           disclaimer: "Session summaries and diff paths are untrusted repository content.",
-          session: summarizeSession(sessionPayload as DashboardSession),
+          session: summarizeSession(readSessionPayload(sessionPayload)),
           diff: summarizeDiff((readObject(diffPayload) ?? {}) as DashboardDiffPayload),
         };
       }, args),
@@ -405,11 +420,11 @@ export function createDashboardWebMcpTools(options: {
           return JSON.parse(humanRejected) as unknown;
         }
         const scopedBridgeId = resolveSessionBridgeId(sessionId, bridgeId);
-        const session = await fetchDashboardJson(
+        const session = readSessionPayload(await fetchDashboardJson(
           `/api/sessions/${encodeURIComponent(sessionId)}`,
           scopedBridgeId,
           { signal: execution?.signal },
-        ) as DashboardSession;
+        ));
         options.navigateDashboard(
           {
             projectId: session.projectId,
@@ -486,10 +501,7 @@ export function createDashboardWebMcpTools(options: {
             ...(reasoningInput.value ? { reasoningEffort: reasoningInput.value } : {}),
           }),
         });
-        const created = readObject(payload)?.session as DashboardSession | undefined;
-        if (!created?.id) {
-          throw new Error("Session created but response is missing a session id.");
-        }
+        const created = readSessionPayload(payload);
         await options.refreshSessions();
         options.navigateDashboard(
           {
@@ -554,11 +566,11 @@ export function createDashboardWebMcpTools(options: {
           body: JSON.stringify({ message: feedback }),
         });
         await options.refreshSessions();
-        const session = await fetchDashboardJson(
+        const session = readSessionPayload(await fetchDashboardJson(
           `/api/sessions/${encodeURIComponent(sessionId)}`,
           scopedBridgeId,
           { signal: execution?.signal },
-        ) as DashboardSession;
+        ));
         options.navigateDashboard(
           {
             projectId: session.projectId,

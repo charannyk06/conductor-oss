@@ -85,9 +85,12 @@ export type DemoStateAction =
     run: DemoToolRun;
   };
 
+let nextTimelineEventSequence = 0;
+
 function createTimelineEvent(label: string, timestamp: string, suffix: string): DemoTimelineEvent {
+  nextTimelineEventSequence += 1;
   return {
-    id: `${suffix}-${timestamp}`,
+    id: `${suffix}-${timestamp}-${nextTimelineEventSequence}`,
     label,
     timestamp,
   };

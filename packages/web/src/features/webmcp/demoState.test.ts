@@ -44,3 +44,19 @@ test("demo reducer sends feedback and returns the session to working", () => {
   assert.equal(updated?.lastFeedback, "Make the approval boundary explicit.");
   assert.equal(next.selectedSessionId, "demo-session-198");
 });
+
+test("demo reducer keeps timeline ids unique for same-millisecond events", () => {
+  const timestamp = "2026-08-25T14:10:00.000Z";
+  const first = demoStateReducer(createInitialDemoState(), {
+    type: "focus-session",
+    sessionId: "demo-session-176",
+    timestamp,
+  });
+  const second = demoStateReducer(first, {
+    type: "focus-session",
+    sessionId: "demo-session-198",
+    timestamp,
+  });
+
+  assert.notEqual(second.timeline[0]?.id, second.timeline[1]?.id);
+});

@@ -54,21 +54,24 @@ test("dashboard WebMCP preserves bridge scope and forwards execution cancellatio
   let requestUrl = "";
   let requestSignal: AbortSignal | null | undefined;
   let navigatedBridgeId: string | null | undefined;
+  let navigatedSessionId: string | null | undefined;
 
   global.fetch = (async (input, init) => {
     requestUrl = String(input);
     requestSignal = init?.signal;
     return Response.json({
-      id: "bridge:remote-7:session-42",
-      projectId: "demo-web",
-      status: "working",
-      activity: "active",
-      agent: "codex",
-      branch: "feat/webmcp",
-      summary: "Remote synthetic summary",
-      createdAt: "2026-08-25T20:00:00.000Z",
-      lastActivityAt: "2026-08-25T20:10:00.000Z",
-      metadata: {},
+      session: {
+        id: "bridge:remote-7:session-42",
+        projectId: "demo-web",
+        status: "working",
+        activity: "active",
+        agent: "codex",
+        branch: "feat/webmcp",
+        summary: "Remote synthetic summary",
+        createdAt: "2026-08-25T20:00:00.000Z",
+        lastActivityAt: "2026-08-25T20:10:00.000Z",
+        metadata: {},
+      },
     });
   }) as typeof fetch;
 
@@ -78,6 +81,7 @@ test("dashboard WebMCP preserves bridge scope and forwards execution cancellatio
       getSelection: () => ({ selectedProjectId: null, selectedSessionId: null }),
       navigateDashboard: (updates) => {
         navigatedBridgeId = updates.bridgeId;
+        navigatedSessionId = updates.sessionId;
       },
       refreshSessions: async () => {},
       requestHumanConfirmation: async () => true,
@@ -92,6 +96,7 @@ test("dashboard WebMCP preserves bridge scope and forwards execution cancellatio
 
     assert.equal(result.bridgeScope, "remote-7");
     assert.equal(navigatedBridgeId, "remote-7");
+    assert.equal(navigatedSessionId, "bridge:remote-7:session-42");
     assert.match(requestUrl, /bridgeId=remote-7/);
     assert.equal(requestSignal, controller.signal);
   } finally {
@@ -227,6 +232,37 @@ test("dashboard WebMCP requires person approval after confirmed input", async ()
 
     assert.equal(result.requiresHumanApproval, true);
     assert.equal(fetchCalls, 0);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("dashboard WebMCP rejects invalid single-session responses before navigation", async () => {
+  const originalFetch = global.fetch;
+  let navigateCalls = 0;
+  global.fetch = (async () => Response.json({ session: { projectId: "project-1" } })) as typeof fetch;
+
+  try {
+    const tools = createDashboardWebMcpTools({
+      getBridgeId: () => null,
+      getSelection: () => ({ selectedProjectId: null, selectedSessionId: null }),
+      navigateDashboard: () => {
+        navigateCalls += 1;
+      },
+      refreshSessions: async () => {},
+      requestHumanConfirmation: async () => true,
+    });
+    const focusTool = tools.find((tool) => tool.name === "conductor_focus_session");
+    assert.ok(focusTool);
+
+    const result = JSON.parse(await focusTool!.execute({
+      sessionId: "session-1",
+      confirmed: true,
+    })) as { ok?: boolean; error?: string };
+
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /missing a valid session id or project id/i);
+    assert.equal(navigateCalls, 0);
   } finally {
     global.fetch = originalFetch;
   }
