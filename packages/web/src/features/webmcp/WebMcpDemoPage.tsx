@@ -3,17 +3,14 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   Bot,
-  CheckCircle2,
   CircleAlert,
   Clock3,
   Eye,
-  FlaskConical,
   FolderGit2,
   ListFilter,
   MessagesSquare,
   Play,
   ShieldCheck,
-  Sparkles,
   Wrench,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -25,13 +22,6 @@ import { createDemoWebMcpTools } from "@/features/webmcp/demoTools";
 import { createInitialDemoState, demoStateReducer, findDemoSession } from "@/features/webmcp/demoState";
 import { useWebMcpToolRegistration } from "@/features/webmcp/useWebMcpToolRegistration";
 
-type SamplePrompt = {
-  id: string;
-  label: string;
-  prompt: string;
-  toolName: WebMcpToolName;
-  configure?: () => void;
-};
 
 function statusBadgeVariant(status: string): "default" | "success" | "warning" | "error" | "info" {
   if (status === "working" || status === "completed") return "success";
@@ -122,52 +112,6 @@ export function WebMcpDemoPage() {
   const activeSchema = WEBMCP_TOOL_SPECS[activeToolName].inputSchema;
   const activeTool = toolsByName.get(activeToolName) ?? null;
 
-  const samplePrompts: SamplePrompt[] = [
-    {
-      id: "sample-1",
-      label: "Overview",
-      prompt: "Get the workspace overview and summarize which synthetic session is currently focused.",
-      toolName: "conductor_get_workspace_overview",
-      configure: () => {
-        setActiveToolName("conductor_get_workspace_overview");
-        setProjectFilter("demo-web");
-        setLimitValue("6");
-      },
-    },
-    {
-      id: "sample-2",
-      label: "Inspect",
-      prompt: "Inspect `demo-session-198` and summarize the synthetic diff plus the approval boundary.",
-      toolName: "conductor_inspect_session",
-      configure: () => {
-        setActiveToolName("conductor_inspect_session");
-        setSessionTarget("demo-session-198");
-      },
-    },
-    {
-      id: "sample-3",
-      label: "Focus",
-      prompt: "Focus `demo-session-176` in the visible workspace and proceed only if `confirmed` is true.",
-      toolName: "conductor_focus_session",
-      configure: () => {
-        setActiveToolName("conductor_focus_session");
-        setSessionTarget("demo-session-176");
-        setConfirmFocus(true);
-      },
-    },
-    {
-      id: "sample-4",
-      label: "Start",
-      prompt: "Start a new synthetic session for `demo-docs` and only proceed if `confirmed` is true.",
-      toolName: "conductor_start_agent",
-      configure: () => {
-        setActiveToolName("conductor_start_agent");
-        setProjectFilter("demo-docs");
-        setPromptDraft("Draft a concise public walkthrough for the WebMCP challenge judges.");
-        setConfirmStart(true);
-      },
-    },
-  ];
 
   const buildArgsForActiveTool = (): unknown => {
     const limit = Number.parseInt(limitValue, 10);
@@ -206,72 +150,44 @@ export function WebMcpDemoPage() {
   };
 
   return (
-    <PublicPageShell>
-      <div className="space-y-8">
+    <PublicPageShell containerClassName="max-w-[1440px]">
+      <div className="space-y-10">
         <PublicSection
-          title="Browser-native WebMCP for Conductor"
-          description="This public route is a backend-free synthetic workspace built for the challenge branch. It registers browser-native tools when `document.modelContext.registerTool` is available, stays fully usable without WebMCP, and makes every visible state change explicit."
+          eyebrow="WebMCP Challenge · 2026"
+          title="Control coding agents from the browser."
+          description="Conductor exposes seven bounded WebMCP tools for inspecting projects, reviewing sessions, and approving agent actions without giving the browser terminal access."
         >
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="info">Public route</Badge>
-            <Badge variant="info">Synthetic data</Badge>
-            <Badge variant={compatibilityBadgeVariant(compatibility.supported)}>
-              {compatibility.supported ? "WebMCP available" : "WebMCP unavailable"}
-            </Badge>
-            <Badge variant="outline">{formattedToolCount(tools.length)}</Badge>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-[var(--text-muted)]">
+            <span className="inline-flex items-center gap-2">
+              <span className={cn("h-1.5 w-1.5 rounded-full", compatibility.supported ? "bg-[var(--vk-green)]" : "bg-[var(--vk-orange)]")} />
+              {compatibility.supported ? "Native WebMCP registered" : "Interactive fallback active"}
+            </span>
+            <span>{formattedToolCount(tools.length)} · 3 approval-gated actions</span>
+            <span>Demo data · resets on reload</span>
           </div>
         </PublicSection>
 
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.95fr)]">
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(380px,0.9fr)]">
           <div className="min-w-0 space-y-6">
             <PublicPanel className="overflow-hidden">
-              <div className="border-b border-[var(--border-soft)] px-5 py-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="space-y-1">
-                    <p className="text-[11px] uppercase tracking-[0.22em] text-[var(--text-faint)]">Compatibility</p>
-                    <h2 className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">
-                      Cross-browser status
-                    </h2>
+              <div className="flex flex-col gap-5 px-5 py-5 lg:flex-row lg:items-start lg:justify-between">
+                <div className="max-w-xl">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-[var(--vk-orange)]" />
+                    <h2 className="text-base font-semibold text-[var(--text-strong)]">Bounded by design</h2>
                   </div>
-                  <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                  <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                    Read tools inspect scoped Conductor state. Mutations need <code className="font-mono text-[12px] text-[var(--text-normal)]">confirmed: true</code> plus a visible browser approval. No shell input, secrets, arbitrary paths, or destructive actions.
+                  </p>
+                </div>
+                <div className="min-w-0 border-t border-[var(--border-soft)] pt-4 lg:w-[360px] lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-faint)]">Runtime</span>
                     <Badge variant={compatibilityBadgeVariant(compatibility.supported)}>
-                      {compatibility.supported ? "Registered" : "Fallback mode"}
+                      {compatibility.supported ? "Registered" : "Fallback"}
                     </Badge>
-                    <Badge variant="outline">{compatibility.toolRegistrationAvailable ? "registerTool found" : "registerTool missing"}</Badge>
                   </div>
-                </div>
-                <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
-                  {compatibility.reason}
-                </p>
-              </div>
-
-              <div className="grid gap-px bg-[var(--border-soft)] md:grid-cols-3">
-                <div className="bg-[var(--bg-panel)] px-5 py-4">
-                  <div className="flex items-center gap-2 text-[var(--text-muted)]">
-                    <ShieldCheck className="h-4 w-4" />
-                    <span className="text-[12px] uppercase tracking-[0.18em]">Guardrails</span>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-[var(--text-normal)]">
-                    No terminal keystrokes, no secrets, no arbitrary paths, no arbitrary URLs, and no destructive actions.
-                  </p>
-                </div>
-                <div className="bg-[var(--bg-panel)] px-5 py-4">
-                  <div className="flex items-center gap-2 text-[var(--text-muted)]">
-                    <FlaskConical className="h-4 w-4" />
-                    <span className="text-[12px] uppercase tracking-[0.18em]">Synthetic scope</span>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-[var(--text-normal)]">
-                    Every project, session, prompt, and diff on this page is synthetic and resets on reload.
-                  </p>
-                </div>
-                <div className="bg-[var(--bg-panel)] px-5 py-4">
-                  <div className="flex items-center gap-2 text-[var(--text-muted)]">
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span className="text-[12px] uppercase tracking-[0.18em]">Approval boundary</span>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-[var(--text-normal)]">
-                    Mutating tools require `confirmed: true`, even in the synthetic demo.
-                  </p>
+                  <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">{compatibility.reason}</p>
                 </div>
               </div>
             </PublicPanel>
@@ -285,7 +201,7 @@ export function WebMcpDemoPage() {
                       {state.workspaceName}
                     </h2>
                   </div>
-                  <Badge variant="outline" className="max-w-full whitespace-normal text-left">{state.workspaceLabel}</Badge>
+                  <p className="max-w-md text-right text-xs leading-5 text-[var(--text-faint)]">{state.workspaceLabel}</p>
                 </div>
               </div>
 
@@ -294,25 +210,22 @@ export function WebMcpDemoPage() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-normal)]">
                       <FolderGit2 className="h-4 w-4 text-[var(--vk-orange)]" />
-                      Synthetic projects
+                      Projects
                     </div>
-                    <div className="grid gap-3">
+                    <div className="divide-y divide-[var(--border-soft)] border-y border-[var(--border-soft)]">
                       {state.projects.map((project) => (
                         <div
                           key={project.id}
                           className={cn(
-                            "rounded-[var(--radius-md)] border px-4 py-3",
+                            "py-4 transition-colors",
                             project.id === projectFilter
-                              ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_12%,var(--bg-panel))]"
-                              : "border-[var(--border-soft)] bg-[var(--bg-shell)]",
+                              ? "border-l-2 border-[var(--vk-orange)] pl-3"
+                              : "pl-1",
                           )}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="space-y-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-[var(--text-strong)]">{project.name}</span>
-                                <Badge variant="outline">{project.syntheticLabel}</Badge>
-                              </div>
+                              <span className="font-medium text-[var(--text-strong)]">{project.name}</span>
                               <p className="text-sm leading-6 text-[var(--text-muted)]">{project.description}</p>
                             </div>
                             <Badge variant={project.health === "attention" ? "warning" : project.health === "working" ? "success" : "info"}>
@@ -361,9 +274,9 @@ export function WebMcpDemoPage() {
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-normal)]">
                       <MessagesSquare className="h-4 w-4 text-[var(--vk-orange)]" />
-                      Synthetic sessions
+                      Sessions
                     </div>
-                    <div className="grid gap-2">
+                    <div className="divide-y divide-[var(--border-soft)] border-y border-[var(--border-soft)]">
                       {state.sessions.map((session) => {
                         const active = session.id === state.selectedSessionId;
                         return (
@@ -376,18 +289,15 @@ export function WebMcpDemoPage() {
                               timestamp: new Date().toISOString(),
                             })}
                             className={cn(
-                              "w-full rounded-[var(--radius-md)] border px-4 py-3 text-left transition-colors",
+                              "w-full py-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]",
                               active
-                                ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_10%,var(--bg-panel))]"
-                                : "border-[var(--border-soft)] bg-[var(--bg-shell)] hover:bg-[var(--bg-panel)]",
+                                ? "border-l-2 border-[var(--vk-orange)] pl-3"
+                                : "pl-1 hover:bg-[var(--bg-panel-2)]",
                             )}
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="truncate font-medium text-[var(--text-strong)]">{session.title}</span>
-                                  <Badge variant="outline">{session.syntheticLabel}</Badge>
-                                </div>
+                                <span className="truncate font-medium text-[var(--text-strong)]">{session.title}</span>
                                 <p className="mt-1 text-sm text-[var(--text-muted)]">
                                   {session.id} · {session.projectId} · {session.agent}
                                 </p>
@@ -406,7 +316,7 @@ export function WebMcpDemoPage() {
                       <div className="border-b border-[var(--border-soft)] px-4 py-3">
                         <div className="flex flex-wrap items-center gap-2">
                           <Eye className="h-4 w-4 text-[var(--vk-orange)]" />
-                          <span className="font-medium text-[var(--text-strong)]">Focused synthetic session</span>
+                          <span className="font-medium text-[var(--text-strong)]">Focused session</span>
                           <Badge variant={statusBadgeVariant(selectedSession.status)}>{selectedSession.status}</Badge>
                         </div>
                       </div>
@@ -423,7 +333,7 @@ export function WebMcpDemoPage() {
                         </div>
 
                         <div className="rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-panel)] px-3 py-3">
-                          <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-faint)]">Synthetic diff files</p>
+                          <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-faint)]">Diff files</p>
                           <div className="mt-3 space-y-2">
                             {selectedSession.diffFiles.length === 0 ? (
                               <p className="text-sm leading-6 text-[var(--text-muted)]">No diff yet for this synthetic queued session.</p>
@@ -458,18 +368,13 @@ export function WebMcpDemoPage() {
 
             <PublicPanel className="overflow-hidden">
               <div className="border-b border-[var(--border-soft)] px-5 py-4">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-[var(--vk-orange)]" />
-                  <h2 className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">
-                    Timeline
-                  </h2>
-                </div>
+                <h2 className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Activity</h2>
               </div>
-              <div className="space-y-3 px-5 py-4">
+              <div className="divide-y divide-[var(--border-soft)] px-5">
                 {state.timeline.map((event) => (
-                  <div key={event.id} className="rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] px-4 py-3">
+                  <div key={event.id} className="py-4 sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start sm:gap-6">
                     <p className="text-sm leading-6 text-[var(--text-normal)]">{event.label}</p>
-                    <p className="mt-1 text-xs text-[var(--text-faint)]">{event.timestamp}</p>
+                    <p className="mt-1 whitespace-nowrap font-mono text-[11px] text-[var(--text-faint)] sm:mt-0">{event.timestamp}</p>
                   </div>
                 ))}
               </div>
@@ -484,13 +389,13 @@ export function WebMcpDemoPage() {
                   <h2 className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Tool inspector</h2>
                 </div>
                 <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
-                  Every tool below uses the same browser-native registration metadata as the real dashboard bridge.
+                  Select a registered tool, inspect its contract, and run it against the visible demo workspace.
                 </p>
               </div>
 
               <div className="grid gap-px bg-[var(--border-soft)]">
-                <div className="bg-[var(--bg-panel)] p-3">
-                  <div className="grid gap-2">
+                <div className="bg-[var(--bg-panel)] px-3">
+                  <div className="divide-y divide-[var(--border-soft)]">
                     {WEBMCP_TOOL_ORDER.map((toolName) => {
                       const spec = WEBMCP_TOOL_SPECS[toolName];
                       const active = toolName === activeToolName;
@@ -500,20 +405,17 @@ export function WebMcpDemoPage() {
                           type="button"
                           onClick={() => setActiveToolName(toolName)}
                           className={cn(
-                            "w-full rounded-[var(--radius-md)] border px-3 py-3 text-left transition-colors",
+                            "w-full px-2 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]",
                             active
-                              ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_10%,var(--bg-shell))]"
-                              : "border-[var(--border-soft)] bg-[var(--bg-shell)] hover:bg-[var(--bg-panel-2)]",
+                              ? "border-l-2 border-[var(--vk-orange)] bg-[var(--bg-panel-2)] pl-3"
+                              : "hover:bg-[var(--bg-panel-2)]",
                           )}
                         >
-                          <p className="break-words font-mono text-[12px] font-medium leading-5 text-[var(--text-strong)]">{toolName}</p>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <Badge variant={spec.annotations?.readOnlyHint ? "outline" : "warning"}>
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="break-words font-mono text-[12px] font-medium leading-5 text-[var(--text-strong)]">{toolName}</p>
+                            <span className={cn("shrink-0 text-[11px]", spec.annotations?.readOnlyHint ? "text-[var(--text-faint)]" : "text-[var(--vk-orange)]")}>
                               {readOnlyLabel(toolName)}
-                            </Badge>
-                            {spec.annotations?.untrustedContentHint ? (
-                              <Badge variant="info">Untrusted content</Badge>
-                            ) : null}
+                            </span>
                           </div>
                         </button>
                       );
@@ -684,12 +586,14 @@ export function WebMcpDemoPage() {
                     </div>
                   </div>
 
-                  <div className="space-y-2 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] px-4 py-4">
-                    <p className="text-sm font-medium text-[var(--text-normal)]">Input schema</p>
-                    <pre className="overflow-x-auto rounded-[var(--radius-sm)] bg-[var(--bg-panel)] p-3 text-[12px] leading-6 text-[var(--text-muted)]">
+                  <details className="border-y border-[var(--border-soft)] py-3">
+                    <summary className="cursor-pointer text-sm font-medium text-[var(--text-normal)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]">
+                      Input schema
+                    </summary>
+                    <pre className="mt-3 overflow-x-auto bg-[var(--bg-shell)] p-3 text-[12px] leading-6 text-[var(--text-muted)]">
                       {JSON.stringify(activeSchema, null, 2)}
                     </pre>
-                  </div>
+                  </details>
 
                   <div className="space-y-2 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] px-4 py-4">
                     <p className="text-sm font-medium text-[var(--text-normal)]">Last JSON result</p>
@@ -701,30 +605,6 @@ export function WebMcpDemoPage() {
               </div>
             </PublicPanel>
 
-            <PublicPanel className="overflow-hidden">
-              <div className="border-b border-[var(--border-soft)] px-5 py-4">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-[var(--vk-orange)]" />
-                  <h2 className="text-lg font-semibold tracking-[-0.02em] text-[var(--text-strong)]">Sample prompts</h2>
-                </div>
-              </div>
-              <div className="space-y-3 px-5 py-4">
-                {samplePrompts.map((entry) => (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    onClick={() => entry.configure?.()}
-                    className="w-full rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] px-4 py-3 text-left transition-colors hover:bg-[var(--bg-panel)]"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-medium text-[var(--text-strong)]">{entry.label}</span>
-                      <Badge variant="outline">{entry.toolName}</Badge>
-                    </div>
-                    <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">{entry.prompt}</p>
-                  </button>
-                ))}
-              </div>
-            </PublicPanel>
           </div>
         </div>
       </div>
