@@ -9,16 +9,22 @@ import { cn } from "@/lib/cn";
 type PublicPageShellProps = {
   children: ReactNode;
   className?: string;
+  containerClassName?: string;
 };
 
-export function PublicPageShell({ children, className }: PublicPageShellProps) {
+export function PublicPageShell({ children, className, containerClassName }: PublicPageShellProps) {
   return (
     <KeyboardSafeViewportMetricsProvider>
       <main
         className="overflow-x-hidden overflow-y-auto bg-[var(--bg-canvas)] text-[var(--text-strong)]"
         style={{ height: KEYBOARD_SAFE_VIEWPORT_HEIGHT_CSS_VALUE }}
       >
-        <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10">
+        <div
+          className={cn(
+            "mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 py-8 sm:px-8 sm:py-10",
+            containerClassName,
+          )}
+        >
           <header className="flex items-center gap-3 border-b border-[var(--border-soft)] pb-6">
             <img
               src="/icon.svg"
