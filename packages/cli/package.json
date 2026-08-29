@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@conductor-oss/core": "workspace:*",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "ora": "^9.3.0",
     "yaml": "^2.9.0"
