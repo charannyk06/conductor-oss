@@ -12,13 +12,13 @@
     "test": "tsx --test src/lib/auth.test.ts src/lib/config.test.ts src/lib/security.test.ts src/lib/types.test.ts src/sessions/SessionStore.test.ts src/browser/BrowserManager.test.ts src/browser/tunnel.test.ts src/routes/health.test.ts"
   },
   "dependencies": {
-    "@puppeteer/browsers": "^3.0.5",
-    "fastify": "^5.11.2",
-    "puppeteer-core": "^25.4.0"
+    "@puppeteer/browsers": "^3.2.1",
+    "fastify": "^5.12.1",
+    "puppeteer-core": "^25.8.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "tsx": "^4.23.5",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },
   "overrides": {
