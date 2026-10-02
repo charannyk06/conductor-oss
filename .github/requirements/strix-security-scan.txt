@@ -125,7 +125,7 @@ aiohttp==3.14.3 \
     --hash=sha256:fa9467a8113aa69d3d7c55a70ef0b7c636010a40993f3df9d9d0d73b3eb7ef24 \
     --hash=sha256:fd51ebf9d3a00c074df4ede271023f4d2dba289bcc740b88191872716014e3c5
     # via
-    #   -r .github/requirements/strix-security-scan.in
+    #   -r strix-security-scan.in
     #   gql
     #   litellm
 aiosignal==1.4.0 \
@@ -157,6 +157,16 @@ backoff==2.2.1 \
     --hash=sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba \
     --hash=sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8
     # via gql
+boto3==1.43.107 \
+    --hash=sha256:632a4f8298725b94144c8cd383cbdacb34624daa73221e954c3d33ac6e2528d6 \
+    --hash=sha256:c4e0f1a0295cbb7103f2950128cf88463c076d220080a7d0f127cf834969fc3a
+    # via litellm
+botocore==1.43.107 \
+    --hash=sha256:23cbe854e815dbaccf097f7fd32b461c9e1d2ed7e0c7dcc5658218704509d840 \
+    --hash=sha256:4a37fa072a00280c746313532d19b00e2dc53f1993222601df104d71d548d5b6
+    # via
+    #   boto3
+    #   s3transfer
 caido-sdk-client==0.2.0 \
     --hash=sha256:39988fe07b3fa9c69adbd49662db660d7707d60d9245109b1623def97b39bac8 \
     --hash=sha256:bc573651681c093ee9663c7924d38d522a89cea60e2ce00d34ba9b02942b1da1
@@ -426,7 +436,7 @@ cryptography==50.0.0 \
     --hash=sha256:f89831ef99dd7dd169ab06d63a831adb9e20a87aac6d380266bbda5823349169 \
     --hash=sha256:fd9192b7b70c573d7f214eb1ae35e00d359f6f5e4b27c7e21e30de1fc6204645
     # via
-    #   -r .github/requirements/strix-security-scan.in
+    #   -r strix-security-scan.in
     #   pyjwt
     #   strix-agent
 cvss==3.6 \
@@ -663,7 +673,7 @@ fsspec==2026.6.0 \
     --hash=sha256:02e0b71817df9b2169dc30a16832045764def1191b43dcff5bb85bdee212d2a1 \
     --hash=sha256:f5bac145310fe30e16e1471bd6840b2d990d609e872251d7e674241822abf01a
     # via huggingface-hub
-gql==4.0.0 \
+gql[aiohttp,websockets]==4.0.0 \
     --hash=sha256:f22980844eb6a7c0266ffc70f111b9c7e7c7c13da38c3b439afc7eab3d7c9c8e \
     --hash=sha256:f3beed7c531218eb24d97cb7df031b4a84fdb462f4a2beb86e2633d395937479
     # via
@@ -683,6 +693,10 @@ h11==0.16.0 \
     # via
     #   httpcore
     #   uvicorn
+h2==4.4.1 \
+    --hash=sha256:0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6 \
+    --hash=sha256:4e866ffb1a869ae14dd9b5e6beb5c24a13da0495ad72b65925ded182521c1516
+    # via httpx
 hf-xet==1.5.1 \
     --hash=sha256:0c97106032ef70467b4f6bc2d0ccc266d7613ee076afc56516c502f87ce1c4a6 \
     --hash=sha256:3474760d10e3bb6f92ff3f024fcb00c0b3e4001e9b035c7483e49a5dd17aa70f \
@@ -710,11 +724,15 @@ hf-xet==1.5.1 \
     --hash=sha256:f61e3665892a6c8c5e765395838b8ddf36185da835253d4bc4509a81e49fb342 \
     --hash=sha256:f7b3002f95d1c13e24bcb4537baa8f0eb3838957067c91bb4959bc004a6435f5
     # via huggingface-hub
+hpack==4.2.0 \
+    --hash=sha256:0895cfa3b5531fc65fe439c05eb65144f123bf7a394fcaa56aa423548d8e45c0 \
+    --hash=sha256:858ac0b02280fa582b5080d68db0899c62a80375e0e5413a74970c5e518b6986
+    # via h2
 httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8
     # via httpx
-httpx==0.28.1 \
+httpx[http2]==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via
@@ -730,6 +748,10 @@ huggingface-hub==1.23.0 \
     --hash=sha256:b1d604788f5adc7f0eb246e03e0ec19011ca06e38400218c347dccc3dffa64a2 \
     --hash=sha256:c04997fb8bbdace1e57b7703d30ed7678af51f70d00d241819ff411b92ae9a88
     # via tokenizers
+hyperframe==6.1.0 \
+    --hash=sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5 \
+    --hash=sha256:f630908a00854a7adeabd6382b43923a4c4cd4b821fcb527e6ab9e15382a3b08
+    # via h2
 idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2 \
     --hash=sha256:ffb385a7e039654cef1ab9ef32c6fafe283c0c0467bba1d9029738ce4a14a848
@@ -853,6 +875,12 @@ jiter==0.16.0 \
     --hash=sha256:f4444a83f946605990c98f625cdd3d2725bfb818158760c5748c653170a20e0e \
     --hash=sha256:fb08c276dd02dac3a284acdd02cacc630d2e3cd6572a4b85519f35cbd133c3de
     # via openai
+jmespath==1.1.0 \
+    --hash=sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d \
+    --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+    # via
+    #   boto3
+    #   botocore
 jsonschema==4.26.0 \
     --hash=sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
@@ -867,13 +895,19 @@ linkify-it-py==2.1.0 \
     --hash=sha256:0d252c1594ecba2ecedc444053db5d3a9b7ec1b0dd929c8f1d74dce89f86c05e \
     --hash=sha256:43360231720999c10e9328dc3691160e27a718e280673d444c38d7d3aaa3b98b
     # via markdown-it-py
-litellm==1.91.1 \
-    --hash=sha256:49a24593df7e37262c52243a8e07572d451d37c100aa1b1f347d80d501d2e386 \
-    --hash=sha256:bf8e3d23cddf0eb4c05714dffcaafd8a944adf0f9c9b01c6c863b2637309de2e
+litellm==1.103.2 \
+    --hash=sha256:0dc3fb3439653e218bca4c905efd5bdb69e61ab4df31dbb0ede05013e1c4c649 \
+    --hash=sha256:2dc9ebb340a9b3ba0e0a72e6ba86d28b702f5489e53eb6ef96c5831fcaa50108 \
+    --hash=sha256:36632b326132139db55eb47186b08f8425cb8c1757f0b3201ee2aa251139aa0a \
+    --hash=sha256:a9d54a0e48c5342b7cbfeb7f0053caca2aa0bb5d68ed69133ccf7107402855cb \
+    --hash=sha256:c9c4b32c685ca62d7eaf246c94e4a943c884d1ab56607b408b2c9cdf959b658c \
+    --hash=sha256:f73617d4d6b6741903f01f003b23c825045276b35a057a72080c816772a90e31 \
+    --hash=sha256:fa4f6f158bb6e9da41958fe57dd292ac851f23ecceb75b50e70177255e291d3b \
+    --hash=sha256:ff38483d5dd7384e285aaec0d60ce4b0924a5c14f7250af6549baac409ca4150
     # via
     #   openai-agents
     #   strix-agent
-markdown-it-py==4.2.0 \
+markdown-it-py[linkify]==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
     # via
@@ -1140,7 +1174,7 @@ openai==2.44.0 \
     #   litellm
     #   openai-agents
     #   strix-agent
-openai-agents==0.14.6 \
+openai-agents[litellm]==0.14.6 \
     --hash=sha256:e9d16b835f73be4c5e3798694f90d7a62efcade931e59416bc7462c850e15705 \
     --hash=sha256:fdd3fb459892c8af5d0b522908b544e96f6217c7254ba55e966424493b43c1ed
     # via strix-agent
@@ -1507,6 +1541,7 @@ pydantic-settings==2.14.2 \
     --hash=sha256:a20c97b37910b6550d5ea50fbcc2d4187defe58cd57070b73863d069419c9440 \
     --hash=sha256:c19dd64b19097f1de80184f0cc7b0272a13ae6e170cbf240a3e27e381ed14a5f
     # via
+    #   litellm
     #   mcp
     #   strix-agent
 pygments==2.20.0 \
@@ -1515,14 +1550,18 @@ pygments==2.20.0 \
     # via
     #   rich
     #   textual
-pyjwt==2.13.0 \
+pyjwt[crypto]==2.13.0 \
     --hash=sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423 \
     --hash=sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728
     # via mcp
-pypdf==6.15.0 \
-    --hash=sha256:14e001d6504822cb1ca9c7ed9a69bccb320f59b320730f55af804361abe4d5ee \
-    --hash=sha256:d39c4d955a76409284a905e2d65b40076d77ab76129e0faaeeb6612403ecfc79
+pypdf==6.19.0 \
+    --hash=sha256:7e5d6e730e7dae87d560a2cee218b852f6498c8be61966f3cd02ead971e48d14 \
+    --hash=sha256:bbc43aca292369ccc6cbc8a921991ecf2538a3587ab5a116eff06c321d647155
     # via strix-agent
+python-dateutil==2.9.0.post0 \
+    --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
+    --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+    # via botocore
 python-dotenv==1.2.2 \
     --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a \
     --hash=sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3
@@ -1868,6 +1907,14 @@ rpds-py==2026.6.3 \
     # via
     #   jsonschema
     #   referencing
+s3transfer==0.19.2 \
+    --hash=sha256:ba0309fd86be3c27dbf78cdd813c13c5e1df16e5874b99d2535ebbdfb9892993 \
+    --hash=sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25
+    # via boto3
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
+    --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
+    # via python-dateutil
 sniffio==1.3.1 \
     --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2 \
     --hash=sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc
@@ -1885,7 +1932,7 @@ starlette==1.3.1 \
 strix-agent==1.3.1 \
     --hash=sha256:4f37f436d1f75c7eeabe27c46ea81286a9593c21848589bf03e716f16eb987ea \
     --hash=sha256:86a08468faa045229d7bc0b26688fbd2c5d5f2c6da8bba01dbbe06f95cdab049
-    # via -r .github/requirements/strix-security-scan.in
+    # via -r strix-security-scan.in
 textual==8.2.8 \
     --hash=sha256:267375fd402dc8d981457212efa71f0e3365fd17bba144ba9bb3ed7563cb374a \
     --hash=sha256:3f106a9fbc73e39dd266c9712432087de78a6d644084c7c241d6a25c3169115b
@@ -1982,17 +2029,12 @@ typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
     # via
-    #   aiohttp
-    #   aiosignal
-    #   anyio
     #   huggingface-hub
     #   mcp
     #   openai
     #   openai-agents
     #   pydantic
     #   pydantic-core
-    #   referencing
-    #   starlette
     #   textual
     #   typing-inspection
 typing-inspection==0.4.2 \
@@ -2010,6 +2052,7 @@ urllib3==2.7.0 \
     --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
     --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
     # via
+    #   botocore
     #   docker
     #   requests
     #   types-requests
