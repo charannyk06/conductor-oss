@@ -146,6 +146,9 @@ Use this if you want a more guided first-run flow.
 ### Workspace entry
 The dashboard starts with a workspace-first flow. You link repos first, then manage sessions from there.
 
+### Bots
+Named teammates you message instead of filling in a board. Each bot has a role, standing instructions, optional scheduled routines, and can answer `@mentions` from GitHub and Slack. The Bots view also has an inbox of everything waiting on you, and the dashboard can be installed on a phone with push notifications. See [docs/bots.md](docs/bots.md).
+
 ### Session detail
 Each session page is built around four core surfaces:
 - **Terminal**, the live interactive PTY session

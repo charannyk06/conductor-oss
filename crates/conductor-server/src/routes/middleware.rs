@@ -178,7 +178,8 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     // it as a public method.
     let is_get = *method == Method::GET || *method == Method::HEAD;
 
-    if path == "/api/health" || path == "/api/github/webhook" {
+    // Webhook endpoints authenticate each request with a provider signature instead.
+    if path == "/api/health" || path == "/api/github/webhook" || path == "/api/slack/events" {
         return None;
     }
 
@@ -201,6 +202,12 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     }
 
     if path.starts_with("/api/access") {
+        return Some(AccessRole::Admin);
+    }
+
+    // MCP servers are commands this machine will execute, and their environment can hold
+    // credentials, so both reading and changing them is admin-only.
+    if path.starts_with("/api/mcp-servers") {
         return Some(AccessRole::Admin);
     }
 

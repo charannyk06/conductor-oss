@@ -1,9 +1,11 @@
 pub mod acp;
 mod acp_prompt;
+mod bot_delivery;
 mod dispatcher_task_lifecycle;
 pub mod error_logger;
 pub mod mcp;
 pub mod notifier;
+mod push;
 pub mod routes;
 mod runtime;
 mod session_gc;
@@ -63,6 +65,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.start_terminal_host_watchdog();
     state.start_bridge_registry_watchdog();
     state.start_acp_dispatcher_watchdog();
+    state.start_bot_watchdog();
     state.archive_stale_non_ttyd_sessions().await;
     state.restore_runtime_sessions().await;
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;
@@ -84,11 +87,13 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
 
     let app = Router::new()
         .merge(routes::app_update::router())
+        .merge(routes::bots::router())
         .merge(routes::config::router())
         .merge(routes::dispatcher::router())
         .merge(routes::errors::router())
         .merge(routes::events::router())
         .merge(routes::health::router())
+        .merge(routes::mcp_servers::router())
         .merge(routes::sessions::router())
         .merge(routes::session_workspace::router())
         .merge(routes::repositories::router())

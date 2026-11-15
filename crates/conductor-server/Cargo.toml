@@ -38,6 +38,10 @@ tokio-tungstenite = "0.28"
 futures-util = "0.3"
 which = "8"
 url = { workspace = true }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
+hkdf = "0.12"
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tower = "0.5"

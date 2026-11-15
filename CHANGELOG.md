@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teammate bots** — a chat-first Bots view (`/bots`) where named bots with a role and standing instructions plan work in a project and hand tasks to coding agents. Includes an inbox of everything waiting on you, scheduled routines, replies to `@mentions` in GitHub comments and Slack, an installable dashboard with Web Push notifications, and voice input in the dispatcher composer. See `docs/bots.md`.
+- **MCP Servers settings** — manage global and per-project MCP servers from the dashboard, with stored environment values masked.
 - **Multi-agent skills tab** — the dashboard now installs official skill bundles for Claude Code, Codex, Gemini, Amp, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot, and the launcher forwards backend URL env vars into the web app automatically.
 - **Terminal validation coverage** — regression tests now cover terminal snapshot restore assembly, terminal route wiring, remote transport fallback gating, and frontend terminal helper behavior for mobile and remote flows.
 - **Terminal benchmark hooks** — terminal connection, snapshot, and resize endpoints now emit `Server-Timing` plus terminal-specific diagnostic headers for repeatable benchmark capture.

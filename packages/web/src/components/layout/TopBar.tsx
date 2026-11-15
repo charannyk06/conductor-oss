@@ -2,6 +2,7 @@
 
 import { memo, type ReactNode } from "react";
 import { LifeBuoy, Settings } from "lucide-react";
+import { BotsNavLink } from "@/components/layout/BotsNavLink";
 import { CONDUCTOR_SUPPORT_DISCUSSIONS_URL } from "@/lib/supportLinks";
 
 interface TopBarProps {
@@ -24,6 +25,7 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
             {rightContent}
           </div>
         ) : null}
+        <BotsNavLink />
         <a
           href={CONDUCTOR_SUPPORT_DISCUSSIONS_URL}
           target="_blank"

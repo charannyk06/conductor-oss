@@ -723,6 +723,20 @@ async fn receive_github_webhook(
         return ok(json!({ "ok": true, "event": "ping" }));
     }
 
+    // A comment that mentions a teammate bot becomes a request to that bot. This runs in the
+    // background so GitHub gets its response before the agent turn starts.
+    if event == "issue_comment" {
+        let bot_state = state.clone();
+        let bot_payload = payload.clone();
+        tokio::spawn(async move {
+            if let Some(bot_name) =
+                crate::bot_delivery::handle_github_comment(&bot_state, &bot_payload).await
+            {
+                tracing::info!(bot = bot_name, "routed GitHub mention to bot");
+            }
+        });
+    }
+
     if !is_sync_relevant_github_event(&event) {
         return ok(json!({
             "ok": true,

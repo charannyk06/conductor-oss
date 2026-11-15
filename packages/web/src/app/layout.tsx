@@ -3,6 +3,7 @@ import { IBM_Plex_Mono, IBM_Plex_Sans, Orbitron, Tomorrow } from "next/font/goog
 import { ClerkProvider } from "@clerk/nextjs";
 import { Analytics } from "@vercel/analytics/next";
 import { headers } from "next/headers";
+import { ServiceWorkerRegistration } from "@/components/layout/ServiceWorkerRegistration";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { resolveRustBackendUrl } from "@/lib/backendUrl";
@@ -43,12 +44,23 @@ const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === 
 export const metadata: Metadata = {
   title: "Conductor",
   description: "Multi-agent orchestrator dashboard",
+  manifest: "/manifest.webmanifest",
+  applicationName: "Conductor",
+  appleWebApp: {
+    capable: true,
+    title: "Conductor",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    apple: [{ url: "/pwa/icon-180.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  themeColor: "#030303",
 };
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -70,6 +82,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         <TooltipProvider>
           <ThemeProvider>
             {children}
+            <ServiceWorkerRegistration />
             {isVercelDeployment ? <Analytics /> : null}
           </ThemeProvider>
         </TooltipProvider>

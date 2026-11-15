@@ -59,6 +59,7 @@ import {
   KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
 } from "@/components/layout/keyboardSafeViewport";
+import { McpServersPanel } from "@/features/dashboard/components/McpServersPanel";
 import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
   type RuntimeAgentModelCatalog,
@@ -391,7 +392,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
   { id: "agents", label: "Agents", icon: Bot, implemented: true },
-  { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
+  { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: true },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: false },
 ];
 
@@ -2615,6 +2616,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   const isPreferenceFormTab = isPreferencesTab || isGeneralTab || isAgentsTab;
   const isRepositoriesTab = activeTabItem.id === "repositories";
   const isOrganizationTab = activeTabItem.id === "organization";
+  const isMcpTab = activeTabItem.id === "mcp";
   const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
   const onboardingHasRepositoryStep = visibleTabs.some((tab) => tab.id === "repositories");
   const accessCanEdit = accessSettings.current.role === "admin";
@@ -3216,6 +3218,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                   )}
 
                 </div>
+              ) : isMcpTab ? (
+                <McpServersPanel />
               ) : isProfileTab ? (
                 <SettingsProfilePanel
                   profile={profile}

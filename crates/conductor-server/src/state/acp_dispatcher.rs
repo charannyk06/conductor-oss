@@ -4040,6 +4040,8 @@ impl AppState {
             .get(thread_id)
             .cloned()
             .unwrap_or_default();
+        // Threads owned by a teammate bot carry that bot's persona on every turn.
+        let bot_context = self.bot_runtime_context_for_thread(thread_id).await;
 
         let mut threads = self.dispatcher_threads.write().await;
         let thread = threads
@@ -4100,6 +4102,10 @@ impl AppState {
         {
             runtime_message.push_str("\n\n");
             runtime_message.push_str(runtime_context);
+        }
+        if let Some(bot_context) = bot_context.as_deref() {
+            runtime_message.push_str("\n\n");
+            runtime_message.push_str(bot_context);
         }
 
         if thread.model != effective_model {

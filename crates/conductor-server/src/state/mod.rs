@@ -4,6 +4,7 @@ mod acp_memory;
 mod acp_parser;
 mod app_update;
 mod board_collaboration;
+pub(crate) mod bots;
 mod bridge_registry;
 mod detached;
 mod dispatcher_bindings;
@@ -205,6 +206,10 @@ pub struct AppState {
     dispatcher_transition_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub active_session_skills: Mutex<HashMap<String, Vec<String>>>,
     terminal_restore_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) bots: RwLock<bots::BotStore>,
+    pub(crate) bot_runtime: Mutex<bots::BotRuntimeState>,
+    pub(crate) bot_thread_guard: Mutex<()>,
+    pub(crate) push_store: Mutex<Option<crate::push::PushStore>>,
     kill_detached_children_on_drop: AtomicBool,
 }
 
@@ -253,6 +258,10 @@ impl AppState {
             dispatcher_transition_guards: Mutex::new(HashMap::new()),
             active_session_skills: Mutex::new(HashMap::new()),
             terminal_restore_guards: Mutex::new(HashMap::new()),
+            bots: RwLock::new(bots::BotStore::default()),
+            bot_runtime: Mutex::new(bots::BotRuntimeState::default()),
+            bot_thread_guard: Mutex::new(()),
+            push_store: Mutex::new(None),
             kill_detached_children_on_drop: AtomicBool::new(cfg!(test)),
         });
         state.ensure_session_store();
@@ -261,6 +270,7 @@ impl AppState {
         state.start_session_cleanup_janitor();
         state.load_dispatchers_from_disk().await;
         state.load_dispatcher_bindings_from_disk().await;
+        state.load_bots_from_disk().await;
         state.load_board_collaboration_from_disk().await;
         state.start_session_flush_watchdog();
         state.start_dispatcher_flush_watchdog();

@@ -34,6 +34,8 @@ import {
   X,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { ComposerVoiceButton } from "@/components/dispatcher/ComposerVoiceButton";
+import { appendTranscript } from "@/lib/voiceInput";
 import { MobileDropdownMenuContent } from "@/components/ui/MobileDropdownMenu";
 import {
   DISPATCHER_CHAT_FEED_SCROLL_CLASS_NAME,
@@ -2728,6 +2730,12 @@ export function DispatcherSessionPane({
                   ) : null}
                 </div>
               </div>
+
+              <ComposerVoiceButton
+                disabled={!canContinue || sending || !isActiveInstalled}
+                onTranscript={(transcript) =>
+                  setComposerValue((current) => appendTranscript(current, transcript))}
+              />
 
               {showComposerStopAction ? (
                 <button
