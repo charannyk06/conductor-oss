@@ -1,5 +1,6 @@
 pub mod acp;
 mod acp_prompt;
+pub mod agent_auth;
 mod dispatcher_task_lifecycle;
 pub mod error_logger;
 pub mod mcp;
@@ -10,6 +11,7 @@ mod session_gc;
 pub mod state;
 mod task_context;
 pub mod tracker;
+pub mod vault;
 
 use anyhow::Result;
 use axum::extract::DefaultBodyLimit;
@@ -104,6 +106,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
         .merge(routes::terminal::router())
+        .merge(routes::vault::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::middleware::require_auth_when_remote,

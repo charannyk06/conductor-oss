@@ -1060,7 +1060,7 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
             let (description, homepage, icon_url) = agent_metadata(&kind);
             let (runtime_model_catalog, auth) = futures_util::future::join(
                 build_runtime_model_catalog(&kind, &binary_path),
-                super::agent_auth::detect_agent_auth(&kind, &binary_path),
+                crate::agent_auth::detect_agent_auth(&kind, &binary_path),
             )
             .await;
             let signed_in = auth.is_usable();

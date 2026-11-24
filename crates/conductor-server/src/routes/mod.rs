@@ -1,4 +1,3 @@
-pub mod agent_auth;
 pub mod agents;
 pub mod api_error;
 pub mod app_update;
@@ -23,6 +22,7 @@ pub mod skills;
 pub mod tasks;
 pub mod terminal;
 pub mod ttyd_protocol;
+pub mod vault;
 pub mod workspaces;
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ import {
   FolderGit2,
   FolderKanban,
   FolderOpen,
+  KeyRound,
   List,
   Loader2,
   PlugZap,
@@ -59,6 +60,7 @@ import {
   KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
 } from "@/components/layout/keyboardSafeViewport";
+import { SettingsPasswordsPanel } from "./SettingsPasswordsPanel";
 import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
   type RuntimeAgentModelCatalog,
@@ -376,6 +378,7 @@ type SettingsTabId =
   | "projects"
   | "agents"
   | "mcp"
+  | "passwords"
   | "preferences";
 
 type SettingsTab = {
@@ -392,6 +395,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
   { id: "agents", label: "Agents", icon: Bot, implemented: true },
+  { id: "passwords", label: "Passwords", icon: KeyRound, implemented: true },
   { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: false },
 ];
@@ -3226,6 +3230,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     void loadProfile();
                   }}
                 />
+              ) : activeTabItem.id === "passwords" ? (
+                <SettingsPasswordsPanel />
               ) : isRepositoriesTab ? (
                 <div className="space-y-5">
                   <section className="space-y-1">

@@ -19,5 +19,5 @@
   "cliCommands": ["acp-server", "bridge", "cleanup", "dashboard", "doctor", "feedback", "init", "kill", "list", "mcp-server", "restore", "retry", "send", "setup", "spawn", "start", "status", "task"],
   "mcpTools": ["conductor_dispatch", "conductor_dispatcher_create_task", "conductor_dispatcher_handoff_task", "conductor_dispatcher_update_task", "conductor_get_board", "conductor_list_projects", "conductor_list_sessions", "conductor_session_status", "conductor_task_graph"],
   "features": ["board-watcher", "mcp-server", "worktrees", "direct-pty-runtime", "github-integration", "webhook", "desktop-notifications", "discord-notifications", "session-preview", "session-diff", "access-control"],
-  "apiRoutes": ["agents", "app-update", "attachments", "boards", "config", "context-files", "dispatcher", "errors", "events", "filesystem", "github", "health", "notifications", "project-notes", "projects", "repositories", "session-workspace", "sessions", "skills", "tasks", "terminal", "workspaces"]
+  "apiRoutes": ["agents", "app-update", "attachments", "boards", "config", "context-files", "dispatcher", "errors", "events", "filesystem", "github", "health", "notifications", "project-notes", "projects", "repositories", "session-workspace", "sessions", "skills", "tasks", "terminal", "vault", "workspaces"]
 }

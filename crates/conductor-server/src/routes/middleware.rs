@@ -200,7 +200,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return Some(AccessRole::Operator);
     }
 
-    if path.starts_with("/api/access") {
+    if path.starts_with("/api/access") || path.starts_with("/api/vault") {
         return Some(AccessRole::Admin);
     }
 
