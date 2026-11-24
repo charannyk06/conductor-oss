@@ -351,7 +351,6 @@ conductor-oss/
 │   ├── conductor-core/       # Config, board parsing, task and session models, scaffolding
 │   ├── conductor-db/         # SQLite persistence
 │   ├── conductor-executors/  # Agent adapters and process management
-│   ├── conductor-git/        # Git and worktree operations
 │   ├── conductor-relay/      # Relay server for bridge and remote terminal flows
 │   ├── conductor-server/     # Axum server, routes, runtime state, SSE
 │   ├── conductor-types/      # Shared transport and bridge protocol types

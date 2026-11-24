@@ -27,7 +27,6 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 | `conductor-server` | Axum HTTP server, routes, state management, SSE streaming |
 | `conductor-db` | SQLite persistence via sqlx, migrations |
 | `conductor-executors` | Agent adapters, process management, prompt delivery |
-| `conductor-git` | Git/worktree operations |
 | `conductor-relay` | Relay server for bridge and remote terminal flows |
 | `conductor-types` | Shared bridge and transport protocol types |
 | `conductor-watcher` | File system watching (board changes) |

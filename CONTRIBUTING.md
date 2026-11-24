@@ -60,7 +60,6 @@ crates/                      # Rust workspace
   conductor-server/          # Axum HTTP server, routes, state, SSE streaming
   conductor-db/              # SQLite persistence via sqlx
   conductor-executors/       # Agent adapters, process management
-  conductor-git/             # Git/worktree operations
   conductor-relay/           # Relay server for bridge and remote terminal flows
   conductor-types/           # Shared bridge/transport protocol types
   conductor-watcher/         # File system watching

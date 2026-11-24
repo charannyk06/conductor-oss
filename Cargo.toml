@@ -6,7 +6,6 @@ members = [
     "crates/conductor-types",
     "crates/conductor-server",
     "crates/conductor-executors",
-    "crates/conductor-git",
     "crates/conductor-watcher",
     "crates/conductor-cli",
     "crates/conductor-relay",

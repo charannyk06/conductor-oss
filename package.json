@@ -25,8 +25,6 @@
     "dev:full": "sh -c 'APP_ROOT=$PWD; WORKSPACE_ROOT=${CONDUCTOR_WORKSPACE:-${WORKSPACE:-$APP_ROOT}}; ENV_FILE=${CONDUCTOR_ENV_FILE:-}; if [ -z \"$ENV_FILE\" ]; then if [ -f \"$APP_ROOT/.env.local\" ]; then ENV_FILE=\"$APP_ROOT/.env.local\"; elif [ -f \"$WORKSPACE_ROOT/.env.local\" ]; then ENV_FILE=\"$WORKSPACE_ROOT/.env.local\"; fi; fi; if [ -n \"$ENV_FILE\" ] && [ -f \"$ENV_FILE\" ]; then set -a; . \"$ENV_FILE\"; set +a; fi; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE_ROOT/conductor.yaml}; DEV_DASHBOARD_PORT=${CONDUCTOR_DEV_DASHBOARD_PORT:-${PORT:-3000}}; DEV_BACKEND_PORT=${CONDUCTOR_DEV_BACKEND_PORT:-${CONDUCTOR_BACKEND_PORT:-4749}}; CONDUCTOR_WORKSPACE=$WORKSPACE_ROOT CO_CONFIG_PATH=$CONFIG bun run --cwd packages/cli dev -- start --workspace \"$WORKSPACE_ROOT\" --backend-port $DEV_BACKEND_PORT --port $DEV_DASHBOARD_PORT'",
     "prod:prepare": "bun run --cwd packages/web build && cargo build -p conductor-cli --release",
     "prod:full": "sh ./scripts/run-prod-stack.sh",
-    "executor:build": "cargo build --manifest-path orchestrator/runtime-sidecar/Cargo.toml --release",
-    "executor:dev": "cargo run --manifest-path orchestrator/runtime-sidecar/Cargo.toml",
     "clean": "bun run --cwd packages/web clean && cargo clean",
     "smoke:openclaw": "bun scripts/openclaw-dispatcher-smoke.mjs"
   },

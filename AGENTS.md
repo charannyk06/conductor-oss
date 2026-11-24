@@ -47,7 +47,6 @@ crates/
   conductor-server/     # HTTP server, routes, state, SSE
   conductor-db/         # SQLite persistence
   conductor-executors/  # Agent adapters, process management
-  conductor-git/        # Git operations
   conductor-relay/      # Relay server for bridge and remote terminal flows
   conductor-watcher/    # File system watching
   conductor-cli/        # Rust CLI
