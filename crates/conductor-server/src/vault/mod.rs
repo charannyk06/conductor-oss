@@ -1,13 +1,16 @@
 //! Local credential vault.
 //!
 //! Logins imported from a password manager are kept in one file encrypted with
-//! AES-256-GCM. The key is a random 32-byte file beside it, readable only by
-//! the owning user. Passwords never leave this module through the listing API;
+//! AES-256-GCM. Passwords never leave this module through the listing API;
 //! only [`Vault::reveal`] returns one, for the component that fills a login
 //! form on the user's behalf.
 //!
-//! The key file protects the vault if the data file alone is copied or backed
-//! up. It does not protect against other programs running as the same user.
+//! The 32-byte key lives in the operating system's keychain (macOS Keychain,
+//! Windows Credential Manager, or the Secret Service on Linux). Where no
+//! keychain is reachable, such as a headless Linux machine, it falls back to
+//! an owner-only file beside the vault; that fallback does not protect
+//! against other programs running as the same user. A key found in the file
+//! is moved into the keychain the first time one is available.
 
 pub mod import;
 
@@ -35,8 +38,10 @@ const FORMAT_VERSION: u8 = 1;
 pub enum VaultError {
     #[error("vault storage error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("the vault key file is missing or damaged, so saved credentials cannot be read")]
+    #[error("the vault key is missing or damaged, so saved credentials cannot be read")]
     BadKey,
+    #[error("the system keychain holding the vault key could not be reached: {0}")]
+    KeychainUnavailable(String),
     #[error(
         "the vault file could not be decrypted; it is damaged or was written with a different key"
     )]
@@ -86,23 +91,93 @@ pub struct ImportReport {
     pub unchanged: usize,
 }
 
+/// Where the vault's encryption key is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyStorage {
+    Keychain,
+    File,
+}
+
+/// A place outside the vault directory that can hold the key.
+pub trait KeyStore: Send + Sync {
+    /// `Ok(None)` means the store works but holds no key; `Err` means the
+    /// store itself cannot be used.
+    fn get(&self) -> Result<Option<Vec<u8>>, String>;
+    fn set(&self, key: &[u8]) -> Result<(), String>;
+    fn delete(&self) -> Result<(), String>;
+}
+
+/// The operating system's credential store.
+pub struct OsKeychain;
+
+impl OsKeychain {
+    fn entry() -> Result<keyring::Entry, String> {
+        keyring::Entry::new("conductor-oss", "credential-vault-key").map_err(|err| err.to_string())
+    }
+}
+
+impl KeyStore for OsKeychain {
+    fn get(&self) -> Result<Option<Vec<u8>>, String> {
+        match Self::entry()?.get_secret() {
+            Ok(key) => Ok(Some(key)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    fn set(&self, key: &[u8]) -> Result<(), String> {
+        Self::entry()?
+            .set_secret(key)
+            .map_err(|err| err.to_string())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        match Self::entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
 pub struct Vault {
     dir: PathBuf,
+    keychain: Option<Box<dyn KeyStore>>,
     /// Serialises read-modify-write cycles within this process.
     lock: Mutex<()>,
 }
 
 impl Vault {
+    /// A vault whose key is kept in a file inside `dir`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
+            keychain: None,
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// A vault whose key is kept in `keychain`, with the key file as fallback.
+    pub fn with_keychain(dir: impl Into<PathBuf>, keychain: Box<dyn KeyStore>) -> Self {
+        Self {
+            dir: dir.into(),
+            keychain: Some(keychain),
             lock: Mutex::new(()),
         }
     }
 
     /// The per-user vault under the Conductor data directory.
     pub fn default_location() -> Self {
-        Self::new(expand_home(Path::new(CONDUCTOR_DATA_DIR)).join("vault"))
+        Self::with_keychain(
+            expand_home(Path::new(CONDUCTOR_DATA_DIR)).join("vault"),
+            Box::new(OsKeychain),
+        )
+    }
+
+    /// Where the key currently lives, or `None` before anything is saved.
+    pub fn key_storage(&self) -> Result<Option<KeyStorage>, VaultError> {
+        let _guard = self.guard();
+        Ok(self.read_key()?.map(|(_, storage)| storage))
     }
 
     pub fn list(&self) -> Result<Vec<CredentialSummary>, VaultError> {
@@ -189,6 +264,11 @@ impl Vault {
                 Err(err) => return Err(err.into()),
             }
         }
+        if let Some(keychain) = &self.keychain {
+            // Best effort: with the data file gone, a key left behind in an
+            // unreachable keychain protects nothing.
+            let _ = keychain.delete();
+        }
         Ok(removed)
     }
 
@@ -214,7 +294,7 @@ impl Vault {
         let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| VaultError::Format)?;
 
         // A data file without its key is unreadable; never mint a new key here.
-        let key = self.read_key()?.ok_or(VaultError::BadKey)?;
+        let (key, _) = self.read_key()?.ok_or(VaultError::BadKey)?;
         let mut buffer = ciphertext.to_vec();
         let plaintext = key
             .open_in_place(nonce, Aad::from([FORMAT_VERSION]), &mut buffer)
@@ -225,7 +305,7 @@ impl Vault {
     fn save(&self, contents: &VaultContents) -> Result<(), VaultError> {
         create_private_dir(&self.dir)?;
         let key = match self.read_key()? {
-            Some(key) => key,
+            Some((key, _)) => key,
             None => self.create_key()?,
         };
 
@@ -249,11 +329,38 @@ impl Vault {
         Ok(())
     }
 
-    fn read_key(&self) -> Result<Option<LessSafeKey>, VaultError> {
-        match fs::read(self.dir.join(KEY_FILE)) {
-            Ok(bytes) => make_key(&bytes).map(Some),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err.into()),
+    fn read_key(&self) -> Result<Option<(LessSafeKey, KeyStorage)>, VaultError> {
+        let file_key = match fs::read(self.dir.join(KEY_FILE)) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
+        };
+        let Some(keychain) = &self.keychain else {
+            return file_key
+                .map(|bytes| make_key(&bytes).map(|key| (key, KeyStorage::File)))
+                .transpose();
+        };
+
+        match (keychain.get(), file_key) {
+            (Ok(Some(bytes)), _) => Ok(Some((make_key(&bytes)?, KeyStorage::Keychain))),
+            (Ok(None), None) => Ok(None),
+            (Ok(None), Some(bytes)) => {
+                // Move a key left in the fallback file into the keychain.
+                let key = make_key(&bytes)?;
+                if keychain.set(&bytes).is_ok() {
+                    fs::remove_file(self.dir.join(KEY_FILE))?;
+                    Ok(Some((key, KeyStorage::Keychain)))
+                } else {
+                    Ok(Some((key, KeyStorage::File)))
+                }
+            }
+            (Err(_), Some(bytes)) => Ok(Some((make_key(&bytes)?, KeyStorage::File))),
+            // Without a file key, an unreachable keychain may still hold the
+            // real key, so report it rather than treating the key as absent.
+            (Err(reason), None) if self.dir.join(DATA_FILE).exists() => {
+                Err(VaultError::KeychainUnavailable(reason))
+            }
+            (Err(_), None) => Ok(None),
         }
     }
 
@@ -262,7 +369,13 @@ impl Vault {
         SystemRandom::new()
             .fill(&mut bytes)
             .map_err(|_| VaultError::BadKey)?;
-        write_private_file(&self.dir, KEY_FILE, &bytes)?;
+        let stored_in_keychain = self
+            .keychain
+            .as_ref()
+            .is_some_and(|keychain| keychain.set(&bytes).is_ok());
+        if !stored_in_keychain {
+            write_private_file(&self.dir, KEY_FILE, &bytes)?;
+        }
         make_key(&bytes)
     }
 }
@@ -478,6 +591,132 @@ mod tests {
         assert!(!dir.path().join(KEY_FILE).exists());
         assert!(vault.list().unwrap().is_empty());
         assert_eq!(vault.clear().unwrap(), 0);
+    }
+
+    /// An in-memory keychain that can be switched off to mimic a machine
+    /// with no credential store.
+    #[derive(Clone, Default)]
+    struct FakeKeychain {
+        key: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+        broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FakeKeychain {
+        fn set_broken(&self, broken: bool) {
+            self.broken
+                .store(broken, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn check(&self) -> Result<(), String> {
+            if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("no credential store".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl KeyStore for FakeKeychain {
+        fn get(&self) -> Result<Option<Vec<u8>>, String> {
+            self.check()?;
+            Ok(self.key.lock().unwrap().clone())
+        }
+
+        fn set(&self, key: &[u8]) -> Result<(), String> {
+            self.check()?;
+            *self.key.lock().unwrap() = Some(key.to_vec());
+            Ok(())
+        }
+
+        fn delete(&self) -> Result<(), String> {
+            self.check()?;
+            *self.key.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    fn one_login() -> Vec<ImportedLogin> {
+        vec![login("https://a.test", "ada", "one")]
+    }
+
+    #[test]
+    fn key_goes_to_the_keychain_and_no_key_file_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        assert_eq!(vault.key_storage().unwrap(), None);
+
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(vault.key_storage().unwrap(), Some(KeyStorage::Keychain));
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert_eq!(
+            keychain.key.lock().unwrap().as_ref().unwrap().len(),
+            KEY_LEN
+        );
+
+        let reopened = Vault::with_keychain(dir.path(), Box::new(keychain));
+        assert_eq!(reopened.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn file_key_is_moved_into_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        Vault::new(dir.path())
+            .import(ImportSource::Chrome, one_login())
+            .unwrap();
+        assert!(dir.path().join(KEY_FILE).exists());
+
+        let keychain = FakeKeychain::default();
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        assert_eq!(vault.list().unwrap().len(), 1);
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert!(keychain.key.lock().unwrap().is_some());
+        assert_eq!(vault.key_storage().unwrap(), Some(KeyStorage::Keychain));
+    }
+
+    #[test]
+    fn falls_back_to_the_key_file_without_a_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        keychain.set_broken(true);
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain));
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(vault.key_storage().unwrap(), Some(KeyStorage::File));
+        assert!(dir.path().join(KEY_FILE).exists());
+        assert_eq!(vault.list().unwrap().len(), 1);
+        assert_eq!(vault.clear().unwrap(), 1);
+        assert!(!dir.path().join(KEY_FILE).exists());
+    }
+
+    #[test]
+    fn unreachable_keychain_is_reported_not_treated_as_a_lost_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+
+        keychain.set_broken(true);
+        assert!(matches!(
+            vault.list(),
+            Err(VaultError::KeychainUnavailable(_))
+        ));
+        // Importing must not mint a second key over data it cannot read.
+        assert!(vault.import(ImportSource::Chrome, one_login()).is_err());
+        assert!(!dir.path().join(KEY_FILE).exists());
+
+        keychain.set_broken(false);
+        assert_eq!(vault.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clear_removes_the_keychain_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(vault.clear().unwrap(), 1);
+        assert!(keychain.key.lock().unwrap().is_none());
+        assert!(!dir.path().join(DATA_FILE).exists());
     }
 
     #[cfg(unix)]

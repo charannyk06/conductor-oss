@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock};
 use crate::routes::api_error::ApiError;
 use crate::state::AppState;
 use crate::vault::import::{parse_export, ImportSource};
-use crate::vault::{CredentialSummary, Vault, VaultError};
+use crate::vault::{CredentialSummary, KeyStorage, Vault, VaultError};
 
 static VAULT: LazyLock<Vault> = LazyLock::new(Vault::default_location);
 
@@ -43,13 +43,20 @@ where
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CredentialList {
     credentials: Vec<CredentialSummary>,
+    /// Where the encryption key is kept; absent until something is saved.
+    key_storage: Option<KeyStorage>,
 }
 
 async fn list_credentials() -> Result<Json<CredentialList>, ApiError> {
-    let credentials = with_vault(|vault| vault.list()).await?;
-    Ok(Json(CredentialList { credentials }))
+    let (credentials, key_storage) =
+        with_vault(|vault| Ok((vault.list()?, vault.key_storage()?))).await?;
+    Ok(Json(CredentialList {
+        credentials,
+        key_storage,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

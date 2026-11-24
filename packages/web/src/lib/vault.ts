@@ -42,6 +42,14 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+export type VaultKeyStorage = "keychain" | "file";
+
+/** Where the backend keeps the vault's encryption key; null before anything is saved. */
+export function parseVaultKeyStorage(payload: unknown): VaultKeyStorage | null {
+  const value = (payload as { keyStorage?: unknown } | null)?.keyStorage;
+  return value === "keychain" || value === "file" ? value : null;
+}
+
 export function parseVaultCredentials(payload: unknown): VaultCredential[] {
   const list = (payload as { credentials?: unknown } | null)?.credentials;
   if (!Array.isArray(list)) return [];

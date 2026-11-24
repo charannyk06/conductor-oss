@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { describeVaultImport, parseVaultCredentials, parseVaultImportResult } from "./vault";
+import {
+  describeVaultImport,
+  parseVaultCredentials,
+  parseVaultImportResult,
+  parseVaultKeyStorage,
+} from "./vault";
 
 test("parseVaultCredentials keeps valid entries and drops malformed ones", () => {
   const parsed = parseVaultCredentials({
@@ -29,4 +34,12 @@ test("describeVaultImport summarises only the non-zero counts", () => {
   assert.ok(minimal);
   assert.equal(describeVaultImport(minimal), "Imported from Chrome: 0 new.");
   assert.equal(parseVaultImportResult({ source: "other" }), null);
+});
+
+test("parseVaultKeyStorage accepts only known storage modes", () => {
+  assert.equal(parseVaultKeyStorage({ keyStorage: "keychain" }), "keychain");
+  assert.equal(parseVaultKeyStorage({ keyStorage: "file" }), "file");
+  assert.equal(parseVaultKeyStorage({ keyStorage: null }), null);
+  assert.equal(parseVaultKeyStorage({ keyStorage: "cloud" }), null);
+  assert.equal(parseVaultKeyStorage(null), null);
 });

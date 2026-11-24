@@ -6,8 +6,10 @@ import {
   describeVaultImport,
   parseVaultCredentials,
   parseVaultImportResult,
+  parseVaultKeyStorage,
   vaultSourceLabel,
   type VaultCredential,
+  type VaultKeyStorage,
   type VaultSource,
 } from "@/lib/vault";
 
@@ -27,6 +29,7 @@ async function readError(response: Response, fallback: string): Promise<string> 
 
 export function SettingsPasswordsPanel() {
   const [credentials, setCredentials] = useState<VaultCredential[]>([]);
+  const [keyStorage, setKeyStorage] = useState<VaultKeyStorage | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +45,9 @@ export function SettingsPasswordsPanel() {
         setError(await readError(response, "Could not load saved passwords."));
         return;
       }
-      setCredentials(parseVaultCredentials(await response.json()));
+      const payload: unknown = await response.json();
+      setCredentials(parseVaultCredentials(payload));
+      setKeyStorage(parseVaultKeyStorage(payload));
       setError(null);
     } catch {
       setError("Could not reach the Conductor backend.");
@@ -121,6 +126,17 @@ export function SettingsPasswordsPanel() {
           encrypted on this machine and are never shown here or sent anywhere else.
         </p>
       </section>
+
+      {keyStorage === "keychain" ? (
+        <p className="text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+          The encryption key is kept in this computer&apos;s system keychain.
+        </p>
+      ) : keyStorage === "file" ? (
+        <p role="status" className="rounded-[4px] border border-[var(--vk-border)] px-3 py-2 text-[12px] leading-[18px] text-[var(--vk-orange)]">
+          No system keychain is available on this machine, so the encryption key is kept in a private file next to
+          the vault. Other programs running as your user could read it.
+        </p>
+      ) : null}
 
       <section className="space-y-3 rounded-[4px] border border-[var(--vk-border)] p-3">
         <div className="flex flex-wrap items-center gap-2">
