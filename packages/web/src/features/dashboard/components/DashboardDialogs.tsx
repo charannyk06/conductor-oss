@@ -51,7 +51,7 @@ import type { DashboardProfile } from "@/lib/dashboardProfile";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
-import { agentModelAccessBadgeLabel, agentSetupStatusLabel } from "@/lib/agentSetupStatus";
+import { agentModelAccessBadgeLabel, agentSetupStatusLabel, type AgentAuthStatus } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME,
@@ -359,6 +359,7 @@ type AgentSetupState = {
   ready: boolean;
   installed: boolean;
   configured: boolean;
+  auth?: AgentAuthStatus | null;
   homepage: string | null;
   description: string | null;
   installHint: string | null;

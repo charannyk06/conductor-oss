@@ -1,3 +1,4 @@
+pub mod agent_auth;
 pub mod agents;
 pub mod api_error;
 pub mod app_update;

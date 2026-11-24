@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
+import type { AgentAuthStatus } from "@/lib/agentSetupStatus";
 
 export interface Agent {
   name: string;
@@ -12,6 +13,7 @@ export interface Agent {
   installed?: boolean;
   configured?: boolean;
   ready?: boolean;
+  auth?: AgentAuthStatus | null;
   binary?: string;
   model?: string;
   homepage?: string;
