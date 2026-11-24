@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::browser::tools::BrowserTool;
 use crate::dispatcher_task_lifecycle::{
     create_dispatcher_task, handoff_dispatcher_task, update_dispatcher_task,
     DispatcherTaskCreateInput, DispatcherTaskHandoffInput, DispatcherTaskMutationContext,
@@ -27,6 +28,22 @@ const TOOL_DISPATCHER_HANDOFF_TASK: &str = "conductor_dispatcher_handoff_task";
 const LEGACY_TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
 const LEGACY_TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
 const TOOL_TASK_GRAPH: &str = "conductor_task_graph";
+const TOOL_BROWSER_TABS: &str = "conductor_browser_tabs";
+const TOOL_BROWSER_OPEN: &str = "conductor_browser_open";
+const TOOL_BROWSER_READ: &str = "conductor_browser_read";
+const TOOL_BROWSER_CLICK: &str = "conductor_browser_click";
+const TOOL_BROWSER_TYPE: &str = "conductor_browser_type";
+const TOOL_BROWSER_FILL_LOGIN: &str = "conductor_browser_fill_login";
+
+/// Tools that drive the user's own Chrome; see [`crate::browser`].
+const BROWSER_TOOLS: [(&str, BrowserTool); 6] = [
+    (TOOL_BROWSER_TABS, BrowserTool::Tabs),
+    (TOOL_BROWSER_OPEN, BrowserTool::Open),
+    (TOOL_BROWSER_READ, BrowserTool::Read),
+    (TOOL_BROWSER_CLICK, BrowserTool::Click),
+    (TOOL_BROWSER_TYPE, BrowserTool::Type),
+    (TOOL_BROWSER_FILL_LOGIN, BrowserTool::FillLogin),
+];
 const MCP_CALLER_SESSION_ENV: &str = "CONDUCTOR_SESSION_ID";
 const MCP_CALLER_PROJECT_ENV: &str = "CONDUCTOR_PROJECT_ID";
 const ACP_SESSION_KIND: &str = "project_dispatcher";
@@ -567,6 +584,13 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
         serde_json::from_value(params).context("Invalid tools/call request payload")?;
     let arguments = call.arguments.unwrap_or(Value::Object(Default::default()));
 
+    if let Some((_, tool)) = BROWSER_TOOLS.iter().find(|(name, _)| *name == call.name) {
+        return Ok(match crate::browser::tools::call(*tool, arguments).await {
+            Ok(result) => tool_success(result),
+            Err(err) => tool_error(err.to_string()),
+        });
+    }
+
     match call.name.as_str() {
         TOOL_DISPATCH => match serde_json::from_value::<DispatchArgs>(arguments) {
             Ok(args) => match backend.dispatch(args).await {
@@ -673,6 +697,19 @@ fn tool_error(message: String) -> Value {
 }
 
 fn tool_definitions() -> Vec<ToolDefinition> {
+    let mut tools = core_tool_definitions();
+    tools.extend(BROWSER_TOOLS.iter().map(|(name, tool)| {
+        let (description, input_schema) = crate::browser::tools::definition(*tool);
+        ToolDefinition {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema,
+        }
+    }));
+    tools
+}
+
+fn core_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: TOOL_DISPATCH.to_string(),
@@ -1176,7 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_exposes_nine_tools() {
+    async fn tools_list_exposes_board_and_browser_tools() {
         let response = handle_jsonrpc_request(
             &MockBackend,
             JsonRpcRequest {
@@ -1193,7 +1230,16 @@ mod tests {
         let JsonRpcPayload::Result(result) = response.payload else {
             panic!("expected tools/list result payload");
         };
-        assert_eq!(result["tools"].as_array().unwrap().len(), 9);
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), 15);
+        for (name, _) in BROWSER_TOOLS {
+            assert!(names.contains(&name), "{name} missing");
+        }
     }
 
     #[tokio::test]

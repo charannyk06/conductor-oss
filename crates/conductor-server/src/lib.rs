@@ -1,6 +1,7 @@
 pub mod acp;
 mod acp_prompt;
 pub mod agent_auth;
+pub mod browser;
 mod dispatcher_task_lifecycle;
 pub mod error_logger;
 pub mod mcp;
