@@ -348,7 +348,7 @@ impl MessageSender {
 
         let reserved =
             self.queued_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                     queued
                         .checked_add(bytes)
                         .filter(|next| *next <= self.byte_capacity)
@@ -555,7 +555,7 @@ impl ApiStreamQueueByteBudget {
 
     fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<ApiStreamQueueByteReservation> {
         self.queued_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 queued
                     .checked_add(bytes)
                     .filter(|next| *next <= self.capacity)
@@ -671,7 +671,7 @@ impl ApiStreamEventSender {
         let bytes = proxied_api_stream_event_size(&event);
         let reserved =
             self.queued_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                     queued
                         .checked_add(bytes)
                         .filter(|next| *next <= self.byte_capacity)
