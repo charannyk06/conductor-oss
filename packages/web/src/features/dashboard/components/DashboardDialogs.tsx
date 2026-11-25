@@ -26,6 +26,7 @@ import {
   FolderGit2,
   FolderKanban,
   FolderOpen,
+  KeyRound,
   List,
   Loader2,
   PlugZap,
@@ -51,7 +52,7 @@ import type { DashboardProfile } from "@/lib/dashboardProfile";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
-import { agentModelAccessBadgeLabel, agentSetupStatusLabel } from "@/lib/agentSetupStatus";
+import { agentModelAccessBadgeLabel, agentSetupStatusLabel, type AgentAuthStatus } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   KEYBOARD_SAFE_VIEWPORT_DIALOG_MAX_HEIGHT_CLASS_NAME,
@@ -59,6 +60,7 @@ import {
   KEYBOARD_SAFE_VIEWPORT_INSET_FRAME_CLASS_NAME,
   KEYBOARD_SAFE_VIEWPORT_OVERLAY_CLASS_NAME,
 } from "@/components/layout/keyboardSafeViewport";
+import { SettingsPasswordsPanel } from "./SettingsPasswordsPanel";
 import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
   type RuntimeAgentModelCatalog,
@@ -359,6 +361,7 @@ type AgentSetupState = {
   ready: boolean;
   installed: boolean;
   configured: boolean;
+  auth?: AgentAuthStatus | null;
   homepage: string | null;
   description: string | null;
   installHint: string | null;
@@ -375,6 +378,7 @@ type SettingsTabId =
   | "projects"
   | "agents"
   | "mcp"
+  | "passwords"
   | "preferences";
 
 type SettingsTab = {
@@ -391,6 +395,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
   { id: "agents", label: "Agents", icon: Bot, implemented: true },
+  { id: "passwords", label: "Passwords", icon: KeyRound, implemented: true },
   { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: false },
 ];
@@ -1814,7 +1819,11 @@ export function NewWorkspaceDialog({
                 >
                   Back
                 </button>
+                {/* Keyed so React mounts a new button for the review step. Reusing
+                    this node would turn it into the submit button mid-click and
+                    create the workspace without showing the review. */}
                 <button
+                  key="continue-to-review"
                   type="button"
                   onClick={handleContinueToReview}
                   disabled={!canSubmit || creating}
@@ -1834,6 +1843,7 @@ export function NewWorkspaceDialog({
                   Back
                 </button>
                 <button
+                  key="create-workspace"
                   type="submit"
                   disabled={!canSubmit || creating}
                   className="inline-flex h-10 items-center justify-center rounded-[8px] bg-[var(--vk-bg-active)] px-4 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
@@ -3225,6 +3235,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     void loadProfile();
                   }}
                 />
+              ) : activeTabItem.id === "passwords" ? (
+                <SettingsPasswordsPanel />
               ) : isRepositoriesTab ? (
                 <div className="space-y-5">
                   <section className="space-y-1">

@@ -337,6 +337,10 @@ struct MessageReceiver {
 }
 
 impl MessageSender {
+    // `fetch_update` is deprecated in favour of `try_update` on newer
+    // toolchains, but the relay image builds with Rust 1.88, where
+    // `try_update` is not yet stable.
+    #[allow(deprecated)]
     fn try_send(
         &self,
         message: Message,
@@ -553,6 +557,10 @@ impl ApiStreamQueueByteBudget {
         Self::new(GLOBAL_API_STREAM_EVENT_QUEUE_BYTE_CAPACITY)
     }
 
+    // `fetch_update` is deprecated in favour of `try_update` on newer
+    // toolchains, but the relay image builds with Rust 1.88, where
+    // `try_update` is not yet stable.
+    #[allow(deprecated)]
     fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<ApiStreamQueueByteReservation> {
         self.queued_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
@@ -664,6 +672,10 @@ impl futures_util::Stream for ProxiedApiStreamBody {
 }
 
 impl ApiStreamEventSender {
+    // `fetch_update` is deprecated in favour of `try_update` on newer
+    // toolchains, but the relay image builds with Rust 1.88, where
+    // `try_update` is not yet stable.
+    #[allow(deprecated)]
     fn try_send(
         &self,
         event: ProxiedApiStreamEvent,

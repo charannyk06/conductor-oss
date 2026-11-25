@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
+import type { AgentAuthStatus } from "@/lib/agentSetupStatus";
 
 export interface Agent {
   name: string;
@@ -12,6 +13,7 @@ export interface Agent {
   installed?: boolean;
   configured?: boolean;
   ready?: boolean;
+  auth?: AgentAuthStatus | null;
   binary?: string;
   model?: string;
   homepage?: string;
@@ -47,6 +49,9 @@ type AgentsStoreState = {
 
 const AGENTS_STALE_AFTER_MS = 30_000;
 const AGENTS_RETRY_DELAY_MS = 10_000;
+// The backend caches each CLI's sign-in state for 30 seconds, so a re-check
+// sooner than that would only return the same answer.
+const AGENTS_SIGN_IN_RECHECK_MS = 35_000;
 const LOCAL_SCOPE_KEY = "local";
 
 const listenersByScope = new Map<string, Set<() => void>>();
@@ -114,14 +119,14 @@ function isStoreFresh(scopeKey: string) {
   return store.agents.length > 0 && Date.now() - store.lastFetchedAt < AGENTS_STALE_AFTER_MS;
 }
 
-function scheduleRetry(scopeKey: string, bridgeId?: string | null) {
+function scheduleRetry(scopeKey: string, bridgeId?: string | null, delayMs = AGENTS_RETRY_DELAY_MS) {
   const store = getStore(scopeKey);
   if (store.retryTimeout !== null) return;
   store.retryTimeout = window.setTimeout(() => {
     const currentStore = getStore(scopeKey);
     currentStore.retryTimeout = null;
     void refreshAgents(scopeKey, bridgeId, true);
-  }, AGENTS_RETRY_DELAY_MS);
+  }, delayMs);
 }
 
 async function refreshAgents(scopeKey: string, bridgeId?: string | null, force = false): Promise<void> {
@@ -157,6 +162,13 @@ async function refreshAgents(scopeKey: string, bridgeId?: string | null, force =
           window.clearTimeout(store.retryTimeout);
           store.retryTimeout = null;
         }
+        // Someone who just ran the login command should see the agent become
+        // ready without reloading, so keep checking while anything is signed
+        // out and a view is still showing the agents.
+        const awaitingSignIn = nextAgents.some((agent) => agent.auth?.state === "signed_out");
+        if (awaitingSignIn && getListeners(scopeKey).size > 0) {
+          scheduleRetry(scopeKey, bridgeId, AGENTS_SIGN_IN_RECHECK_MS);
+        }
       } else {
         scheduleRetry(scopeKey, bridgeId);
       }
@@ -187,6 +199,11 @@ export function useAgents(bridgeId?: string | null, options?: UseAgentsOptions):
     getListeners(scopeKey).add(applySnapshot);
     applySnapshot();
     void refreshAgents(scopeKey, bridgeId);
+    // A fresh cached result skips the fetch above, and with it the re-check
+    // that fetch would have scheduled; start one for a signed-out agent.
+    if (getStore(scopeKey).agents.some((agent) => agent.auth?.state === "signed_out")) {
+      scheduleRetry(scopeKey, bridgeId, AGENTS_SIGN_IN_RECHECK_MS);
+    }
 
     const handleWindowFocus = () => {
       if (!isStoreFresh(scopeKey)) {

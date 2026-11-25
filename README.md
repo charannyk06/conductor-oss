@@ -33,6 +33,18 @@ The challenge branch adds seven bounded browser-native WebMCP tools for projects
 - Public demo: https://app.conductross.com/webmcp
 - Technical notes: [`docs/webmcp-challenge-2026.md`](docs/webmcp-challenge-2026.md)
 
+## Assistant browser and saved logins
+
+The project dispatcher chat can carry out web tasks in your own Chrome, using the sessions you are already signed in to.
+
+1. Use Chrome 144 or later, open `chrome://inspect/#remote-debugging`, and turn on remote debugging. Chrome asks you to approve each new connection.
+2. Optional: in Conductor, open Settings, then Passwords, and import an export file from Chrome, Bitwarden, or 1Password. Logins are encrypted on your machine. The key is held in the system keychain; where no keychain is reachable, such as a headless Linux machine, it is kept in an owner-only file beside the vault, which does not protect it from other programs running as your user.
+3. Ask the dispatcher for something on the web.
+
+The agent gets six tools: list tabs, open a page, read it, click, type, and fill a saved login. A saved password goes from the vault straight into the page and is never returned to the model, and it is only filled on the site it was saved for, over https. The agent cannot run arbitrary JavaScript in your pages. The dispatcher is instructed to ask before it buys, sends, deletes, or changes account settings; that is an instruction to the model, not an enforced gate.
+
+Set `CONDUCTOR_BROWSER_URL` (for example `http://127.0.0.1:9222`) to use a Chrome started with `--remote-debugging-port` instead. Only endpoints on this machine are accepted.
+
 ## Read this first, there are two ways to use Conductor
 
 ### 1. Local dashboard on the same machine
@@ -351,7 +363,6 @@ conductor-oss/
 │   ├── conductor-core/       # Config, board parsing, task and session models, scaffolding
 │   ├── conductor-db/         # SQLite persistence
 │   ├── conductor-executors/  # Agent adapters and process management
-│   ├── conductor-git/        # Git and worktree operations
 │   ├── conductor-relay/      # Relay server for bridge and remote terminal flows
 │   ├── conductor-server/     # Axum server, routes, runtime state, SSE
 │   ├── conductor-types/      # Shared transport and bridge protocol types

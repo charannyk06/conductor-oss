@@ -14,7 +14,6 @@ conductor-db = { path = "../conductor-db" }
 conductor-server = { path = "../conductor-server" }
 conductor-executors = { path = "../conductor-executors" }
 conductor-watcher = { path = "../conductor-watcher" }
-conductor-git = { path = "../conductor-git" }
 conductor-types = { path = "../conductor-types" }
 clap = { workspace = true }
 serde = { workspace = true }

@@ -28,7 +28,6 @@ conductor.yaml
 
 # Conductor runtime
 .conductor/
-orchestrator/
 /sessions/
 *.log
 CONDUCTOR-TAGS.md

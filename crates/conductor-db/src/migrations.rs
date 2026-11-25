@@ -20,6 +20,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         ("003_board_snapshots", MIGRATION_003_BOARD_SNAPSHOTS),
         ("004_indexes", MIGRATION_004_INDEXES),
         ("005_error_tracking", MIGRATION_005_ERROR_TRACKING),
+        (
+            "006_errors_without_session_fk",
+            MIGRATION_006_ERRORS_WITHOUT_SESSION_FK,
+        ),
     ];
 
     for (name, sql) in migrations {
@@ -38,17 +42,23 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
                 .filter(|line| !line.trim_start().starts_with("--"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            // One connection and one transaction per migration: statements
+            // that depend on each other (drop a table, then rename another
+            // into its place) must not be spread across pooled connections,
+            // and a migration that fails part-way must leave nothing behind.
+            let mut transaction = pool.begin().await?;
             for statement in sanitized
                 .split(';')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                sqlx::query(statement).execute(pool).await?;
+                sqlx::query(statement).execute(&mut *transaction).await?;
             }
             sqlx::query("INSERT INTO _migrations (name) VALUES (?)")
                 .bind(name)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await?;
+            transaction.commit().await?;
         }
     }
 
@@ -192,6 +202,40 @@ CREATE TABLE IF NOT EXISTS errors (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_errors_category ON errors(category);
+CREATE INDEX IF NOT EXISTS idx_errors_severity ON errors(severity);
+CREATE INDEX IF NOT EXISTS idx_errors_session ON errors(session_id);
+CREATE INDEX IF NOT EXISTS idx_errors_created ON errors(created_at);
+"#;
+
+/// `errors.session_id` used to reference `sessions(id)`. The server keeps its
+/// sessions outside this database, so that table has no matching rows and
+/// every error recorded against a session was rejected. SQLite cannot drop a
+/// constraint, so the table is rebuilt without it, keeping existing rows.
+const MIGRATION_006_ERRORS_WITHOUT_SESSION_FK: &str = r#"
+CREATE TABLE errors_without_session_fk (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_type TEXT NOT NULL,
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    context TEXT,
+    session_id TEXT,
+    project_id TEXT,
+    stack_trace TEXT,
+    severity TEXT DEFAULT 'error',
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO errors_without_session_fk (
+    id, error_type, category, message, context, session_id, project_id,
+    stack_trace, severity, resolved_at, created_at
+)
+SELECT
+    id, error_type, category, message, context, session_id, project_id,
+    stack_trace, severity, resolved_at, created_at
+FROM errors;
+DROP TABLE errors;
+ALTER TABLE errors_without_session_fk RENAME TO errors;
 CREATE INDEX IF NOT EXISTS idx_errors_category ON errors(category);
 CREATE INDEX IF NOT EXISTS idx_errors_severity ON errors(severity);
 CREATE INDEX IF NOT EXISTS idx_errors_session ON errors(session_id);

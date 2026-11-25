@@ -22,6 +22,7 @@ pub mod skills;
 pub mod tasks;
 pub mod terminal;
 pub mod ttyd_protocol;
+pub mod vault;
 pub mod workspaces;
 
 #[cfg(test)]

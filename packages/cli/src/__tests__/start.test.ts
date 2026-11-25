@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   inferNpmGlobalPrefixFromPackageRoot,
   isLoopbackHost,
   quoteWindowsCliArg,
+  resolveBootstrapWorkspace,
   resolveDashboardPackageManager,
   resolveDashboardRuntimeMode,
   resolveDashboardWebMode,
@@ -145,4 +146,18 @@ test("resolveDashboardPackageManager honors the workspace packageManager field",
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a workspace the caller named is set up in place when it has no config", () => {
+  const fallback = join(tmpdir(), "conductor-default-workspace");
+
+  assert.equal(resolveBootstrapWorkspace(null, fallback), fallback);
+  assert.equal(resolveBootstrapWorkspace(undefined, fallback), fallback);
+  assert.equal(resolveBootstrapWorkspace("   ", fallback), fallback);
+
+  const named = join(tmpdir(), "conductor-named-workspace");
+  assert.equal(resolveBootstrapWorkspace(named, fallback), named);
+  assert.equal(resolveBootstrapWorkspace(join(named, "conductor.yaml"), fallback), named);
+  assert.equal(resolveBootstrapWorkspace(join(named, "conductor.yml"), fallback), named);
+  assert.equal(resolveBootstrapWorkspace("relative-workspace", fallback), resolve("relative-workspace"));
 });

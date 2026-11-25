@@ -13,6 +13,8 @@ export interface SessionTerminalProps {
   projectId: string;
   bridgeId?: string | null;
   sessionState: string;
+  /** Why the session failed to start, shown when it has errored. */
+  failureReason?: string | null;
   runtimeMode?: string | null;
   pendingInsert: TerminalInsertRequest | null;
   immersiveMobileMode?: boolean;

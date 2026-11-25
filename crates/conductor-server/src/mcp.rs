@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use crate::browser::tools::BrowserTool;
 use crate::dispatcher_task_lifecycle::{
     create_dispatcher_task, handoff_dispatcher_task, update_dispatcher_task,
     DispatcherTaskCreateInput, DispatcherTaskHandoffInput, DispatcherTaskMutationContext,
@@ -27,6 +28,22 @@ const TOOL_DISPATCHER_HANDOFF_TASK: &str = "conductor_dispatcher_handoff_task";
 const LEGACY_TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
 const LEGACY_TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
 const TOOL_TASK_GRAPH: &str = "conductor_task_graph";
+const TOOL_BROWSER_TABS: &str = "conductor_browser_tabs";
+const TOOL_BROWSER_OPEN: &str = "conductor_browser_open";
+const TOOL_BROWSER_READ: &str = "conductor_browser_read";
+const TOOL_BROWSER_CLICK: &str = "conductor_browser_click";
+const TOOL_BROWSER_TYPE: &str = "conductor_browser_type";
+const TOOL_BROWSER_FILL_LOGIN: &str = "conductor_browser_fill_login";
+
+/// Tools that drive the user's own Chrome; see [`crate::browser`].
+const BROWSER_TOOLS: [(&str, BrowserTool); 6] = [
+    (TOOL_BROWSER_TABS, BrowserTool::Tabs),
+    (TOOL_BROWSER_OPEN, BrowserTool::Open),
+    (TOOL_BROWSER_READ, BrowserTool::Read),
+    (TOOL_BROWSER_CLICK, BrowserTool::Click),
+    (TOOL_BROWSER_TYPE, BrowserTool::Type),
+    (TOOL_BROWSER_FILL_LOGIN, BrowserTool::FillLogin),
+];
 const MCP_CALLER_SESSION_ENV: &str = "CONDUCTOR_SESSION_ID";
 const MCP_CALLER_PROJECT_ENV: &str = "CONDUCTOR_PROJECT_ID";
 const ACP_SESSION_KIND: &str = "project_dispatcher";
@@ -44,6 +61,12 @@ pub trait McpBackend: Send + Sync {
     async fn update_dispatcher_task(&self, args: DispatcherTaskUpdateInput) -> Result<Value>;
     async fn handoff_dispatcher_task(&self, args: DispatcherTaskHandoffInput) -> Result<Value>;
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value>;
+
+    /// Whether the calling session may act in the user's browser right now.
+    /// Reading is always allowed; this guards the tools that change a page.
+    async fn ensure_browser_action_allowed(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -303,6 +326,36 @@ impl McpBackend for AppStateMcpBackend {
         )
         .await?;
         Ok(result.response_payload())
+    }
+
+    async fn ensure_browser_action_allowed(&self) -> Result<()> {
+        let Some(session) = self.caller_session().await? else {
+            return Ok(());
+        };
+        if session.metadata.get("sessionKind").map(String::as_str) != Some(ACP_SESSION_KIND) {
+            return Ok(());
+        }
+        // A plan-only dispatcher turn may look at pages but not click, type or
+        // sign in. This tool process can outlive a turn, so its in-memory
+        // copy of the thread may be from an earlier one: read the snapshot
+        // the server writes before it hands each turn to the agent, and
+        // refuse if that cannot be read.
+        let snapshot = tokio::fs::read_to_string(self.state.dispatcher_snapshot_path(&session.id))
+            .await
+            .ok()
+            .and_then(|content| serde_json::from_str::<SessionRecord>(&content).ok());
+        let Some(current) = snapshot else {
+            bail!("Browser actions are unavailable: this dispatcher turn's approval state could not be read");
+        };
+        let approved = current
+            .metadata
+            .get(ACP_APPROVAL_STATE_METADATA_KEY)
+            .map(String::as_str)
+            == Some(ACP_APPROVAL_GRANTED);
+        if approved && !current.status.is_terminal() {
+            return Ok(());
+        }
+        bail!("Browser actions are disabled for this plan-only turn; only reading pages is allowed")
     }
 
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value> {
@@ -567,6 +620,18 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
         serde_json::from_value(params).context("Invalid tools/call request payload")?;
     let arguments = call.arguments.unwrap_or(Value::Object(Default::default()));
 
+    if let Some((_, tool)) = BROWSER_TOOLS.iter().find(|(name, _)| *name == call.name) {
+        if tool.changes_page() {
+            if let Err(err) = backend.ensure_browser_action_allowed().await {
+                return Ok(tool_error(err.to_string()));
+            }
+        }
+        return Ok(match crate::browser::tools::call(*tool, arguments).await {
+            Ok(result) => tool_success(result),
+            Err(err) => tool_error(err.to_string()),
+        });
+    }
+
     match call.name.as_str() {
         TOOL_DISPATCH => match serde_json::from_value::<DispatchArgs>(arguments) {
             Ok(args) => match backend.dispatch(args).await {
@@ -673,6 +738,19 @@ fn tool_error(message: String) -> Value {
 }
 
 fn tool_definitions() -> Vec<ToolDefinition> {
+    let mut tools = core_tool_definitions();
+    tools.extend(BROWSER_TOOLS.iter().map(|(name, tool)| {
+        let (description, input_schema) = crate::browser::tools::definition(*tool);
+        ToolDefinition {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema,
+        }
+    }));
+    tools
+}
+
+fn core_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: TOOL_DISPATCH.to_string(),
@@ -1176,7 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_exposes_nine_tools() {
+    async fn tools_list_exposes_board_and_browser_tools() {
         let response = handle_jsonrpc_request(
             &MockBackend,
             JsonRpcRequest {
@@ -1193,7 +1271,16 @@ mod tests {
         let JsonRpcPayload::Result(result) = response.payload else {
             panic!("expected tools/list result payload");
         };
-        assert_eq!(result["tools"].as_array().unwrap().len(), 9);
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), 15);
+        for (name, _) in BROWSER_TOOLS {
+            assert!(names.contains(&name), "{name} missing");
+        }
     }
 
     #[tokio::test]
@@ -1356,6 +1443,103 @@ mod tests {
         let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
             .expect("board should be readable");
         assert!(board_contents.contains("Dispatcher created task"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn plan_only_dispatcher_turns_cannot_act_in_the_browser() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-browser-plan-only").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+
+        backend
+            .ensure_browser_action_allowed()
+            .await
+            .expect("an executing dispatcher turn may act in the browser");
+
+        // The server starts a plan-only turn: it writes the new state to the
+        // snapshot. This backend's in-memory thread still says approved, as
+        // it would in a tool process left running from the previous turn.
+        dispatcher.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            "approval_required".to_string(),
+        );
+        fs::write(
+            state.dispatcher_snapshot_path(&dispatcher.id),
+            serde_json::to_string(&dispatcher).unwrap(),
+        )
+        .unwrap();
+        let in_memory = state.get_dispatcher_thread(&dispatcher.id).await.unwrap();
+        assert_eq!(
+            in_memory
+                .metadata
+                .get(ACP_APPROVAL_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some(ACP_APPROVAL_GRANTED)
+        );
+
+        // Rejected before any connection to Chrome is attempted.
+        for tool in [
+            TOOL_BROWSER_CLICK,
+            TOOL_BROWSER_TYPE,
+            TOOL_BROWSER_FILL_LOGIN,
+        ] {
+            let result = handle_tool_call(
+                &backend,
+                json!({ "name": tool, "arguments": { "tab": "t", "ref": 1, "text": "x" } }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["isError"], true, "{tool}");
+            assert!(
+                result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("plan-only"),
+                "{tool}: {result}"
+            );
+        }
+        // The next turn executes again: the same backend allows actions as
+        // soon as the snapshot says so.
+        dispatcher.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_GRANTED.to_string(),
+        );
+        fs::write(
+            state.dispatcher_snapshot_path(&dispatcher.id),
+            serde_json::to_string(&dispatcher).unwrap(),
+        )
+        .unwrap();
+        backend
+            .ensure_browser_action_allowed()
+            .await
+            .expect("an executing turn after a plan-only turn may act again");
+
+        // A snapshot that cannot be read fails closed.
+        fs::write(state.dispatcher_snapshot_path(&dispatcher.id), "not json").unwrap();
+        assert!(backend.ensure_browser_action_allowed().await.is_err());
+
+        for (name, tool) in BROWSER_TOOLS {
+            let reads_only = [TOOL_BROWSER_TABS, TOOL_BROWSER_OPEN, TOOL_BROWSER_READ];
+            assert_eq!(tool.changes_page(), !reads_only.contains(&name), "{name}");
+        }
 
         std::env::remove_var(MCP_CALLER_SESSION_ENV);
         std::env::remove_var(MCP_CALLER_PROJECT_ENV);

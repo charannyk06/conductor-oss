@@ -15,3 +15,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

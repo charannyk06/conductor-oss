@@ -89,7 +89,7 @@ import {
 } from "@/lib/bridgeScope";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { buildDashboardSessionSelection } from "@/lib/dashboardSessionSelection";
-import { agentSetupStatusLabel } from "@/lib/agentSetupStatus";
+import { agentSetupStatusLabel, parseAgentAuthStatus, type AgentAuthStatus } from "@/lib/agentSetupStatus";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import {
@@ -503,6 +503,7 @@ type AgentSetupState = {
   ready: boolean;
   installed: boolean;
   configured: boolean;
+  auth?: AgentAuthStatus | null;
   homepage: string | null;
   description: string | null;
   installHint: string | null;
@@ -1585,6 +1586,7 @@ export default function DashboardClient({
         ready?: boolean;
         installed?: boolean;
         configured?: boolean;
+        auth?: unknown;
         homepage?: string | null;
         description?: string | null;
         installHint?: string | null;
@@ -1603,6 +1605,7 @@ export default function DashboardClient({
         ready: agent.ready === true,
         installed: agent.installed !== false,
         configured: agent.configured === true,
+        auth: parseAgentAuthStatus(agent.auth),
         homepage: typeof agent.homepage === "string"
           ? agent.homepage
           : known?.homepage ?? states[normalizedName]?.homepage ?? null,
@@ -3409,6 +3412,11 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                             >
                               {selectedAgentState.installed ? "Open setup" : "Open install guide"}
                             </button>
+                            {selectedAgentState.auth?.state === "signed_out" && selectedAgentState.auth.loginCommand ? (
+                              <div className="px-3 pb-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                                Not signed in. Run <code>{selectedAgentState.auth.loginCommand}</code> in a terminal to connect your subscription.
+                              </div>
+                            ) : null}
                           </>
                         ) : null}
                     </MobileDropdownMenuContent>

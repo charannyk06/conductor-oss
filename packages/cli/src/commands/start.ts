@@ -560,8 +560,27 @@ function findConfigFile(startDir?: string): string | null {
   }
 }
 
-function ensureDashboardBootstrapWorkspace(): { workspacePath: string; configPath: string } {
-  const workspacePath = getDefaultLauncherWorkspace();
+/**
+ * Where to set up a workspace when no `conductor.yaml` was found. A workspace
+ * or config path the caller asked for is honoured; the shared default is only
+ * for a launch that named nothing.
+ */
+export function resolveBootstrapWorkspace(
+  configHint: string | null | undefined,
+  defaultWorkspace: string,
+): string {
+  const hint = configHint?.trim();
+  if (!hint) {
+    return defaultWorkspace;
+  }
+  const resolved = resolve(hint);
+  return basename(resolved).match(/^conductor\.ya?ml$/i) ? dirname(resolved) : resolved;
+}
+
+function ensureDashboardBootstrapWorkspace(
+  configHint?: string | null,
+): { workspacePath: string; configPath: string } {
+  const workspacePath = resolveBootstrapWorkspace(configHint, getDefaultLauncherWorkspace());
   const configPath = join(workspacePath, "conductor.yaml");
   const boardPath = join(workspacePath, "CONDUCTOR.md");
 
@@ -590,10 +609,14 @@ function loadLauncherSettings(configHint?: string | null): LauncherSettings {
   const explicitConfigPath = configHint && basename(configHint).match(/^conductor\.ya?ml$/i)
     ? resolve(configHint)
     : null;
-  const configPath = explicitConfigPath ?? findConfigFile(configHint ?? undefined);
+  // A named config file that does not exist yet is set up in place, like a
+  // named workspace directory without one.
+  const configPath = explicitConfigPath
+    ? (existsSync(explicitConfigPath) ? explicitConfigPath : null)
+    : findConfigFile(configHint ?? undefined);
 
   if (!configPath) {
-    const bootstrap = ensureDashboardBootstrapWorkspace();
+    const bootstrap = ensureDashboardBootstrapWorkspace(configHint);
     return {
       workspacePath: bootstrap.workspacePath,
       configPath: bootstrap.configPath,
