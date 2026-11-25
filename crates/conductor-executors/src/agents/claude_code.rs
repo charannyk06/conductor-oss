@@ -143,6 +143,16 @@ impl Executor for ClaudeCodeExecutor {
                 push_claude_reasoning_arg(&mut args, options.reasoning_effort.as_deref());
 
                 args.extend(sanitized_extra_args);
+                // In print mode each turn is its own process, so a resumed
+                // turn needs its message on the command line; the CLI rejects
+                // a resume that carries no prompt. The terminal UI takes its
+                // input from the user instead.
+                if options.structured_output && !options.prompt.trim().is_empty() {
+                    if needs_prompt_separator {
+                        args.push("--".to_string());
+                    }
+                    args.push(options.prompt.clone());
+                }
                 return args;
             }
 
@@ -754,6 +764,33 @@ mod tests {
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--effort".to_string()));
         assert!(!args.contains(&"continue".to_string()));
+    }
+
+    #[test]
+    fn build_args_resumed_print_turn_carries_its_prompt() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "follow-up message".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: true,
+            extra_args: vec!["--mcp-config".to_string(), "{}".to_string()],
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: true,
+            resume_target: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+        });
+
+        assert!(args.contains(&"--print".to_string()));
+        assert!(args.contains(&"--resume".to_string()));
+        // After `--mcp-config`, the prompt must follow a `--` separator.
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--".to_string(), "follow-up message".to_string()]
+        );
     }
 
     #[test]
