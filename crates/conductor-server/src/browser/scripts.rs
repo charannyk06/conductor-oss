@@ -68,9 +68,11 @@ pub const FOCUS_AND_CLEAR: &str = r#"function (ref) {
   return true;
 }"#;
 
-/// Enter a username and password into the visible login form. Reports which
-/// fields were filled and returns nothing else; the form is not submitted.
-pub const FILL_LOGIN: &str = r#"function (username, password) {
+/// Enter a username and password into the visible login form, but only while
+/// the page is still on `vettedOrigin`. Reports which fields were filled and
+/// returns nothing else; the form is not submitted.
+pub const FILL_LOGIN: &str = r#"function (username, password, vettedOrigin) {
+  if (location.origin !== vettedOrigin) return { username: false, password: false, moved: true };
   const visible = (el) => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);

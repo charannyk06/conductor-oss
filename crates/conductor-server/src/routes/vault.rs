@@ -4,14 +4,12 @@ use axum::extract::Path;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::routes::api_error::ApiError;
 use crate::state::AppState;
 use crate::vault::import::{parse_export, ImportSource};
 use crate::vault::{CredentialSummary, KeyStorage, Vault, VaultError};
-
-static VAULT: LazyLock<Vault> = LazyLock::new(Vault::default_location);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -36,7 +34,7 @@ where
     T: Send + 'static,
     F: FnOnce(&Vault) -> Result<T, VaultError> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || operation(&VAULT))
+    tokio::task::spawn_blocking(move || operation(Vault::shared()))
         .await
         .map_err(|err| ApiError::internal(format!("vault task failed: {err}")))?
         .map_err(vault_error)

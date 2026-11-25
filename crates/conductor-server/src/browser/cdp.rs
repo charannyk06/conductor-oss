@@ -15,6 +15,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use super::BrowserError;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Long enough for the user to answer Chrome's connection prompt, short
+/// enough that an endpoint which never completes the handshake cannot hold a
+/// tool call open indefinitely.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -29,9 +33,11 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect(ws_url: &str) -> Result<Self, BrowserError> {
-        let (socket, _) = tokio_tungstenite::connect_async(ws_url)
-            .await
-            .map_err(|err| BrowserError::Connect(err.to_string()))?;
+        let (socket, _) =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(ws_url))
+                .await
+                .map_err(|_| BrowserError::ConnectTimeout)?
+                .map_err(|err| BrowserError::Connect(err.to_string()))?;
         let (writer, reader) = socket.split();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));

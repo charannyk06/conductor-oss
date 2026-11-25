@@ -11,7 +11,6 @@ use crate::vault::Vault;
 /// connection, so it is kept for as long as it stays open.
 static BROWSER: LazyLock<tokio::sync::Mutex<Option<Arc<Browser>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(None));
-static VAULT: LazyLock<Vault> = LazyLock::new(Vault::default_location);
 
 async fn connected_browser() -> Result<Arc<Browser>, BrowserError> {
     let mut slot = BROWSER.lock().await;
@@ -74,6 +73,13 @@ pub enum BrowserTool {
     FillLogin,
 }
 
+impl BrowserTool {
+    /// Whether the tool acts on a page rather than only looking at it.
+    pub fn changes_page(self) -> bool {
+        matches!(self, Self::Click | Self::Type | Self::FillLogin)
+    }
+}
+
 fn parse<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, BrowserError> {
     serde_json::from_value(arguments)
         .map_err(|err| BrowserError::Invalid(format!("invalid arguments: {err}")))
@@ -82,7 +88,7 @@ fn parse<T: serde::de::DeserializeOwned>(arguments: Value) -> Result<T, BrowserE
 /// Run a browser tool against the user's Chrome.
 pub async fn call(tool: BrowserTool, arguments: Value) -> Result<Value, BrowserError> {
     let browser = connected_browser().await?;
-    run(&browser, &VAULT, tool, arguments).await
+    run(&browser, Vault::shared(), tool, arguments).await
 }
 
 /// Run a browser tool against a specific browser and vault.

@@ -30,6 +30,10 @@ async function readError(response: Response, fallback: string): Promise<string> 
 export function SettingsPasswordsPanel() {
   const [credentials, setCredentials] = useState<VaultCredential[]>([]);
   const [keyStorage, setKeyStorage] = useState<VaultKeyStorage | null>(null);
+  // The import control only appears once the backend has confirmed this is a
+  // local dashboard, so an export file is never sent to a hosted one.
+  const [available, setAvailable] = useState(false);
+  const [hosted, setHosted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,11 +45,17 @@ export function SettingsPasswordsPanel() {
     setLoading(true);
     try {
       const response = await fetch("/api/vault/credentials", { cache: "no-store" });
+      if (response.status === 412) {
+        setHosted(true);
+        setAvailable(false);
+        return;
+      }
       if (!response.ok) {
         setError(await readError(response, "Could not load saved passwords."));
         return;
       }
       const payload: unknown = await response.json();
+      setAvailable(true);
       setCredentials(parseVaultCredentials(payload));
       setKeyStorage(parseVaultKeyStorage(payload));
       setError(null);
@@ -127,6 +137,16 @@ export function SettingsPasswordsPanel() {
         </p>
       </section>
 
+      {hosted ? (
+        <p role="status" className="rounded-[4px] border border-[var(--vk-border)] px-3 py-2 text-[13px] leading-[20px] text-[var(--vk-text-normal)]">
+          Saved passwords stay on your own machine. Open the Conductor dashboard that runs on that machine to
+          import or manage them.
+        </p>
+      ) : null}
+      {!hosted && !available && error ? (
+        <p role="alert" className="text-[12px] leading-[18px] text-[var(--vk-red)]">{error}</p>
+      ) : null}
+
       {keyStorage === "keychain" ? (
         <p className="text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
           The encryption key is kept in this computer&apos;s system keychain.
@@ -138,6 +158,8 @@ export function SettingsPasswordsPanel() {
         </p>
       ) : null}
 
+      {available ? (
+      <>
       <section className="space-y-3 rounded-[4px] border border-[var(--vk-border)] p-3">
         <div className="flex flex-wrap items-center gap-2">
           {SOURCES.map((entry) => (
@@ -237,6 +259,10 @@ export function SettingsPasswordsPanel() {
           </ul>
         )}
       </section>
+      </>
+      ) : loading ? (
+        <Loader2 className="h-4 w-4 animate-spin text-[var(--vk-text-muted)]" />
+      ) : null}
     </div>
   );
 }

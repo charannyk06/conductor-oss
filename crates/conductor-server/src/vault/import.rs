@@ -50,11 +50,13 @@ pub fn parse_export(
     source: Option<ImportSource>,
     content: &str,
 ) -> Result<(ImportSource, ParsedExport), ImportError> {
-    let content = content.trim_start_matches('\u{feff}').trim();
-    if content.is_empty() {
+    // Only the byte-order mark is removed: trimming the end could eat spaces
+    // that belong to a password on the last line.
+    let content = content.trim_start_matches('\u{feff}');
+    if content.trim().is_empty() {
         return Err(ImportError::Empty);
     }
-    if content.starts_with('{') {
+    if content.trim_start().starts_with('{') {
         // Bitwarden is the only supported manager that exports JSON.
         return parse_bitwarden_json(content).map(|parsed| (ImportSource::Bitwarden, parsed));
     }
@@ -74,15 +76,17 @@ fn parse_bitwarden_json(content: &str) -> Result<ParsedExport, ImportError> {
 
     let mut parsed = ParsedExport::default();
     for item in items {
-        let text = |value: Option<&Value>| {
+        // Usernames and passwords are kept exactly as exported; surrounding
+        // spaces can be part of a credential. Only labels are trimmed.
+        let exact = |value: Option<&Value>| {
             value
                 .and_then(Value::as_str)
                 .unwrap_or_default()
-                .trim()
                 .to_string()
         };
+        let text = |value: Option<&Value>| exact(value).trim().to_string();
         let login = item.get("login");
-        let password = text(login.and_then(|login| login.get("password")));
+        let password = exact(login.and_then(|login| login.get("password")));
         if password.is_empty() {
             parsed.skipped += 1;
             continue;
@@ -97,7 +101,7 @@ fn parse_bitwarden_json(content: &str) -> Result<ParsedExport, ImportError> {
         parsed.logins.push(ImportedLogin {
             name: text(item.get("name")),
             url,
-            username: text(login.and_then(|login| login.get("username"))),
+            username: exact(login.and_then(|login| login.get("username"))),
             password,
         });
     }
@@ -145,14 +149,14 @@ fn parse_csv(
     let mut parsed = ParsedExport::default();
     for record in reader.records() {
         let record = record.map_err(|err| ImportError::Malformed(err.to_string()))?;
-        let field = |index: Option<usize>| {
+        let exact = |index: Option<usize>| {
             index
                 .and_then(|index| record.get(index))
                 .unwrap_or_default()
-                .trim()
                 .to_string()
         };
-        let password = field(Some(password_column));
+        let field = |index: Option<usize>| exact(index).trim().to_string();
+        let password = exact(Some(password_column));
         if password.is_empty() {
             parsed.skipped += 1;
             continue;
@@ -160,7 +164,7 @@ fn parse_csv(
         parsed.logins.push(ImportedLogin {
             name: field(name_column),
             url: field(url_column),
-            username: field(username_column),
+            username: exact(username_column),
             password,
         });
     }
@@ -235,6 +239,25 @@ mod tests {
         assert_eq!(source, ImportSource::OnePassword);
         assert_eq!(parsed.logins[0].name, "Bank");
         assert_eq!(parsed.logins[0].password, "p@ss");
+    }
+
+    #[test]
+    fn credential_whitespace_survives_import() {
+        // Quoted, and unquoted at the very end of a file with no newline.
+        let csv = "name,url,username,password\n Site ,https://a.test,\" ada \",\" pw \"\nB,https://b.test,bob,tail  ";
+        let (_, parsed) = parse_export(None, csv).unwrap();
+        assert_eq!(parsed.logins[0].name, "Site");
+        assert_eq!(parsed.logins[0].username, " ada ");
+        assert_eq!(parsed.logins[0].password, " pw ");
+        assert_eq!(parsed.logins[1].password, "tail  ");
+
+        let json =
+            r#"  {"items":[{"name":" Mail ","login":{"username":" ada ","password":"  "}}]}"#;
+        let (_, parsed) = parse_export(None, json).unwrap();
+        assert_eq!(parsed.skipped, 0);
+        assert_eq!(parsed.logins[0].name, "Mail");
+        assert_eq!(parsed.logins[0].username, " ada ");
+        assert_eq!(parsed.logins[0].password, "  ");
     }
 
     #[test]

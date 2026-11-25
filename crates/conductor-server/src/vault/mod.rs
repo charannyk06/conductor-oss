@@ -30,6 +30,7 @@ use import::{ImportSource, ImportedLogin};
 
 const KEY_FILE: &str = "vault.key";
 const DATA_FILE: &str = "vault.enc";
+const LOCK_FILE: &str = ".lock";
 const KEY_LEN: usize = 32;
 /// First byte of the data file; bump when the layout changes.
 const FORMAT_VERSION: u8 = 1;
@@ -140,6 +141,13 @@ impl KeyStore for OsKeychain {
     }
 }
 
+/// Held for the duration of one vault operation.
+struct VaultGuard<'a> {
+    // Dropped first, releasing the cross-process lock before the mutex.
+    _directory: Option<fs::File>,
+    _process: std::sync::MutexGuard<'a, ()>,
+}
+
 pub struct Vault {
     dir: PathBuf,
     keychain: Option<Box<dyn KeyStore>>,
@@ -166,6 +174,13 @@ impl Vault {
         }
     }
 
+    /// The one handle this process uses for the per-user vault.
+    pub fn shared() -> &'static Vault {
+        static SHARED: std::sync::LazyLock<Vault> =
+            std::sync::LazyLock::new(Vault::default_location);
+        &SHARED
+    }
+
     /// The per-user vault under the Conductor data directory.
     pub fn default_location() -> Self {
         Self::with_keychain(
@@ -176,12 +191,12 @@ impl Vault {
 
     /// Where the key currently lives, or `None` before anything is saved.
     pub fn key_storage(&self) -> Result<Option<KeyStorage>, VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(false)?;
         Ok(self.read_key()?.map(|(_, storage)| storage))
     }
 
     pub fn list(&self) -> Result<Vec<CredentialSummary>, VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(false)?;
         Ok(self.load()?.credentials.iter().map(summary).collect())
     }
 
@@ -191,7 +206,7 @@ impl Vault {
         source: ImportSource,
         logins: Vec<ImportedLogin>,
     ) -> Result<ImportReport, VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(true)?;
         let mut contents = self.load()?;
         let mut report = ImportReport::default();
 
@@ -229,7 +244,7 @@ impl Vault {
 
     /// Return one saved password, for filling a login form.
     pub fn reveal(&self, id: &str) -> Result<String, VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(false)?;
         self.load()?
             .credentials
             .into_iter()
@@ -239,7 +254,7 @@ impl Vault {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(false)?;
         let mut contents = self.load()?;
         let before = contents.credentials.len();
         contents.credentials.retain(|saved| saved.id != id);
@@ -251,7 +266,7 @@ impl Vault {
 
     /// Forget every saved credential and discard the key.
     pub fn clear(&self) -> Result<usize, VaultError> {
-        let _guard = self.guard();
+        let _guard = self.guard(false)?;
         // Count what is readable, but still wipe a vault that cannot be read.
         let removed = self
             .load()
@@ -272,10 +287,33 @@ impl Vault {
         Ok(removed)
     }
 
-    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.lock
+    /// Serialise access to the vault directory: within this process through
+    /// the mutex, and across processes (the server and each agent's tool
+    /// process share one vault) through a lock file. A vault that has never
+    /// been written has no directory to lock unless `create_dir` is set.
+    fn guard(&self, create_dir: bool) -> Result<VaultGuard<'_>, VaultError> {
+        let process = self
+            .lock
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if create_dir {
+            create_private_dir(&self.dir)?;
+        }
+        let directory = if self.dir.is_dir() {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(self.dir.join(LOCK_FILE))?;
+            file.lock()?;
+            Some(file)
+        } else {
+            None
+        };
+        Ok(VaultGuard {
+            _directory: directory,
+            _process: process,
+        })
     }
 
     fn load(&self) -> Result<VaultContents, VaultError> {
@@ -342,10 +380,14 @@ impl Vault {
         };
 
         match (keychain.get(), file_key) {
-            (Ok(Some(bytes)), _) => Ok(Some((make_key(&bytes)?, KeyStorage::Keychain))),
+            (Ok(Some(bytes)), None) => Ok(Some((make_key(&bytes)?, KeyStorage::Keychain))),
             (Ok(None), None) => Ok(None),
-            (Ok(None), Some(bytes)) => {
-                // Move a key left in the fallback file into the keychain.
+            // A key file exists only when it has not been moved into the
+            // keychain yet: either it predates the keychain, or it was minted
+            // while the keychain was unreachable. Either way it is the key
+            // the current data was written with, so it replaces whatever the
+            // keychain holds.
+            (Ok(_), Some(bytes)) => {
                 let key = make_key(&bytes)?;
                 if keychain.set(&bytes).is_ok() {
                     fs::remove_file(self.dir.join(KEY_FILE))?;
@@ -437,6 +479,14 @@ fn write_private_file(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<(
 mod tests {
     use super::*;
 
+    /// Passwords for tests, generated per run so no credential is written in
+    /// the source. The same index returns the same value within a run.
+    fn secret(index: usize) -> String {
+        static SECRETS: std::sync::LazyLock<Vec<String>> =
+            std::sync::LazyLock::new(|| (0..5).map(|_| Uuid::new_v4().to_string()).collect());
+        SECRETS[index].clone()
+    }
+
     fn login(url: &str, username: &str, password: &str) -> ImportedLogin {
         ImportedLogin {
             name: "Site".into(),
@@ -461,7 +511,7 @@ mod tests {
         let report = vault
             .import(
                 ImportSource::Chrome,
-                vec![login("https://a.test", "ada", "top-secret-pw")],
+                vec![login("https://a.test", "ada", &secret(0))],
             )
             .unwrap();
         assert_eq!(report.imported, 1);
@@ -471,10 +521,8 @@ mod tests {
         let listed = reopened.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].username, "ada");
-        assert!(!serde_json::to_string(&listed)
-            .unwrap()
-            .contains("top-secret-pw"));
-        assert_eq!(reopened.reveal(&listed[0].id).unwrap(), "top-secret-pw");
+        assert!(!serde_json::to_string(&listed).unwrap().contains(&secret(0)));
+        assert_eq!(reopened.reveal(&listed[0].id).unwrap(), secret(0));
     }
 
     #[test]
@@ -484,11 +532,11 @@ mod tests {
         vault
             .import(
                 ImportSource::Bitwarden,
-                vec![login("https://bank.test", "ada-lovelace", "top-secret-pw")],
+                vec![login("https://bank.test", "ada-lovelace", &secret(0))],
             )
             .unwrap();
         let raw = fs::read(dir.path().join(DATA_FILE)).unwrap();
-        for needle in ["top-secret-pw", "ada-lovelace", "bank.test"] {
+        for needle in [secret(0).as_str(), "ada-lovelace", "bank.test"] {
             assert!(!raw
                 .windows(needle.len())
                 .any(|window| window == needle.as_bytes()));
@@ -503,8 +551,8 @@ mod tests {
             .import(
                 ImportSource::Chrome,
                 vec![
-                    login("https://a.test", "ada", "one"),
-                    login("https://b.test", "ada", "two"),
+                    login("https://a.test", "ada", &secret(1)),
+                    login("https://b.test", "ada", &secret(2)),
                 ],
             )
             .unwrap();
@@ -512,9 +560,9 @@ mod tests {
             .import(
                 ImportSource::Chrome,
                 vec![
-                    login("https://a.test", "ada", "one"),
-                    login("https://b.test", "ada", "changed"),
-                    login("https://c.test", "ada", "three"),
+                    login("https://a.test", "ada", &secret(1)),
+                    login("https://b.test", "ada", &secret(4)),
+                    login("https://c.test", "ada", &secret(3)),
                 ],
             )
             .unwrap();
@@ -537,8 +585,8 @@ mod tests {
             .import(
                 ImportSource::Chrome,
                 vec![
-                    login("https://a.test", "ada", "one"),
-                    login("https://b.test", "ada", "two"),
+                    login("https://a.test", "ada", &secret(1)),
+                    login("https://b.test", "ada", &secret(2)),
                 ],
             )
             .unwrap();
@@ -556,7 +604,7 @@ mod tests {
         vault
             .import(
                 ImportSource::Chrome,
-                vec![login("https://a.test", "ada", "one")],
+                vec![login("https://a.test", "ada", &secret(1))],
             )
             .unwrap();
 
@@ -569,7 +617,9 @@ mod tests {
 
         raw[last] ^= 0x01;
         fs::write(&data_path, &raw).unwrap();
-        fs::write(dir.path().join(KEY_FILE), [7u8; KEY_LEN]).unwrap();
+        let mut other_key = [0u8; KEY_LEN];
+        SystemRandom::new().fill(&mut other_key).unwrap();
+        fs::write(dir.path().join(KEY_FILE), other_key).unwrap();
         assert!(matches!(vault.list(), Err(VaultError::Decrypt)));
 
         fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
@@ -583,7 +633,7 @@ mod tests {
         vault
             .import(
                 ImportSource::Chrome,
-                vec![login("https://a.test", "ada", "one")],
+                vec![login("https://a.test", "ada", &secret(1))],
             )
             .unwrap();
         assert_eq!(vault.clear().unwrap(), 1);
@@ -636,7 +686,7 @@ mod tests {
     }
 
     fn one_login() -> Vec<ImportedLogin> {
-        vec![login("https://a.test", "ada", "one")]
+        vec![login("https://a.test", "ada", &secret(1))]
     }
 
     #[test]
@@ -709,6 +759,41 @@ mod tests {
     }
 
     #[test]
+    fn key_minted_during_a_keychain_outage_replaces_a_stale_keychain_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let vault = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        let stale = keychain.key.lock().unwrap().clone();
+
+        // Clearing while the keychain is down cannot delete its key, and the
+        // next import has to mint a new key in the fallback file.
+        keychain.set_broken(true);
+        vault.clear().unwrap();
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        assert!(dir.path().join(KEY_FILE).exists());
+
+        keychain.set_broken(false);
+        assert_eq!(vault.list().unwrap().len(), 1);
+        assert_eq!(vault.key_storage().unwrap(), Some(KeyStorage::Keychain));
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert_ne!(*keychain.key.lock().unwrap(), stale);
+    }
+
+    #[test]
+    fn two_handles_on_one_directory_see_each_others_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let first = Vault::with_keychain(dir.path(), Box::new(keychain.clone()));
+        let second = Vault::with_keychain(dir.path(), Box::new(keychain));
+        first.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(second.list().unwrap().len(), 1);
+        second.clear().unwrap();
+        second.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(first.list().unwrap().len(), 1);
+    }
+
+    #[test]
     fn clear_removes_the_keychain_key() {
         let dir = tempfile::tempdir().unwrap();
         let keychain = FakeKeychain::default();
@@ -729,7 +814,7 @@ mod tests {
         vault
             .import(
                 ImportSource::Chrome,
-                vec![login("https://a.test", "ada", "one")],
+                vec![login("https://a.test", "ada", &secret(1))],
             )
             .unwrap();
         let mode = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;

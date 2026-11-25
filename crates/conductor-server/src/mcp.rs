@@ -61,6 +61,12 @@ pub trait McpBackend: Send + Sync {
     async fn update_dispatcher_task(&self, args: DispatcherTaskUpdateInput) -> Result<Value>;
     async fn handoff_dispatcher_task(&self, args: DispatcherTaskHandoffInput) -> Result<Value>;
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value>;
+
+    /// Whether the calling session may act in the user's browser right now.
+    /// Reading is always allowed; this guards the tools that change a page.
+    async fn ensure_browser_action_allowed(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -320,6 +326,26 @@ impl McpBackend for AppStateMcpBackend {
         )
         .await?;
         Ok(result.response_payload())
+    }
+
+    async fn ensure_browser_action_allowed(&self) -> Result<()> {
+        let Some(session) = self.caller_session().await? else {
+            return Ok(());
+        };
+        if session.metadata.get("sessionKind").map(String::as_str) != Some(ACP_SESSION_KIND) {
+            return Ok(());
+        }
+        // The same gate as board mutations: a plan-only dispatcher turn may
+        // look at pages but not click, type or sign in.
+        let approved = session
+            .metadata
+            .get(ACP_APPROVAL_STATE_METADATA_KEY)
+            .map(String::as_str)
+            == Some(ACP_APPROVAL_GRANTED);
+        if approved && !session.status.is_terminal() {
+            return Ok(());
+        }
+        bail!("Browser actions are disabled for this plan-only turn; only reading pages is allowed")
     }
 
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value> {
@@ -585,6 +611,11 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
     let arguments = call.arguments.unwrap_or(Value::Object(Default::default()));
 
     if let Some((_, tool)) = BROWSER_TOOLS.iter().find(|(name, _)| *name == call.name) {
+        if tool.changes_page() {
+            if let Err(err) = backend.ensure_browser_action_allowed().await {
+                return Ok(tool_error(err.to_string()));
+            }
+        }
         return Ok(match crate::browser::tools::call(*tool, arguments).await {
             Ok(result) => tool_success(result),
             Err(err) => tool_error(err.to_string()),
@@ -1402,6 +1433,71 @@ mod tests {
         let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
             .expect("board should be readable");
         assert!(board_contents.contains("Dispatcher created task"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn plan_only_dispatcher_turns_cannot_act_in_the_browser() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-browser-plan-only").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+
+        backend
+            .ensure_browser_action_allowed()
+            .await
+            .expect("an executing dispatcher turn may act in the browser");
+
+        dispatcher.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            "approval_required".to_string(),
+        );
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        // Rejected before any connection to Chrome is attempted.
+        for tool in [
+            TOOL_BROWSER_CLICK,
+            TOOL_BROWSER_TYPE,
+            TOOL_BROWSER_FILL_LOGIN,
+        ] {
+            let result = handle_tool_call(
+                &backend,
+                json!({ "name": tool, "arguments": { "tab": "t", "ref": 1, "text": "x" } }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["isError"], true, "{tool}");
+            assert!(
+                result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("plan-only"),
+                "{tool}: {result}"
+            );
+        }
+        for (name, tool) in BROWSER_TOOLS {
+            let reads_only = [TOOL_BROWSER_TABS, TOOL_BROWSER_OPEN, TOOL_BROWSER_READ];
+            assert_eq!(tool.changes_page(), !reads_only.contains(&name), "{name}");
+        }
 
         std::env::remove_var(MCP_CALLER_SESSION_ENV);
         std::env::remove_var(MCP_CALLER_PROJECT_ENV);

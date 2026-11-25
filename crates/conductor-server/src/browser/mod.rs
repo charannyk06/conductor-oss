@@ -32,6 +32,10 @@ pub enum BrowserError {
     NotEnabled,
     #[error("could not connect to Chrome: {0}")]
     Connect(String),
+    #[error(
+        "Chrome did not accept the connection in time; approve the remote debugging prompt in Chrome and try again"
+    )]
+    ConnectTimeout,
     #[error("the connection to Chrome was lost")]
     Disconnected,
     #[error("Chrome did not answer {0} in time")]
@@ -266,10 +270,25 @@ impl Browser {
             _ => return Ok(FillOutcome::ChooseCredential { candidates }),
         };
 
+        // The page can navigate between the checks above and the fill, so the
+        // script itself refuses to write unless it is still on the vetted
+        // origin.
+        let vetted_origin = Url::parse(&page_url)
+            .map(|url| url.origin().ascii_serialization())
+            .map_err(|_| BrowserError::Invalid("the tab is not on a web page".to_string()))?;
         let password = vault.reveal(&chosen.id)?;
         let result = self
-            .evaluate(tab, scripts::FILL_LOGIN, json!([chosen.username, password]))
+            .evaluate(
+                tab,
+                scripts::FILL_LOGIN,
+                json!([chosen.username, password, vetted_origin]),
+            )
             .await?;
+        if result.get("moved").and_then(Value::as_bool) == Some(true) {
+            return Err(BrowserError::Invalid(
+                "the page changed site before the login was filled; read the tab again".to_string(),
+            ));
+        }
         let flag = |key: &str| result.get(key).and_then(Value::as_bool).unwrap_or(false);
         let (filled_username, filled_password) = (flag("username"), flag("password"));
         if !filled_username && !filled_password {
