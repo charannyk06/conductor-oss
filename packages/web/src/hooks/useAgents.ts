@@ -199,6 +199,11 @@ export function useAgents(bridgeId?: string | null, options?: UseAgentsOptions):
     getListeners(scopeKey).add(applySnapshot);
     applySnapshot();
     void refreshAgents(scopeKey, bridgeId);
+    // A fresh cached result skips the fetch above, and with it the re-check
+    // that fetch would have scheduled; start one for a signed-out agent.
+    if (getStore(scopeKey).agents.some((agent) => agent.auth?.state === "signed_out")) {
+      scheduleRetry(scopeKey, bridgeId, AGENTS_SIGN_IN_RECHECK_MS);
+    }
 
     const handleWindowFocus = () => {
       if (!isStoreFresh(scopeKey)) {

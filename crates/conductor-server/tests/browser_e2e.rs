@@ -5,7 +5,7 @@ use conductor_server::browser::endpoint::read_active_port;
 use conductor_server::browser::tools::{run, BrowserTool};
 use conductor_server::browser::Browser;
 use conductor_server::vault::import::{ImportSource, ImportedLogin};
-use conductor_server::vault::Vault;
+use conductor_server::vault::{KeyStore, Vault};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -291,6 +291,47 @@ const OTHER_SITE_PAGE: &str = r#"<!doctype html><html><head><title>Other site</t
   }
 </script></body></html>"#;
 
+/// A keychain for tests that can stop the next key read until told to go on.
+#[derive(Clone, Default)]
+struct GatedKeychain {
+    key: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    #[allow(clippy::type_complexity)]
+    gate: std::sync::Arc<
+        std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    >,
+}
+
+impl GatedKeychain {
+    /// Make the next key read report that it has started, then wait for the
+    /// returned sender before it continues.
+    fn arm(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *self.gate.lock().unwrap() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+}
+
+impl KeyStore for GatedKeychain {
+    fn get(&self) -> Result<Option<Vec<u8>>, String> {
+        if let Some((entered, release)) = self.gate.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = release.recv_timeout(Duration::from_secs(20));
+        }
+        Ok(self.key.lock().unwrap().clone())
+    }
+
+    fn set(&self, key: &[u8]) -> Result<(), String> {
+        *self.key.lock().unwrap() = Some(key.to_vec());
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<(), String> {
+        *self.key.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
 /// The tab leaves the vetted site after `fill_login` has checked its URL but
 /// before the fill script runs. Nothing may reach the page it lands on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -307,7 +348,11 @@ async fn login_is_not_filled_when_the_tab_moves_to_another_site_first() {
     let other_site = format!("http://127.0.0.1:{}", serve_page(OTHER_SITE_PAGE).await);
 
     let vault_dir = tempfile::tempdir().unwrap();
-    let vault = std::sync::Arc::new(Vault::new(vault_dir.path()));
+    let keychain = GatedKeychain::default();
+    let vault = std::sync::Arc::new(Vault::with_keychain(
+        vault_dir.path(),
+        Box::new(keychain.clone()),
+    ));
     vault
         .import(
             ImportSource::Chrome,
@@ -317,27 +362,22 @@ async fn login_is_not_filled_when_the_tab_moves_to_another_site_first() {
 
     let tab = browser.open(&format!("{site}/login"), None).await.unwrap();
 
-    // Hold the vault's lock so the fill stalls right after it has vetted the
-    // tab's URL, which is where a real navigation could slip in.
-    let lock = std::fs::OpenOptions::new()
-        .write(true)
-        .open(vault_dir.path().join(".lock"))
-        .unwrap();
-    lock.lock().unwrap();
-
+    // The fill vets the tab's URL and only then opens the vault, which reads
+    // the key. Stopping it at that read pins it exactly where a real
+    // navigation could slip in, with no timing involved.
+    let (entered, release) = keychain.arm();
     let fill = tokio::spawn({
         let (browser, vault, tab_id) = (browser.clone(), vault.clone(), tab.id.clone());
         async move { browser.fill_login(&tab_id, &vault, None).await }
     });
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    assert!(
-        !fill.is_finished(),
-        "the fill should be waiting on the vault"
-    );
+    tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(20)))
+        .await
+        .unwrap()
+        .expect("the fill should reach the vault after vetting the URL");
 
     let moved = browser.open(&other_site, Some(&tab.id)).await.unwrap();
     assert!(moved.url.starts_with(&other_site));
-    drop(lock);
+    release.send(()).unwrap();
 
     let error = fill
         .await
