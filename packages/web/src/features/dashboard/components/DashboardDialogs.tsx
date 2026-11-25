@@ -1819,7 +1819,11 @@ export function NewWorkspaceDialog({
                 >
                   Back
                 </button>
+                {/* Keyed so React mounts a new button for the review step. Reusing
+                    this node would turn it into the submit button mid-click and
+                    create the workspace without showing the review. */}
                 <button
+                  key="continue-to-review"
                   type="button"
                   onClick={handleContinueToReview}
                   disabled={!canSubmit || creating}
@@ -1839,6 +1843,7 @@ export function NewWorkspaceDialog({
                   Back
                 </button>
                 <button
+                  key="create-workspace"
                   type="submit"
                   disabled={!canSubmit || creating}
                   className="inline-flex h-10 items-center justify-center rounded-[8px] bg-[var(--vk-bg-active)] px-4 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"

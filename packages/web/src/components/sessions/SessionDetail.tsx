@@ -418,6 +418,7 @@ export function SessionDetail({
                 projectId={session.projectId}
                 bridgeId={session.bridgeId ?? null}
                 sessionState={status}
+                failureReason={session.summary}
                 runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
                 pendingInsert={pendingTerminalInsert}
                 immersiveMobileMode={immersiveTerminalActive}

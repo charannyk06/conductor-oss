@@ -187,6 +187,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     projectId,
     bridgeId,
     sessionState,
+    failureReason,
     runtimeMode,
     pendingInsert,
     immersiveMobileMode = false,
@@ -1066,8 +1067,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
       ? "Session is waiting for input"
       : "Live terminal is not active";
 
+  const trimmedFailureReason = normalizedSessionStatus === "errored" ? failureReason?.trim() : "";
   const emptyStateDescription = connectionError
-    ?? (expectsLiveTerminal
+    ?? (trimmedFailureReason
+      ? `The session failed: ${trimmedFailureReason}`
+      : expectsLiveTerminal
       ? "Reconnecting to the existing terminal."
       : ttydBacked
         ? "This terminal is no longer attached. It only closes after an explicit kill or archive."
@@ -1390,6 +1394,7 @@ function sessionTerminalPropsEqual(
 
   return (
     previous.sessionState === next.sessionState
+    && previous.failureReason === next.failureReason
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
   );
