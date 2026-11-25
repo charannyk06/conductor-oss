@@ -17,6 +17,15 @@ pub(crate) struct PreparedWorkspace {
     pub root_path: PathBuf,
     pub working_directory: PathBuf,
     pub uses_worktree: bool,
+    /// The branch this preparation created, with the commit it was created
+    /// at. `None` when the branch already existed or no worktree was made.
+    pub created_branch: Option<CreatedBranch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatedBranch {
+    pub name: String,
+    pub commit: String,
 }
 
 /// Validate a git ref name to prevent argument injection.
@@ -48,6 +57,7 @@ impl AppState {
             repo_path: repo_path.clone(),
             root_path: repo_path,
             uses_worktree: false,
+            created_branch: None,
         })
     }
 
@@ -71,6 +81,7 @@ impl AppState {
                 repo_path: repo_path.clone(),
                 root_path: repo_path,
                 uses_worktree: false,
+                created_branch: None,
             });
         }
 
@@ -84,6 +95,7 @@ impl AppState {
                 repo_path: repo_path.clone(),
                 root_path: worktree_path,
                 uses_worktree: true,
+                created_branch: None,
             });
         }
         if let Some(parent) = worktree_path.parent() {
@@ -156,6 +168,17 @@ impl AppState {
             ));
         }
 
+        let created_branch = if branch_exists {
+            None
+        } else {
+            git_branch_commit(&repo_path, session_branch)
+                .await
+                .map(|commit| CreatedBranch {
+                    name: session_branch.to_string(),
+                    commit,
+                })
+        };
+
         Ok(PreparedWorkspace {
             working_directory: resolve_default_working_directory(
                 &worktree_path,
@@ -164,6 +187,7 @@ impl AppState {
             repo_path,
             root_path: worktree_path,
             uses_worktree: true,
+            created_branch,
         })
     }
 
@@ -364,14 +388,94 @@ impl AppState {
         &self,
         workspace: &PreparedWorkspace,
     ) -> Result<()> {
-        if !workspace.uses_worktree {
-            return Ok(());
-        }
-
-        remove_worktree(&workspace.repo_path, &workspace.root_path)
-            .await
-            .or_else(|_| remove_directory(&workspace.root_path))
+        remove_unpersisted_workspace(workspace).await
     }
+}
+
+/// Undo what `prepare_workspace` set up for a launch that failed: the
+/// worktree, and the branch if this launch created it.
+async fn remove_unpersisted_workspace(workspace: &PreparedWorkspace) -> Result<()> {
+    if !workspace.uses_worktree {
+        return Ok(());
+    }
+
+    let removed = remove_worktree(&workspace.repo_path, &workspace.root_path)
+        .await
+        .or_else(|_| remove_directory(&workspace.root_path));
+    if let Some(branch) = &workspace.created_branch {
+        delete_branch_if_unchanged(&workspace.repo_path, branch).await;
+    }
+    removed
+}
+
+async fn git_branch_commit(repo_path: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !commit.is_empty()).then_some(commit)
+}
+
+/// Delete a branch a failed launch created, but only while it still points at
+/// the commit it was created at. `update-ref -d` with the expected value
+/// refuses if anything was committed to it in the meantime, and a branch that
+/// is still checked out in a worktree is left alone.
+async fn delete_branch_if_unchanged(repo_path: &Path, branch: &CreatedBranch) {
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "prune",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    let checked_out = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "list",
+            "--porcelain",
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .map(|output| {
+            let wanted = format!("branch refs/heads/{}", branch.name);
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == wanted)
+        })
+        .unwrap_or(true);
+    if checked_out {
+        return;
+    }
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "update-ref",
+            "-d",
+            &format!("refs/heads/{}", branch.name),
+            &branch.commit,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 }
 
 async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<String> {
@@ -1049,6 +1153,114 @@ fn remove_directory(workspace_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::select_remote_tracking_ref;
+    use super::{
+        git_branch_commit, git_ref_exists, remove_unpersisted_workspace, CreatedBranch,
+        PreparedWorkspace,
+    };
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    /// A repository with one commit on `main`, plus a worktree on `branch`
+    /// created the way a session launch creates it.
+    async fn repo_with_session_worktree(
+        root: &Path,
+        branch: &str,
+        branch_preexists: bool,
+    ) -> PreparedWorkspace {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "demo\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        let worktree = root.join("worktrees").join("session");
+        let worktree_arg = worktree.to_string_lossy().to_string();
+        if branch_preexists {
+            git(&repo, &["branch", branch, "main"]);
+            git(&repo, &["worktree", "add", "-q", &worktree_arg, branch]);
+        } else {
+            git(
+                &repo,
+                &["worktree", "add", "-q", "-b", branch, &worktree_arg, "main"],
+            );
+        }
+        let created_branch = if branch_preexists {
+            None
+        } else {
+            Some(CreatedBranch {
+                name: branch.to_string(),
+                commit: git_branch_commit(&repo, branch).await.unwrap(),
+            })
+        };
+        PreparedWorkspace {
+            working_directory: worktree.clone(),
+            repo_path: repo,
+            root_path: worktree,
+            uses_worktree: true,
+            created_branch,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_launch_cleanup_removes_the_branch_it_created() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = repo_with_session_worktree(root.path(), "session/0daa44c6", false).await;
+        assert!(git_ref_exists(&workspace.repo_path, "refs/heads/session/0daa44c6").await);
+
+        remove_unpersisted_workspace(&workspace).await.unwrap();
+
+        assert!(!workspace.root_path.exists());
+        assert!(!git_ref_exists(&workspace.repo_path, "refs/heads/session/0daa44c6").await);
+        assert!(git_ref_exists(&workspace.repo_path, "refs/heads/main").await);
+    }
+
+    #[tokio::test]
+    async fn failed_launch_cleanup_keeps_a_branch_that_already_existed() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = repo_with_session_worktree(root.path(), "feature/mine", true).await;
+
+        remove_unpersisted_workspace(&workspace).await.unwrap();
+
+        assert!(!workspace.root_path.exists());
+        assert!(git_ref_exists(&workspace.repo_path, "refs/heads/feature/mine").await);
+    }
+
+    #[tokio::test]
+    async fn failed_launch_cleanup_keeps_a_created_branch_that_gained_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = repo_with_session_worktree(root.path(), "session/withwork", false).await;
+        std::fs::write(workspace.root_path.join("NOTES.txt"), "work\n").unwrap();
+        git(&workspace.root_path, &["add", "-A"]);
+        git(&workspace.root_path, &["commit", "-q", "-m", "work"]);
+
+        remove_unpersisted_workspace(&workspace).await.unwrap();
+
+        assert!(!workspace.root_path.exists());
+        assert!(git_ref_exists(&workspace.repo_path, "refs/heads/session/withwork").await);
+    }
 
     #[test]
     fn select_remote_tracking_ref_prefers_origin() {

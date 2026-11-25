@@ -38,7 +38,7 @@ async fn migrations_are_idempotent() {
         .fetch_one(pool)
         .await
         .unwrap();
-    assert_eq!(applied, 5);
+    assert_eq!(applied, 6);
 
     let sessions_exists: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
