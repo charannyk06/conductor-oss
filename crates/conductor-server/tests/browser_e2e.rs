@@ -69,7 +69,7 @@ impl Drop for ChromeProcess {
     }
 }
 
-async fn serve_login_page() -> u16 {
+async fn serve_page(html: &'static str) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -79,8 +79,8 @@ async fn serve_login_page() -> u16 {
                 let _ = socket.read(&mut buffer).await;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    LOGIN_PAGE.len(),
-                    LOGIN_PAGE
+                    html.len(),
+                    html
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
             });
@@ -109,14 +109,10 @@ fn element_ref(snapshot: &Value, label: &str) -> u64 {
         .unwrap()
 }
 
-#[tokio::test]
-async fn signs_in_with_a_saved_login_without_exposing_the_password() {
-    let Some(chrome) = find_chrome() else {
-        eprintln!("skipping: no Chromium binary found");
-        return;
-    };
+/// Start a headless Chromium on a throwaway profile and connect to it.
+async fn launch_browser(chrome: PathBuf) -> (ChromeProcess, tempfile::TempDir, Browser) {
     let profile = tempfile::tempdir().unwrap();
-    let _chrome = ChromeProcess(
+    let process = ChromeProcess(
         Command::new(chrome)
             .args([
                 "--headless=new",
@@ -144,8 +140,18 @@ async fn signs_in_with_a_saved_login_without_exposing_the_password() {
     let browser = Browser::connect(&ws_url.expect("Chrome did not start"))
         .await
         .unwrap();
+    (process, profile, browser)
+}
 
-    let port = serve_login_page().await;
+#[tokio::test]
+async fn signs_in_with_a_saved_login_without_exposing_the_password() {
+    let Some(chrome) = find_chrome() else {
+        eprintln!("skipping: no Chromium binary found");
+        return;
+    };
+    let (_chrome, _profile, browser) = launch_browser(chrome).await;
+
+    let port = serve_page(LOGIN_PAGE).await;
     let site = format!("http://127.0.0.1:{port}");
     let vault_dir = tempfile::tempdir().unwrap();
     let vault = Vault::new(vault_dir.path());
@@ -261,4 +267,88 @@ async fn signs_in_with_a_saved_login_without_exposing_the_password() {
     assert!(call(BrowserTool::Read, json!({ "tab": "no-such-tab" }))
         .await
         .is_err());
+}
+
+/// A second site with its own sign-in form. It reports anything written into
+/// its fields and anything passed through a replaced `apply` or `call`.
+const OTHER_SITE_PAGE: &str = r#"<!doctype html><html><head><title>Other site</title></head><body>
+<h1>Other site sign-in</h1>
+<form><input id="user" name="username" type="email"><input id="pass" name="password" type="password"></form>
+<p id="out">untouched</p>
+<script>
+  const out = document.getElementById("out");
+  for (const id of ["user", "pass"]) {
+    document.getElementById(id).addEventListener("input", (e) => { out.textContent = "RECEIVED " + e.target.value; });
+  }
+  for (const name of ["apply", "call"]) {
+    const original = Function.prototype[name];
+    Function.prototype[name] = function (...args) {
+      let seen = "";
+      try { seen = JSON.stringify(args); } catch (_) {}
+      if (seen && (seen.includes("s3cret") || seen.includes("ada@test.dev"))) out.textContent = "INTERCEPTED";
+      return Reflect.apply(original, this, args);
+    };
+  }
+</script></body></html>"#;
+
+/// The tab leaves the vetted site after `fill_login` has checked its URL but
+/// before the fill script runs. Nothing may reach the page it lands on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_is_not_filled_when_the_tab_moves_to_another_site_first() {
+    let Some(chrome) = find_chrome() else {
+        eprintln!("skipping: no Chromium binary found");
+        return;
+    };
+    let (_chrome, _profile, browser) = launch_browser(chrome).await;
+    let browser = std::sync::Arc::new(browser);
+
+    let site = format!("http://127.0.0.1:{}", serve_page(LOGIN_PAGE).await);
+    // A different port is a different origin.
+    let other_site = format!("http://127.0.0.1:{}", serve_page(OTHER_SITE_PAGE).await);
+
+    let vault_dir = tempfile::tempdir().unwrap();
+    let vault = std::sync::Arc::new(Vault::new(vault_dir.path()));
+    vault
+        .import(
+            ImportSource::Chrome,
+            vec![login(site.clone(), "ada@test.dev")],
+        )
+        .unwrap();
+
+    let tab = browser.open(&format!("{site}/login"), None).await.unwrap();
+
+    // Hold the vault's lock so the fill stalls right after it has vetted the
+    // tab's URL, which is where a real navigation could slip in.
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(vault_dir.path().join(".lock"))
+        .unwrap();
+    lock.lock().unwrap();
+
+    let fill = tokio::spawn({
+        let (browser, vault, tab_id) = (browser.clone(), vault.clone(), tab.id.clone());
+        async move { browser.fill_login(&tab_id, &vault, None).await }
+    });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !fill.is_finished(),
+        "the fill should be waiting on the vault"
+    );
+
+    let moved = browser.open(&other_site, Some(&tab.id)).await.unwrap();
+    assert!(moved.url.starts_with(&other_site));
+    drop(lock);
+
+    let error = fill
+        .await
+        .unwrap()
+        .expect_err("the fill must refuse once the tab is on another site");
+    assert!(error.to_string().contains("changed site"), "{error}");
+
+    let page = browser.read(&tab.id).await.unwrap();
+    let seen = serde_json::to_string(&page).unwrap();
+    assert!(page.text.contains("untouched"), "{seen}");
+    assert!(!seen.contains("RECEIVED"));
+    assert!(!seen.contains("INTERCEPTED"));
+    assert!(!seen.contains(PASSWORD));
 }

@@ -1516,6 +1516,26 @@ mod tests {
                 "{tool}: {result}"
             );
         }
+        // The next turn executes again: the same backend allows actions as
+        // soon as the snapshot says so.
+        dispatcher.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_GRANTED.to_string(),
+        );
+        fs::write(
+            state.dispatcher_snapshot_path(&dispatcher.id),
+            serde_json::to_string(&dispatcher).unwrap(),
+        )
+        .unwrap();
+        backend
+            .ensure_browser_action_allowed()
+            .await
+            .expect("an executing turn after a plan-only turn may act again");
+
+        // A snapshot that cannot be read fails closed.
+        fs::write(state.dispatcher_snapshot_path(&dispatcher.id), "not json").unwrap();
+        assert!(backend.ensure_browser_action_allowed().await.is_err());
+
         for (name, tool) in BROWSER_TOOLS {
             let reads_only = [TOOL_BROWSER_TABS, TOOL_BROWSER_OPEN, TOOL_BROWSER_READ];
             assert_eq!(tool.changes_page(), !reads_only.contains(&name), "{name}");
