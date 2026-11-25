@@ -335,14 +335,24 @@ impl McpBackend for AppStateMcpBackend {
         if session.metadata.get("sessionKind").map(String::as_str) != Some(ACP_SESSION_KIND) {
             return Ok(());
         }
-        // The same gate as board mutations: a plan-only dispatcher turn may
-        // look at pages but not click, type or sign in.
-        let approved = session
+        // A plan-only dispatcher turn may look at pages but not click, type or
+        // sign in. This tool process can outlive a turn, so its in-memory
+        // copy of the thread may be from an earlier one: read the snapshot
+        // the server writes before it hands each turn to the agent, and
+        // refuse if that cannot be read.
+        let snapshot = tokio::fs::read_to_string(self.state.dispatcher_snapshot_path(&session.id))
+            .await
+            .ok()
+            .and_then(|content| serde_json::from_str::<SessionRecord>(&content).ok());
+        let Some(current) = snapshot else {
+            bail!("Browser actions are unavailable: this dispatcher turn's approval state could not be read");
+        };
+        let approved = current
             .metadata
             .get(ACP_APPROVAL_STATE_METADATA_KEY)
             .map(String::as_str)
             == Some(ACP_APPROVAL_GRANTED);
-        if approved && !session.status.is_terminal() {
+        if approved && !current.status.is_terminal() {
             return Ok(());
         }
         bail!("Browser actions are disabled for this plan-only turn; only reading pages is allowed")
@@ -1464,14 +1474,26 @@ mod tests {
             .await
             .expect("an executing dispatcher turn may act in the browser");
 
+        // The server starts a plan-only turn: it writes the new state to the
+        // snapshot. This backend's in-memory thread still says approved, as
+        // it would in a tool process left running from the previous turn.
         dispatcher.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             "approval_required".to_string(),
         );
-        state
-            .replace_dispatcher_thread(dispatcher.clone())
-            .await
-            .expect("dispatcher thread should persist");
+        fs::write(
+            state.dispatcher_snapshot_path(&dispatcher.id),
+            serde_json::to_string(&dispatcher).unwrap(),
+        )
+        .unwrap();
+        let in_memory = state.get_dispatcher_thread(&dispatcher.id).await.unwrap();
+        assert_eq!(
+            in_memory
+                .metadata
+                .get(ACP_APPROVAL_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some(ACP_APPROVAL_GRANTED)
+        );
 
         // Rejected before any connection to Chrome is attempted.
         for tool in [

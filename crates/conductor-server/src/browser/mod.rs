@@ -344,7 +344,21 @@ impl Browser {
         arguments: Value,
     ) -> Result<Value, BrowserError> {
         let session = self.session(tab).await?;
-        let expression = format!("({function}).apply(null, {arguments})");
+        // A direct call with literal arguments. Going through `apply`, `call`
+        // or a spread would run a method the page can replace, letting it see
+        // the arguments (a password, for the login fill) before the script's
+        // own checks run.
+        let literals = arguments
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let expression = format!("({function})({literals})");
         let result = self
             .client
             .call(

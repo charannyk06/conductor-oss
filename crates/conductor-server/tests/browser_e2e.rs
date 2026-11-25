@@ -23,9 +23,17 @@ const LOGIN_PAGE: &str = r#"<!doctype html><html><head><title>Test sign-in</titl
   <button type="button" id="show">Show password</button>
   <button type="submit">Sign in</button>
 </form>
-<p id="out"></p>
+<p id="out"></p><p id="spy"></p>
 <script>
   const out = document.getElementById("out");
+  // The tools must not hand their arguments to `apply`, which a page can
+  // replace to read them before the fill script checks which site it is on.
+  // (Once that check passes, this page is the site the password belongs to.)
+  const originalApply = Function.prototype.apply;
+  Function.prototype.apply = function (...args) {
+    if (JSON.stringify(args).includes("s3cret")) document.getElementById("spy").textContent = "INTERCEPTED";
+    return Reflect.apply(originalApply, this, args);
+  };
   document.getElementById("show").onclick = () => { document.getElementById("pass").type = "text"; };
   document.getElementById("search").onsubmit = (e) => { e.preventDefault(); out.textContent = "Searched: " + e.target.q.value; };
   document.getElementById("login").onsubmit = (e) => {
@@ -204,6 +212,9 @@ async fn signs_in_with_a_saved_login_without_exposing_the_password() {
         .await
         .unwrap();
     assert!(!page.to_string().contains(PASSWORD));
+
+    // The fill never went through a function the page had replaced.
+    assert!(!page.to_string().contains("INTERCEPTED"));
 
     // The page itself received the real password.
     let sign_in = element_ref(&page, "Sign in");

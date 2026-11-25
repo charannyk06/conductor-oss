@@ -144,7 +144,7 @@ impl KeyStore for OsKeychain {
 /// Held for the duration of one vault operation.
 struct VaultGuard<'a> {
     // Dropped first, releasing the cross-process lock before the mutex.
-    _directory: Option<fs::File>,
+    _directory: fs::File,
     _process: std::sync::MutexGuard<'a, ()>,
 }
 
@@ -191,12 +191,12 @@ impl Vault {
 
     /// Where the key currently lives, or `None` before anything is saved.
     pub fn key_storage(&self) -> Result<Option<KeyStorage>, VaultError> {
-        let _guard = self.guard(false)?;
+        let _guard = self.guard()?;
         Ok(self.read_key()?.map(|(_, storage)| storage))
     }
 
     pub fn list(&self) -> Result<Vec<CredentialSummary>, VaultError> {
-        let _guard = self.guard(false)?;
+        let _guard = self.guard()?;
         Ok(self.load()?.credentials.iter().map(summary).collect())
     }
 
@@ -206,7 +206,7 @@ impl Vault {
         source: ImportSource,
         logins: Vec<ImportedLogin>,
     ) -> Result<ImportReport, VaultError> {
-        let _guard = self.guard(true)?;
+        let _guard = self.guard()?;
         let mut contents = self.load()?;
         let mut report = ImportReport::default();
 
@@ -244,7 +244,7 @@ impl Vault {
 
     /// Return one saved password, for filling a login form.
     pub fn reveal(&self, id: &str) -> Result<String, VaultError> {
-        let _guard = self.guard(false)?;
+        let _guard = self.guard()?;
         self.load()?
             .credentials
             .into_iter()
@@ -254,7 +254,7 @@ impl Vault {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
-        let _guard = self.guard(false)?;
+        let _guard = self.guard()?;
         let mut contents = self.load()?;
         let before = contents.credentials.len();
         contents.credentials.retain(|saved| saved.id != id);
@@ -266,7 +266,7 @@ impl Vault {
 
     /// Forget every saved credential and discard the key.
     pub fn clear(&self) -> Result<usize, VaultError> {
-        let _guard = self.guard(false)?;
+        let _guard = self.guard()?;
         // Count what is readable, but still wipe a vault that cannot be read.
         let removed = self
             .load()
@@ -287,29 +287,22 @@ impl Vault {
         Ok(removed)
     }
 
-    /// Serialise access to the vault directory: within this process through
-    /// the mutex, and across processes (the server and each agent's tool
-    /// process share one vault) through a lock file. A vault that has never
-    /// been written has no directory to lock unless `create_dir` is set.
-    fn guard(&self, create_dir: bool) -> Result<VaultGuard<'_>, VaultError> {
+    /// Serialise access to the vault: within this process through the mutex,
+    /// and across processes (the server and each agent's tool process share
+    /// one vault) through a lock file. The directory is created if needed so
+    /// that even the first operation on a new vault is serialised.
+    fn guard(&self) -> Result<VaultGuard<'_>, VaultError> {
         let process = self
             .lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if create_dir {
-            create_private_dir(&self.dir)?;
-        }
-        let directory = if self.dir.is_dir() {
-            let file = fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(self.dir.join(LOCK_FILE))?;
-            file.lock()?;
-            Some(file)
-        } else {
-            None
-        };
+        create_private_dir(&self.dir)?;
+        let directory = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(LOCK_FILE))?;
+        directory.lock()?;
         Ok(VaultGuard {
             _directory: directory,
             _process: process,
@@ -497,11 +490,44 @@ mod tests {
     }
 
     #[test]
-    fn empty_vault_lists_nothing_and_creates_no_files() {
+    fn empty_vault_lists_nothing_and_writes_no_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::new(dir.path().join("vault"));
         assert!(vault.list().unwrap().is_empty());
-        assert!(!dir.path().join("vault").exists());
+        // Only the lock file exists; no key or data is created by reading.
+        assert!(!dir.path().join("vault").join(KEY_FILE).exists());
+        assert!(!dir.path().join("vault").join(DATA_FILE).exists());
+    }
+
+    #[test]
+    fn concurrent_clear_and_import_never_strand_the_data() {
+        // Separate handles each open the lock file themselves, so they contend
+        // on the file lock exactly as separate processes do.
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::default();
+        let path = dir.path().join("vault");
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                let vault = Vault::with_keychain(&path, Box::new(keychain.clone()));
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        if worker % 2 == 0 {
+                            vault.clear().unwrap();
+                        } else {
+                            vault.import(ImportSource::Chrome, one_login()).unwrap();
+                        }
+                        // Whatever is on disk must be readable with the stored key.
+                        vault.list().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let vault = Vault::with_keychain(&path, Box::new(keychain));
+        vault.import(ImportSource::Chrome, one_login()).unwrap();
+        assert_eq!(vault.list().unwrap().len(), 1);
     }
 
     #[test]
